@@ -14,7 +14,7 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Database Connection (Render-friendly)
-const mongoURI = process.env.MONGODB_URI;
+const mongoURI = process.env.MONGO_URI;
 
 if (!mongoURI) {
   console.error("❌ MONGO_URI is missing in environment variables!");
