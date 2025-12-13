@@ -13,11 +13,23 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Database Connection
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/humrah')
+// Database Connection (Render-friendly)
+const mongoURI = process.env.MONGO_URI;
 
+if (!mongoURI) {
+  console.error("❌ MONGO_URI is missing in environment variables!");
+  process.exit(1);
+}
+
+mongoose.connect(mongoURI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true
+})
 .then(() => console.log('✅ MongoDB Connected'))
-.catch(err => console.error('❌ MongoDB Connection Error:', err));
+.catch(err => {
+  console.error('❌ MongoDB Connection Error:', err);
+  process.exit(1);
+});
 
 // Import Routes
 const authRoutes = require('./routes/auth');
