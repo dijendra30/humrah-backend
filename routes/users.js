@@ -49,23 +49,13 @@ router.put('/me', auth, async (req, res) => {
   }
 });
 
-// ✅ NEW: Update only questionnaire
-router.put('/me/questionnaire', auth, async (req, res) => {
+// ✅ NEW: Delete account endpoint
+// @route   DELETE /api/users/me
+// @desc    Delete user account permanently
+// @access  Private
+router.delete('/me', auth, async (req, res) => {
   try {
-    const { questionnaire } = req.body;
-
-    if (!questionnaire) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Questionnaire data is required' 
-      });
-    }
-
-    const user = await User.findByIdAndUpdate(
-      req.userId,
-      { questionnaire },
-      { new: true, runValidators: true }
-    ).select('-password');
+    const user = await User.findByIdAndDelete(req.userId);
 
     if (!user) {
       return res.status(404).json({ 
@@ -74,17 +64,18 @@ router.put('/me/questionnaire', auth, async (req, res) => {
       });
     }
 
+    console.log(`✅ User deleted: ${user.email} (${user._id})`);
+
     res.json({
       success: true,
-      message: 'Questionnaire saved successfully',
-      user
+      message: 'Account deleted successfully'
     });
 
   } catch (error) {
-    console.error('Save questionnaire error:', error);
+    console.error('Delete account error:', error);
     res.status(500).json({ 
       success: false, 
-      message: 'Server error' 
+      message: 'Server error while deleting account' 
     });
   }
 });
