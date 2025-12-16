@@ -13,40 +13,18 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Database Connection with better error handling
+// Database Connection
 const connectDB = async () => {
   try {
-    const mongoURI = process.env.MONGODB_URI || 'mongodb://localhost:27017/humrah';
-    
-    await mongoose.connect(mongoURI, {
-      serverSelectionTimeoutMS: 30000, // Increase timeout to 30 seconds
-      socketTimeoutMS: 45000,
-    });
-    
-    console.log('✅ MongoDB Connected Successfully');
-    console.log('📊 Database:', mongoose.connection.name);
+    await mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/humrah');
+    console.log('✅ MongoDB Connected');
   } catch (err) {
-    console.error('❌ MongoDB Connection Error:', err.message);
-    console.error('Full error:', err);
-    process.exit(1); // Exit process with failure
+    console.error('❌ MongoDB Connection Error:', err);
+    process.exit(1);
   }
 };
 
-// Connect to database
 connectDB();
-
-// MongoDB connection event listeners
-mongoose.connection.on('connected', () => {
-  console.log('🔗 Mongoose connected to MongoDB');
-});
-
-mongoose.connection.on('error', (err) => {
-  console.error('❌ Mongoose connection error:', err);
-});
-
-mongoose.connection.on('disconnected', () => {
-  console.log('🔌 Mongoose disconnected from MongoDB');
-});
 
 // Import Routes
 const authRoutes = require('./routes/auth');
@@ -66,34 +44,12 @@ app.use('/api/messages', messageRoutes);
 
 // Health Check
 app.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'OK', 
-    message: 'Humrah API is running',
-    database: mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected',
-    timestamp: new Date().toISOString()
-  });
-});
-
-// Root route
-app.get('/', (req, res) => {
-  res.json({ 
-    message: 'Welcome to Humrah API',
-    version: '1.0.0',
-    endpoints: {
-      health: '/api/health',
-      auth: '/api/auth',
-      users: '/api/users',
-      events: '/api/events',
-      companions: '/api/companions',
-      bookings: '/api/bookings',
-      messages: '/api/messages'
-    }
-  });
+  res.json({ status: 'OK', message: 'Humrah API is running' });
 });
 
 // Error Handler
 app.use((err, req, res, next) => {
-  console.error('Error:', err.stack);
+  console.error(err.stack);
   res.status(500).json({ 
     success: false, 
     message: 'Something went wrong!',
@@ -101,26 +57,47 @@ app.use((err, req, res, next) => {
   });
 });
 
-// Handle 404
-app.use((req, res) => {
-  res.status(404).json({
-    success: false,
-    message: 'Route not found'
-  });
-});
-
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => {
+const server = app.listen(PORT, () => {
   console.log(`🚀 Humrah Server running on port ${PORT}`);
-  console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`📡 Server URL: http://localhost:${PORT}`);
 });
 
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('SIGTERM signal received: closing HTTP server');
-  mongoose.connection.close(() => {
-    console.log('MongoDB connection closed');
-    process.exit(0);
+// Graceful shutdown handlers - FIXED for Mongoose 7.x+
+const gracefulShutdown = async (signal) => {
+  console.log(`\n${signal} signal received: closing HTTP server`);
+  
+  server.close(async () => {
+    console.log('HTTP server closed');
+    
+    try {
+      // Mongoose 7.x doesn't accept callbacks - use await instead
+      await mongoose.connection.close();
+      console.log('MongoDB connection closed');
+      process.exit(0);
+    } catch (err) {
+      console.error('Error closing MongoDB connection:', err);
+      process.exit(1);
+    }
   });
+  
+  // Force close after 10 seconds
+  setTimeout(() => {
+    console.error('Could not close connections in time, forcefully shutting down');
+    process.exit(1);
+  }, 10000);
+};
+
+// Handle shutdown signals
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+  gracefulShutdown('UNCAUGHT_EXCEPTION');
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  gracefulShutdown('UNHANDLED_REJECTION');
 });
