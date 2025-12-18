@@ -1,31 +1,29 @@
-// routes/auth.js - Authentication Routes with GMAIL OTP (PRODUCTION READY FOR RENDER.COM)
+// routes/auth.js - Authentication with SendGrid (WORKS ON RENDER.COM)
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
-const nodemailer = require('nodemailer');
+const sgMail = require('@sendgrid/mail');
 const { body, validationResult } = require('express-validator');
 const User = require('../models/User');
 const auth = require('../middleware/auth');
 
-// ✅ GMAIL CONFIGURATION FOR RENDER.COM
-// Gmail works perfectly on ALL hosting platforms including Render.com
-const transporter = nodemailer.createTransport({
-  service: 'gmail', // Use Gmail service (handles all SMTP settings automatically)
-  auth: {
-    user: process.env.EMAIL_USER, // Your Gmail address
-    pass: process.env.EMAIL_PASSWORD // Gmail App Password (NOT your regular password)
-  }
-});
+// ✅ SENDGRID CONFIGURATION (Works on Render.com - no SMTP blocking)
+// SendGrid uses HTTP API instead of SMTP, so it ALWAYS works
+const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
+const FROM_EMAIL = process.env.FROM_EMAIL || 'noreply@humrah.app';
 
-// Verify transporter on startup
-transporter.verify(function(error, success) {
-  if (error) {
-    console.log('❌ Email transporter error:', error);
-    console.log('💡 SOLUTION: Get Gmail App Password from https://myaccount.google.com/apppasswords');
-  } else {
-    console.log('✅ Gmail is ready to send emails');
-  }
-});
+let emailServiceReady = false;
+
+if (SENDGRID_API_KEY) {
+  sgMail.setApiKey(SENDGRID_API_KEY);
+  emailServiceReady = true;
+  console.log('✅ SendGrid email service is ready');
+  console.log(`📧 Sending emails from: ${FROM_EMAIL}`);
+} else {
+  console.log('❌ SendGrid API key not found in environment variables');
+  console.log('💡 Get free SendGrid API key from: https://signup.sendgrid.com/');
+  console.log('💡 Add SENDGRID_API_KEY to your .env file');
+}
 
 // In-memory OTP storage
 const otpStore = new Map();
@@ -42,6 +40,14 @@ router.post('/send-otp', [
   body('email').isEmail().normalizeEmail().withMessage('Valid email is required')
 ], async (req, res) => {
   try {
+    // Check if email service is ready
+    if (!emailServiceReady) {
+      return res.status(503).json({
+        success: false,
+        message: 'Email service not configured. Please contact administrator.'
+      });
+    }
+
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       return res.status(400).json({ 
@@ -67,9 +73,10 @@ router.post('/send-otp', [
       expiresAt: Date.now() + OTP_EXPIRY
     });
 
-    const mailOptions = {
-      from: `"Humrah App" <${process.env.EMAIL_USER}>`,
+    // SendGrid email configuration
+    const msg = {
       to: email,
+      from: FROM_EMAIL, // Must be verified in SendGrid
       subject: 'Your Humrah Verification Code',
       html: `
         <!DOCTYPE html>
@@ -113,7 +120,7 @@ router.post('/send-otp', [
       `
     };
 
-    await transporter.sendMail(mailOptions);
+    await sgMail.send(msg);
 
     console.log(`✅ OTP sent to ${email}: ${otp}`);
 
@@ -124,9 +131,15 @@ router.post('/send-otp', [
 
   } catch (error) {
     console.error('Send OTP error:', error);
+    
+    // Detailed error logging for debugging
+    if (error.response) {
+      console.error('SendGrid error body:', error.response.body);
+    }
+    
     res.status(500).json({ 
       success: false, 
-      message: 'Failed to send verification code. Please check email configuration.' 
+      message: 'Failed to send verification code. Please try again later.' 
     });
   }
 });
@@ -185,6 +198,19 @@ router.post('/verify-otp', [
       message: 'Server error during verification' 
     });
   }
+});
+
+// ✅ EMAIL STATUS CHECK ENDPOINT
+router.get('/email-status', (req, res) => {
+  res.json({
+    success: true,
+    emailServiceReady,
+    provider: 'SendGrid',
+    fromEmail: FROM_EMAIL,
+    message: emailServiceReady 
+      ? 'Email service is operational' 
+      : 'Email service not configured. Add SENDGRID_API_KEY to environment variables.'
+  });
 });
 
 // ✅ REGISTER
