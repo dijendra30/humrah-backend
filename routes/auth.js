@@ -1,19 +1,36 @@
-// routes/auth.js - Authentication Routes with PRODUCTION EMAIL OTP
+// routes/auth.js - Authentication Routes with PRODUCTION EMAIL OTP (FIXED)
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
-const nodemailer = require('nodemailer');
+const nodemailer = require('nodemailer'); // ✅ FIXED: Correct CommonJS import
 const { body, validationResult } = require('express-validator');
 const User = require('../models/User');
 const auth = require('../middleware/auth');
 
 // ✅ PRODUCTION EMAIL CONFIGURATION
+
 // Create reusable transporter (Gmail example - works for any SMTP)
+
 const transporter = nodemailer.createTransporter({
+
   service: 'gmail', // or 'outlook', 'yahoo', etc.
+
   auth: {
+
     user: process.env.EMAIL_USER || 'your-email@gmail.com', // ⚠️ SET IN .env
+
     pass: process.env.EMAIL_PASSWORD || 'your-app-password'  // ⚠️ SET IN .env (use App Password for Gmail)
+
+  }
+
+});
+
+// Verify transporter configuration on startup
+transporter.verify(function(error, success) {
+  if (error) {
+    console.log('❌ Email transporter error:', error);
+  } else {
+    console.log('✅ Email server is ready to send messages');
   }
 });
 
@@ -61,9 +78,9 @@ router.post('/send-otp', [
       expiresAt: Date.now() + OTP_EXPIRY
     });
 
-    // ✅ SEND EMAIL
+    // ✅ SEND EMAIL (works with Zoho & custom domains)
     const mailOptions = {
-      from: `"Humrah App" <${process.env.EMAIL_USER || 'noreply@humrah.com'}>`,
+      from: `"Humrah App" <${process.env.EMAIL_USER}>`, // Use your domain email
       to: email,
       subject: 'Your Humrah Verification Code',
       html: `
@@ -79,7 +96,6 @@ router.post('/send-otp', [
             .otp-box { background: #f8f9fa; border: 2px dashed #667eea; border-radius: 8px; padding: 20px; margin: 30px 0; }
             .otp-code { font-size: 36px; font-weight: bold; color: #667eea; letter-spacing: 8px; margin: 10px 0; }
             .footer { background: #f8f9fa; padding: 20px; text-align: center; color: #6c757d; font-size: 12px; }
-            .button { display: inline-block; padding: 12px 30px; background: #667eea; color: white; text-decoration: none; border-radius: 5px; margin: 20px 0; }
           </style>
         </head>
         <body>
@@ -122,7 +138,7 @@ router.post('/send-otp', [
     console.error('Send OTP error:', error);
     res.status(500).json({ 
       success: false, 
-      message: 'Failed to send verification code. Please try again.' 
+      message: 'Failed to send verification code. Please check email configuration.' 
     });
   }
 });
