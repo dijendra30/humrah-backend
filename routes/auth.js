@@ -1,47 +1,36 @@
-// routes/auth.js - Authentication Routes with PRODUCTION EMAIL OTP (FIXED) 
+// routes/auth.js - Authentication Routes with PRODUCTION EMAIL OTP
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
-const nodemailer = require('nodemailer'); // ✅ FIXED: Correct CommonJS import
+const nodemailer = require('nodemailer');
 const { body, validationResult } = require('express-validator');
 const User = require('../models/User');
 const auth = require('../middleware/auth');
 
 // ✅ PRODUCTION EMAIL CONFIGURATION
-
 // Create reusable transporter (Gmail example - works for any SMTP)
-
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
+const transporter = nodemailer.createTransporter({
+  service: 'gmail', // or 'outlook', 'yahoo', etc.
   auth: {
-    user: process.env.EMAIL_USER,      // yourgmail@gmail.com
-    pass: process.env.EMAIL_PASSWORD   // Gmail App Password
+    user: process.env.EMAIL_USER || 'your-email@gmail.com', // ⚠️ SET IN .env
+    pass: process.env.EMAIL_PASSWORD || 'your-app-password'  // ⚠️ SET IN .env (use App Password for Gmail)
   }
 });
 
 // Verify transporter configuration on startup
-const transporter = nodemailer.createTransport({
-  host: 'smtp.gmail.com',
-  port: 587,
-  secure: false, // MUST be false for 587
-  auth: {
-    user: process.env.EMAIL_USER,      // yourgmail@gmail.com
-    pass: process.env.EMAIL_PASSWORD   // Gmail App Password
-  },
-  tls: {
-    rejectUnauthorized: false
-  },
-  connectionTimeout: 10000, // 10 seconds
-  greetingTimeout: 10000,
-  socketTimeout: 10000
+transporter.verify(function(error, success) {
+  if (error) {
+    console.log('❌ Email transporter error:', error);
+    console.log('💡 Check: EMAIL_USER and EMAIL_PASSWORD in .env');
+  } else {
+    console.log('✅ Email server is ready to send messages');
+  }
 });
 
-
-// In-memory OTP storage (use Redis in production for scalability)
+// In-memory OTP storage
 const otpStore = new Map();
 const OTP_EXPIRY = 10 * 60 * 1000; // 10 minutes
 
-// Generate JWT Token
 const generateToken = (userId) => {
   return jwt.sign({ userId }, process.env.JWT_SECRET || 'fallback_secret', {
     expiresIn: '30d'
@@ -63,7 +52,6 @@ router.post('/send-otp', [
 
     const { email } = req.body;
 
-    // Check if user already exists
     const existingUser = await User.findOne({ email });
     if (existingUser) {
       return res.status(400).json({ 
@@ -72,18 +60,15 @@ router.post('/send-otp', [
       });
     }
 
-    // Generate 6-digit OTP
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     
-    // Store OTP with expiry
     otpStore.set(email, {
       otp,
       expiresAt: Date.now() + OTP_EXPIRY
     });
 
-    // ✅ SEND EMAIL
     const mailOptions = {
-      from: `"Humrah App" <${process.env.EMAIL_USER || 'noreply@humrah.com'}>`,
+      from: `"Humrah App" <${process.env.EMAIL_USER}>`,
       to: email,
       subject: 'Your Humrah Verification Code',
       html: `
@@ -99,7 +84,6 @@ router.post('/send-otp', [
             .otp-box { background: #f8f9fa; border: 2px dashed #667eea; border-radius: 8px; padding: 20px; margin: 30px 0; }
             .otp-code { font-size: 36px; font-weight: bold; color: #667eea; letter-spacing: 8px; margin: 10px 0; }
             .footer { background: #f8f9fa; padding: 20px; text-align: center; color: #6c757d; font-size: 12px; }
-            .button { display: inline-block; padding: 12px 30px; background: #667eea; color: white; text-decoration: none; border-radius: 5px; margin: 20px 0; }
           </style>
         </head>
         <body>
@@ -131,7 +115,7 @@ router.post('/send-otp', [
 
     await transporter.sendMail(mailOptions);
 
-    console.log(`✅ OTP sent to ${email}: ${otp}`); // Keep for debugging
+    console.log(`✅ OTP sent to ${email}: ${otp}`);
 
     res.json({
       success: true,
@@ -142,10 +126,11 @@ router.post('/send-otp', [
     console.error('Send OTP error:', error);
     res.status(500).json({ 
       success: false, 
-      message: 'Failed to send verification code. Please try again.' 
+      message: 'Failed to send verification code. Please check email configuration.' 
     });
   }
 });
+
 // ✅ VERIFY OTP ENDPOINT
 router.post('/verify-otp', [
   body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
@@ -161,7 +146,6 @@ router.post('/verify-otp', [
     }
 
     const { email, otp } = req.body;
-
     const storedData = otpStore.get(email);
 
     if (!storedData) {
@@ -186,7 +170,6 @@ router.post('/verify-otp', [
       });
     }
 
-    // OTP verified successfully
     otpStore.delete(email);
 
     res.json({
@@ -204,9 +187,7 @@ router.post('/verify-otp', [
   }
 });
 
-// @route   POST /api/auth/register
-// @desc    Register new user with questionnaire
-// @access  Public
+// ✅ REGISTER
 router.post('/register', [
   body('firstName').trim().notEmpty().withMessage('First name is required'),
   body('lastName').trim().notEmpty().withMessage('Last name is required'),
@@ -250,7 +231,6 @@ router.post('/register', [
     });
 
     await user.save();
-
     const token = generateToken(user._id);
 
     res.status(201).json({
@@ -276,9 +256,7 @@ router.post('/register', [
   }
 });
 
-// @route   POST /api/auth/login
-// @desc    Login user
-// @access  Public
+// ✅ LOGIN
 router.post('/login', [
   body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
   body('password').notEmpty().withMessage('Password is required')
@@ -339,9 +317,7 @@ router.post('/login', [
   }
 });
 
-// @route   GET /api/auth/me
-// @desc    Get current user
-// @access  Private
+// ✅ GET CURRENT USER
 router.get('/me', auth, async (req, res) => {
   try {
     const user = await User.findById(req.userId).select('-password');
@@ -367,9 +343,7 @@ router.get('/me', auth, async (req, res) => {
   }
 });
 
-// @route   POST /api/auth/google
-// @desc    Google OAuth login/register
-// @access  Public
+// ✅ GOOGLE AUTH
 router.post('/google', async (req, res) => {
   try {
     const { googleId, email, firstName, lastName, profilePhoto } = req.body;
@@ -424,9 +398,7 @@ router.post('/google', async (req, res) => {
   }
 });
 
-// @route   POST /api/auth/facebook
-// @desc    Facebook OAuth login/register
-// @access  Public
+// ✅ FACEBOOK AUTH
 router.post('/facebook', async (req, res) => {
   try {
     const { facebookId, email, firstName, lastName, profilePhoto } = req.body;
