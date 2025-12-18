@@ -1,46 +1,42 @@
-// routes/auth.js - Authentication Routes with PRODUCTION EMAIL OTP (FIXED)
+// routes/auth.js - Authentication Routes with PRODUCTION EMAIL OTP
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
-const nodemailer = require('nodemailer'); // ✅ FIXED: Correct CommonJS import
+const nodemailer = require('nodemailer');
 const { body, validationResult } = require('express-validator');
 const User = require('../models/User');
 const auth = require('../middleware/auth');
 
-// ✅ ZOHO MAIL CONFIGURATION (supports custom domains)
+// ✅ ZOHO MAIL FOR RENDER.COM (Port 587 - TLS)
+// Render.com blocks port 465, so we use 587 with STARTTLS
 const transporter = nodemailer.createTransport({
   host: 'smtp.zoho.com',
-  port: 465,
-  secure: true, // use SSL
+  port: 587, // ✅ Use 587 instead of 465 for Render.com
+  secure: false, // false for port 587 (use STARTTLS)
   auth: {
-    user: process.env.EMAIL_USER, // your@domain.com
-    pass: process.env.EMAIL_PASSWORD // Zoho password or app-specific password
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASSWORD
+  },
+  tls: {
+    ciphers: 'SSLv3',
+    rejectUnauthorized: false
   }
 });
-
-// Alternative configuration for Zoho (if above doesn't work):
-// const transporter = nodemailer.createTransport({
-//   service: 'Zoho',
-//   auth: {
-//     user: process.env.EMAIL_USER,
-//     pass: process.env.EMAIL_PASSWORD
-//   }
-// });
 
 // Verify transporter configuration on startup
 transporter.verify(function(error, success) {
   if (error) {
     console.log('❌ Email transporter error:', error);
+    console.log('💡 Check: EMAIL_USER and EMAIL_PASSWORD in .env');
   } else {
     console.log('✅ Email server is ready to send messages');
   }
 });
 
-// In-memory OTP storage (use Redis in production for scalability)
+// In-memory OTP storage
 const otpStore = new Map();
 const OTP_EXPIRY = 10 * 60 * 1000; // 10 minutes
 
-// Generate JWT Token
 const generateToken = (userId) => {
   return jwt.sign({ userId }, process.env.JWT_SECRET || 'fallback_secret', {
     expiresIn: '30d'
@@ -62,7 +58,6 @@ router.post('/send-otp', [
 
     const { email } = req.body;
 
-    // Check if user already exists
     const existingUser = await User.findOne({ email });
     if (existingUser) {
       return res.status(400).json({ 
@@ -71,18 +66,15 @@ router.post('/send-otp', [
       });
     }
 
-    // Generate 6-digit OTP
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     
-    // Store OTP with expiry
     otpStore.set(email, {
       otp,
       expiresAt: Date.now() + OTP_EXPIRY
     });
 
-    // ✅ SEND EMAIL (works with Zoho & custom domains)
     const mailOptions = {
-      from: `"Humrah App" <${process.env.EMAIL_USER}>`, // Use your domain email
+      from: `"Humrah App" <${process.env.EMAIL_USER}>`,
       to: email,
       subject: 'Your Humrah Verification Code',
       html: `
@@ -129,7 +121,7 @@ router.post('/send-otp', [
 
     await transporter.sendMail(mailOptions);
 
-    console.log(`✅ OTP sent to ${email}: ${otp}`); // Keep for debugging
+    console.log(`✅ OTP sent to ${email}: ${otp}`);
 
     res.json({
       success: true,
@@ -160,7 +152,6 @@ router.post('/verify-otp', [
     }
 
     const { email, otp } = req.body;
-
     const storedData = otpStore.get(email);
 
     if (!storedData) {
@@ -185,7 +176,6 @@ router.post('/verify-otp', [
       });
     }
 
-    // OTP verified successfully
     otpStore.delete(email);
 
     res.json({
@@ -203,9 +193,7 @@ router.post('/verify-otp', [
   }
 });
 
-// @route   POST /api/auth/register
-// @desc    Register new user with questionnaire
-// @access  Public
+// ✅ REGISTER
 router.post('/register', [
   body('firstName').trim().notEmpty().withMessage('First name is required'),
   body('lastName').trim().notEmpty().withMessage('Last name is required'),
@@ -249,7 +237,6 @@ router.post('/register', [
     });
 
     await user.save();
-
     const token = generateToken(user._id);
 
     res.status(201).json({
@@ -275,9 +262,7 @@ router.post('/register', [
   }
 });
 
-// @route   POST /api/auth/login
-// @desc    Login user
-// @access  Public
+// ✅ LOGIN
 router.post('/login', [
   body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
   body('password').notEmpty().withMessage('Password is required')
@@ -338,9 +323,7 @@ router.post('/login', [
   }
 });
 
-// @route   GET /api/auth/me
-// @desc    Get current user
-// @access  Private
+// ✅ GET CURRENT USER
 router.get('/me', auth, async (req, res) => {
   try {
     const user = await User.findById(req.userId).select('-password');
@@ -366,9 +349,7 @@ router.get('/me', auth, async (req, res) => {
   }
 });
 
-// @route   POST /api/auth/google
-// @desc    Google OAuth login/register
-// @access  Public
+// ✅ GOOGLE AUTH
 router.post('/google', async (req, res) => {
   try {
     const { googleId, email, firstName, lastName, profilePhoto } = req.body;
@@ -423,9 +404,7 @@ router.post('/google', async (req, res) => {
   }
 });
 
-// @route   POST /api/auth/facebook
-// @desc    Facebook OAuth login/register
-// @access  Public
+// ✅ FACEBOOK AUTH
 router.post('/facebook', async (req, res) => {
   try {
     const { facebookId, email, firstName, lastName, profilePhoto } = req.body;
