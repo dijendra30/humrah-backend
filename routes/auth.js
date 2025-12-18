@@ -72,9 +72,9 @@ router.post('/send-otp', [
       expiresAt: Date.now() + OTP_EXPIRY
     });
 
-    // ✅ SEND EMAIL (works with Zoho & custom domains)
+    // ✅ SEND EMAIL
     const mailOptions = {
-      from: `"Humrah App" <${process.env.EMAIL_USER}>` // Use your domain email
+      from: `"Humrah App" <${process.env.EMAIL_USER || 'noreply@humrah.com'}>`,
       to: email,
       subject: 'Your Humrah Verification Code',
       html: `
@@ -90,6 +90,7 @@ router.post('/send-otp', [
             .otp-box { background: #f8f9fa; border: 2px dashed #667eea; border-radius: 8px; padding: 20px; margin: 30px 0; }
             .otp-code { font-size: 36px; font-weight: bold; color: #667eea; letter-spacing: 8px; margin: 10px 0; }
             .footer { background: #f8f9fa; padding: 20px; text-align: center; color: #6c757d; font-size: 12px; }
+            .button { display: inline-block; padding: 12px 30px; background: #667eea; color: white; text-decoration: none; border-radius: 5px; margin: 20px 0; }
           </style>
         </head>
         <body>
@@ -132,11 +133,10 @@ router.post('/send-otp', [
     console.error('Send OTP error:', error);
     res.status(500).json({ 
       success: false, 
-      message: 'Failed to send verification code. Please check email configuration.' 
+      message: 'Failed to send verification code. Please try again.' 
     });
   }
 });
-
 // ✅ VERIFY OTP ENDPOINT
 router.post('/verify-otp', [
   body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
@@ -470,4 +470,5 @@ router.post('/facebook', async (req, res) => {
 });
 
 module.exports = router;
+
 
