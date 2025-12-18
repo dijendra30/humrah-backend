@@ -1,14 +1,25 @@
-// routes/auth.js - WITH EMAIL OTP VERIFICATION
+// routes/auth.js - Authentication Routes with PRODUCTION EMAIL OTP
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
-const crypto = require('crypto');
+const nodemailer = require('nodemailer');
 const { body, validationResult } = require('express-validator');
 const User = require('../models/User');
 const auth = require('../middleware/auth');
 
-// In-memory OTP storage (use Redis in production)
+// ✅ PRODUCTION EMAIL CONFIGURATION
+// Create reusable transporter (Gmail example - works for any SMTP)
+const transporter = nodemailer.createTransporter({
+  service: 'gmail', // or 'outlook', 'yahoo', etc.
+  auth: {
+    user: process.env.EMAIL_USER || 'your-email@gmail.com', // ⚠️ SET IN .env
+    pass: process.env.EMAIL_PASSWORD || 'your-app-password'  // ⚠️ SET IN .env (use App Password for Gmail)
+  }
+});
+
+// In-memory OTP storage (use Redis in production for scalability)
 const otpStore = new Map();
+const OTP_EXPIRY = 10 * 60 * 1000; // 10 minutes
 
 // Generate JWT Token
 const generateToken = (userId) => {
@@ -17,76 +28,127 @@ const generateToken = (userId) => {
   });
 };
 
-// Generate 6-digit OTP
-const generateOTP = () => {
-  return Math.floor(100000 + Math.random() * 900000).toString();
-};
-
-// @route   POST /api/auth/send-otp
-// @desc    Send OTP to email
-// @access  Public
+// ✅ SEND OTP ENDPOINT
 router.post('/send-otp', [
   body('email').isEmail().normalizeEmail().withMessage('Valid email is required')
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      return res.status(400).json({ success: false, errors: errors.array() });
+      return res.status(400).json({ 
+        success: false, 
+        errors: errors.array() 
+      });
     }
 
     const { email } = req.body;
-    
+
     // Check if user already exists
     const existingUser = await User.findOne({ email });
     if (existingUser) {
       return res.status(400).json({ 
         success: false, 
-        message: `Welcome back! This email is already registered. Please login instead.` 
+        message: 'Email already registered. Please login instead.' 
       });
     }
 
-    const otp = generateOTP();
-    const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
+    // Generate 6-digit OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
     
-    otpStore.set(email, { otp, expiresAt });
+    // Store OTP with expiry
+    otpStore.set(email, {
+      otp,
+      expiresAt: Date.now() + OTP_EXPIRY
+    });
 
-    // TODO: Send email using nodemailer or your email service
-    console.log(`📧 OTP for ${email}: ${otp}`);
-    
-    // For development, return OTP in response (REMOVE IN PRODUCTION)
+    // ✅ SEND EMAIL
+    const mailOptions = {
+      from: `"Humrah App" <${process.env.EMAIL_USER || 'noreply@humrah.com'}>`,
+      to: email,
+      subject: 'Your Humrah Verification Code',
+      html: `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <style>
+            body { font-family: Arial, sans-serif; background-color: #f4f4f4; margin: 0; padding: 0; }
+            .container { max-width: 600px; margin: 50px auto; background: #ffffff; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+            .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; text-align: center; color: white; }
+            .header h1 { margin: 0; font-size: 28px; }
+            .content { padding: 40px 30px; text-align: center; }
+            .otp-box { background: #f8f9fa; border: 2px dashed #667eea; border-radius: 8px; padding: 20px; margin: 30px 0; }
+            .otp-code { font-size: 36px; font-weight: bold; color: #667eea; letter-spacing: 8px; margin: 10px 0; }
+            .footer { background: #f8f9fa; padding: 20px; text-align: center; color: #6c757d; font-size: 12px; }
+            .button { display: inline-block; padding: 12px 30px; background: #667eea; color: white; text-decoration: none; border-radius: 5px; margin: 20px 0; }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <div class="header">
+              <h1>🎉 Welcome to Humrah!</h1>
+            </div>
+            <div class="content">
+              <h2>Email Verification</h2>
+              <p>Thank you for registering with Humrah! Please use the verification code below to complete your registration:</p>
+              
+              <div class="otp-box">
+                <p style="margin: 0; color: #6c757d; font-size: 14px;">Your Verification Code</p>
+                <div class="otp-code">${otp}</div>
+                <p style="margin: 10px 0 0 0; color: #6c757d; font-size: 12px;">Valid for 10 minutes</p>
+              </div>
+
+              <p style="color: #6c757d; font-size: 14px;">If you didn't request this code, please ignore this email.</p>
+            </div>
+            <div class="footer">
+              <p>This is an automated message from Humrah. Please do not reply to this email.</p>
+              <p>&copy; ${new Date().getFullYear()} Humrah. All rights reserved.</p>
+            </div>
+          </div>
+        </body>
+        </html>
+      `
+    };
+
+    await transporter.sendMail(mailOptions);
+
+    console.log(`✅ OTP sent to ${email}: ${otp}`); // Keep for debugging
+
     res.json({
       success: true,
-      message: 'OTP sent successfully to your email',
-      devOtp: process.env.NODE_ENV === 'development' ? otp : undefined
+      message: 'Verification code sent to your email!'
     });
 
   } catch (error) {
     console.error('Send OTP error:', error);
-    res.status(500).json({ success: false, message: 'Failed to send OTP' });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to send verification code. Please try again.' 
+    });
   }
 });
 
-// @route   POST /api/auth/verify-otp
-// @desc    Verify OTP
-// @access  Public
+// ✅ VERIFY OTP ENDPOINT
 router.post('/verify-otp', [
-  body('email').isEmail().normalizeEmail(),
-  body('otp').isLength({ min: 6, max: 6 })
+  body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
+  body('otp').isLength({ min: 6, max: 6 }).withMessage('OTP must be 6 digits')
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      return res.status(400).json({ success: false, errors: errors.array() });
+      return res.status(400).json({ 
+        success: false, 
+        errors: errors.array() 
+      });
     }
 
     const { email, otp } = req.body;
-    
+
     const storedData = otpStore.get(email);
-    
+
     if (!storedData) {
       return res.status(400).json({ 
         success: false, 
-        message: 'OTP expired or not found. Please request a new OTP.' 
+        message: 'No OTP found. Please request a new one.' 
       });
     }
 
@@ -94,7 +156,7 @@ router.post('/verify-otp', [
       otpStore.delete(email);
       return res.status(400).json({ 
         success: false, 
-        message: 'OTP expired. Please request a new OTP.' 
+        message: 'OTP expired. Please request a new one.' 
       });
     }
 
@@ -105,18 +167,21 @@ router.post('/verify-otp', [
       });
     }
 
-    // OTP verified
+    // OTP verified successfully
     otpStore.delete(email);
-    
+
     res.json({
       success: true,
-      message: 'Email verified successfully! You can now complete registration.',
-      verified: true
+      verified: true,
+      message: 'Email verified successfully!'
     });
 
   } catch (error) {
     console.error('Verify OTP error:', error);
-    res.status(500).json({ success: false, message: 'Verification failed' });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error during verification' 
+    });
   }
 });
 
@@ -124,19 +189,22 @@ router.post('/verify-otp', [
 // @desc    Register new user with questionnaire
 // @access  Public
 router.post('/register', [
-  body('firstName').trim().notEmpty(),
-  body('lastName').trim().notEmpty(),
-  body('email').isEmail().normalizeEmail(),
-  body('password').isLength({ min: 6 }),
-  body('emailVerified').isBoolean()
+  body('firstName').trim().notEmpty().withMessage('First name is required'),
+  body('lastName').trim().notEmpty().withMessage('Last name is required'),
+  body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
+  body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
+  body('emailVerified').isBoolean().withMessage('Email verification status required')
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      return res.status(400).json({ success: false, errors: errors.array() });
+      return res.status(400).json({ 
+        success: false, 
+        errors: errors.array() 
+      });
     }
 
-    const { firstName, lastName, email, password, questionnaire, emailVerified } = req.body;
+    const { firstName, lastName, email, password, emailVerified, questionnaire } = req.body;
 
     if (!emailVerified) {
       return res.status(400).json({ 
@@ -149,7 +217,7 @@ router.post('/register', [
     if (existingUser) {
       return res.status(400).json({ 
         success: false, 
-        message: `Hello ${existingUser.firstName}! You're already registered. Please login instead.` 
+        message: 'User with this email already exists' 
       });
     }
 
@@ -158,16 +226,17 @@ router.post('/register', [
       lastName,
       email,
       password,
-      questionnaire: questionnaire || {},
-      verified: true
+      verified: true,
+      questionnaire: questionnaire || {}
     });
 
     await user.save();
+
     const token = generateToken(user._id);
 
     res.status(201).json({
       success: true,
-      message: `Welcome to Humrah, ${user.firstName}! 🎉 Your account has been created successfully.`,
+      message: 'Registration successful',
       token,
       user: {
         id: user._id,
@@ -181,7 +250,10 @@ router.post('/register', [
 
   } catch (error) {
     console.error('Registration error:', error);
-    res.status(500).json({ success: false, message: 'Registration failed' });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error during registration' 
+    });
   }
 });
 
@@ -189,13 +261,16 @@ router.post('/register', [
 // @desc    Login user
 // @access  Public
 router.post('/login', [
-  body('email').isEmail().normalizeEmail(),
-  body('password').notEmpty()
+  body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
+  body('password').notEmpty().withMessage('Password is required')
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      return res.status(400).json({ success: false, errors: errors.array() });
+      return res.status(400).json({ 
+        success: false, 
+        errors: errors.array() 
+      });
     }
 
     const { email, password } = req.body;
@@ -204,7 +279,7 @@ router.post('/login', [
     if (!user) {
       return res.status(401).json({ 
         success: false, 
-        message: 'No account found with this email. Please register first.' 
+        message: 'Invalid email or password' 
       });
     }
 
@@ -212,7 +287,7 @@ router.post('/login', [
     if (!isMatch) {
       return res.status(401).json({ 
         success: false, 
-        message: 'Incorrect password. Please try again.' 
+        message: 'Invalid email or password' 
       });
     }
 
@@ -223,7 +298,7 @@ router.post('/login', [
 
     res.json({
       success: true,
-      message: `Welcome back, ${user.firstName}! 👋`,
+      message: 'Login successful',
       token,
       user: {
         id: user._id,
@@ -238,7 +313,38 @@ router.post('/login', [
 
   } catch (error) {
     console.error('Login error:', error);
-    res.status(500).json({ success: false, message: 'Login failed' });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error during login' 
+    });
+  }
+});
+
+// @route   GET /api/auth/me
+// @desc    Get current user
+// @access  Private
+router.get('/me', auth, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId).select('-password');
+    
+    if (!user) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'User not found' 
+      });
+    }
+
+    res.json({
+      success: true,
+      user
+    });
+
+  } catch (error) {
+    console.error('Get user error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error' 
+    });
   }
 });
 
@@ -250,27 +356,13 @@ router.post('/google', async (req, res) => {
     const { googleId, email, firstName, lastName, profilePhoto } = req.body;
 
     let user = await User.findOne({ $or: [{ googleId }, { email }] });
+    let needsQuestionnaire = false;
 
     if (user) {
       if (!user.googleId) {
         user.googleId = googleId;
         await user.save();
       }
-      const token = generateToken(user._id);
-      return res.json({
-        success: true,
-        message: `Welcome back, ${user.firstName}! 👋`,
-        token,
-        user: {
-          id: user._id,
-          firstName: user.firstName,
-          lastName: user.lastName,
-          email: user.email,
-          profilePhoto: user.profilePhoto,
-          isPremium: user.isPremium
-        },
-        isNewUser: false
-      });
     } else {
       user = new User({
         googleId,
@@ -281,28 +373,35 @@ router.post('/google', async (req, res) => {
         verified: true
       });
       await user.save();
-      const token = generateToken(user._id);
-      
-      return res.json({
-        success: true,
-        message: `Welcome to Humrah, ${user.firstName}! 🎉 Let's set up your profile.`,
-        token,
-        user: {
-          id: user._id,
-          firstName: user.firstName,
-          lastName: user.lastName,
-          email: user.email,
-          profilePhoto: user.profilePhoto,
-          isPremium: user.isPremium
-        },
-        isNewUser: true,
-        needsQuestionnaire: true
-      });
+      needsQuestionnaire = true;
     }
+
+    user.lastActive = Date.now();
+    await user.save();
+
+    const token = generateToken(user._id);
+
+    res.json({
+      success: true,
+      message: needsQuestionnaire ? 'Please complete your profile' : 'Google authentication successful',
+      needsQuestionnaire,
+      token,
+      user: {
+        id: user._id,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        email: user.email,
+        profilePhoto: user.profilePhoto,
+        isPremium: user.isPremium
+      }
+    });
 
   } catch (error) {
     console.error('Google auth error:', error);
-    res.status(500).json({ success: false, message: 'Authentication failed' });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Google authentication failed' 
+    });
   }
 });
 
@@ -320,21 +419,6 @@ router.post('/facebook', async (req, res) => {
         user.facebookId = facebookId;
         await user.save();
       }
-      const token = generateToken(user._id);
-      return res.json({
-        success: true,
-        message: `Welcome back, ${user.firstName}! 👋`,
-        token,
-        user: {
-          id: user._id,
-          firstName: user.firstName,
-          lastName: user.lastName,
-          email: user.email,
-          profilePhoto: user.profilePhoto,
-          isPremium: user.isPremium
-        },
-        isNewUser: false
-      });
     } else {
       user = new User({
         facebookId,
@@ -345,44 +429,33 @@ router.post('/facebook', async (req, res) => {
         verified: true
       });
       await user.save();
-      const token = generateToken(user._id);
-      
-      return res.json({
-        success: true,
-        message: `Welcome to Humrah, ${user.firstName}! 🎉 Let's set up your profile.`,
-        token,
-        user: {
-          id: user._id,
-          firstName: user.firstName,
-          lastName: user.lastName,
-          email: user.email,
-          profilePhoto: user.profilePhoto,
-          isPremium: user.isPremium
-        },
-        isNewUser: true,
-        needsQuestionnaire: true
-      });
     }
+
+    user.lastActive = Date.now();
+    await user.save();
+
+    const token = generateToken(user._id);
+
+    res.json({
+      success: true,
+      message: 'Facebook authentication successful',
+      token,
+      user: {
+        id: user._id,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        email: user.email,
+        profilePhoto: user.profilePhoto,
+        isPremium: user.isPremium
+      }
+    });
 
   } catch (error) {
     console.error('Facebook auth error:', error);
-    res.status(500).json({ success: false, message: 'Authentication failed' });
-  }
-});
-
-// @route   GET /api/auth/me
-// @desc    Get current user
-// @access  Private
-router.get('/me', auth, async (req, res) => {
-  try {
-    const user = await User.findById(req.userId).select('-password');
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found' });
-    }
-    res.json({ success: true, user });
-  } catch (error) {
-    console.error('Get user error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Facebook authentication failed' 
+    });
   }
 });
 
