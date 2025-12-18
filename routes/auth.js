@@ -1,4 +1,4 @@
-// routes/auth.js - Authentication Routes with PRODUCTION EMAIL OTP
+// routes/auth.js - Authentication Routes with GMAIL OTP (PRODUCTION READY FOR RENDER.COM)
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
@@ -7,23 +7,23 @@ const { body, validationResult } = require('express-validator');
 const User = require('../models/User');
 const auth = require('../middleware/auth');
 
-// ✅ PRODUCTION EMAIL CONFIGURATION
-// Create reusable transporter (Gmail example - works for any SMTP)
-const transporter = nodemailer.createTransporter({
-  service: 'gmail', // or 'outlook', 'yahoo', etc.
+// ✅ GMAIL CONFIGURATION FOR RENDER.COM
+// Gmail works perfectly on ALL hosting platforms including Render.com
+const transporter = nodemailer.createTransport({
+  service: 'gmail', // Use Gmail service (handles all SMTP settings automatically)
   auth: {
-    user: process.env.EMAIL_USER || 'your-email@gmail.com', // ⚠️ SET IN .env
-    pass: process.env.EMAIL_PASSWORD || 'your-app-password'  // ⚠️ SET IN .env (use App Password for Gmail)
+    user: process.env.EMAIL_USER, // Your Gmail address
+    pass: process.env.EMAIL_PASSWORD // Gmail App Password (NOT your regular password)
   }
 });
 
-// Verify transporter configuration on startup
+// Verify transporter on startup
 transporter.verify(function(error, success) {
   if (error) {
     console.log('❌ Email transporter error:', error);
-    console.log('💡 Check: EMAIL_USER and EMAIL_PASSWORD in .env');
+    console.log('💡 SOLUTION: Get Gmail App Password from https://myaccount.google.com/apppasswords');
   } else {
-    console.log('✅ Email server is ready to send messages');
+    console.log('✅ Gmail is ready to send emails');
   }
 });
 
