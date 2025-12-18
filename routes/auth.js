@@ -11,18 +11,12 @@ const auth = require('../middleware/auth');
 
 // Create reusable transporter (Gmail example - works for any SMTP)
 
-const transporter = nodemailer.createTransporter({
-
-  service: 'gmail', // or 'outlook', 'yahoo', etc.
-
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
   auth: {
-
-    user: process.env.EMAIL_USER || 'your-email@gmail.com', // ⚠️ SET IN .env
-
-    pass: process.env.EMAIL_PASSWORD || 'your-app-password'  // ⚠️ SET IN .env (use App Password for Gmail)
-
+    user: process.env.EMAIL_USER,      // yourgmail@gmail.com
+    pass: process.env.EMAIL_PASSWORD   // Gmail App Password
   }
-
 });
 
 // Verify transporter configuration on startup
@@ -80,7 +74,7 @@ router.post('/send-otp', [
 
     // ✅ SEND EMAIL (works with Zoho & custom domains)
     const mailOptions = {
-      from: `"Humrah App" <${process.env.EMAIL_USER}>`, // Use your domain email
+      from: `"Humrah App" <${process.env.EMAIL_USER}>` // Use your domain email
       to: email,
       subject: 'Your Humrah Verification Code',
       html: `
@@ -476,3 +470,4 @@ router.post('/facebook', async (req, res) => {
 });
 
 module.exports = router;
+
