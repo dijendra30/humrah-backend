@@ -1,28 +1,30 @@
-// routes/auth.js - Authentication with SendGrid (WORKS ON RENDER.COM)
+// routes/auth.js - Authentication with RESEND (EASIEST SOLUTION)
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
-const sgMail = require('@sendgrid/mail');
+const { Resend } = require('resend');
 const { body, validationResult } = require('express-validator');
 const User = require('../models/User');
 const auth = require('../middleware/auth');
 
-// ✅ SENDGRID CONFIGURATION (Works on Render.com - no SMTP blocking)
-// SendGrid uses HTTP API instead of SMTP, so it ALWAYS works
-const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
-const FROM_EMAIL = process.env.FROM_EMAIL || 'noreply@humrah.app';
+// ✅ RESEND CONFIGURATION (Easiest email service ever)
+// No phone verification, no complicated setup, works on ALL platforms
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const FROM_EMAIL = process.env.FROM_EMAIL || 'onboarding@resend.dev'; // Free domain
 
 let emailServiceReady = false;
+let resend;
 
-if (SENDGRID_API_KEY) {
-  sgMail.setApiKey(SENDGRID_API_KEY);
+if (RESEND_API_KEY) {
+  resend = new Resend(RESEND_API_KEY);
   emailServiceReady = true;
-  console.log('✅ SendGrid email service is ready');
+  console.log('✅ Resend email service is ready');
   console.log(`📧 Sending emails from: ${FROM_EMAIL}`);
 } else {
-  console.log('❌ SendGrid API key not found in environment variables');
-  console.log('💡 Get free SendGrid API key from: https://signup.sendgrid.com/');
-  console.log('💡 Add SENDGRID_API_KEY to your .env file');
+  console.log('❌ Resend API key not found');
+  console.log('💡 Get free Resend API key from: https://resend.com/signup');
+  console.log('💡 Add RESEND_API_KEY to your .env file');
+  console.log('💡 Setup takes only 2 minutes!');
 }
 
 // In-memory OTP storage
@@ -40,7 +42,6 @@ router.post('/send-otp', [
   body('email').isEmail().normalizeEmail().withMessage('Valid email is required')
 ], async (req, res) => {
   try {
-    // Check if email service is ready
     if (!emailServiceReady) {
       return res.status(503).json({
         success: false,
@@ -73,10 +74,10 @@ router.post('/send-otp', [
       expiresAt: Date.now() + OTP_EXPIRY
     });
 
-    // SendGrid email configuration
-    const msg = {
-      to: email,
-      from: FROM_EMAIL, // Must be verified in SendGrid
+    // Resend email configuration
+    const { data, error } = await resend.emails.send({
+      from: FROM_EMAIL,
+      to: [email],
       subject: 'Your Humrah Verification Code',
       html: `
         <!DOCTYPE html>
@@ -118,11 +119,17 @@ router.post('/send-otp', [
         </body>
         </html>
       `
-    };
+    });
 
-    await sgMail.send(msg);
+    if (error) {
+      console.error('Resend error:', error);
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Failed to send verification code. Please try again.' 
+      });
+    }
 
-    console.log(`✅ OTP sent to ${email}: ${otp}`);
+    console.log(`✅ OTP sent to ${email}: ${otp} (Email ID: ${data.id})`);
 
     res.json({
       success: true,
@@ -131,12 +138,6 @@ router.post('/send-otp', [
 
   } catch (error) {
     console.error('Send OTP error:', error);
-    
-    // Detailed error logging for debugging
-    if (error.response) {
-      console.error('SendGrid error body:', error.response.body);
-    }
-    
     res.status(500).json({ 
       success: false, 
       message: 'Failed to send verification code. Please try again later.' 
@@ -205,11 +206,11 @@ router.get('/email-status', (req, res) => {
   res.json({
     success: true,
     emailServiceReady,
-    provider: 'SendGrid',
+    provider: 'Resend',
     fromEmail: FROM_EMAIL,
     message: emailServiceReady 
-      ? 'Email service is operational' 
-      : 'Email service not configured. Add SENDGRID_API_KEY to environment variables.'
+      ? '✅ Email service is operational' 
+      : '❌ Email service not configured. Add RESEND_API_KEY to environment variables.'
   });
 });
 
