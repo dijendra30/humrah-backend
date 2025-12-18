@@ -21,7 +21,8 @@
     "multer": "^1.4.5-lts.1",
     "cloudinary": "^1.41.0",
     "validator": "^13.11.0",
-    "express-validator": "^7.0.1"
+    "express-validator": "^7.0.1",
+    "nodemailer": "^6.9.7"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
