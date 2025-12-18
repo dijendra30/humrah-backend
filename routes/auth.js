@@ -7,6 +7,7 @@ const { body, validationResult } = require('express-validator');
 const User = require('../models/User');
 const auth = require('../middleware/auth');
 
+
 // ✅ RESEND CONFIGURATION (Easiest email service ever)
 // No phone verification, no complicated setup, works on ALL platforms
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
@@ -214,37 +215,31 @@ router.get('/email-status', (req, res) => {
   });
 });
 
-// ✅ REGISTER
+// ✅ FIX 1: REGISTER - Check if email already exists
 router.post('/register', [
   body('firstName').trim().notEmpty().withMessage('First name is required'),
   body('lastName').trim().notEmpty().withMessage('Last name is required'),
   body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
-  body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
-  body('emailVerified').isBoolean().withMessage('Email verification status required')
+  body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters')
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       return res.status(400).json({ 
         success: false, 
-        errors: errors.array() 
+        errors: errors.array(),
+        message: 'Validation failed' 
       });
     }
 
-    const { firstName, lastName, email, password, emailVerified, questionnaire } = req.body;
+    const { firstName, lastName, email, password, questionnaire } = req.body;
 
-    if (!emailVerified) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Please verify your email first' 
-      });
-    }
-
+    // ✅ CHECK IF USER ALREADY EXISTS
     const existingUser = await User.findOne({ email });
     if (existingUser) {
       return res.status(400).json({ 
         success: false, 
-        message: 'User with this email already exists' 
+        message: 'This email is already registered. Please login instead.' 
       });
     }
 
@@ -253,7 +248,6 @@ router.post('/register', [
       lastName,
       email,
       password,
-      verified: true,
       questionnaire: questionnaire || {}
     });
 
@@ -283,7 +277,7 @@ router.post('/register', [
   }
 });
 
-// ✅ LOGIN
+// ✅ FIX 2: LOGIN - Proper validation with welcome message
 router.post('/login', [
   body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
   body('password').notEmpty().withMessage('Password is required')
@@ -293,36 +287,41 @@ router.post('/login', [
     if (!errors.isEmpty()) {
       return res.status(400).json({ 
         success: false, 
-        errors: errors.array() 
+        errors: errors.array(),
+        message: 'Please enter valid email and password'
       });
     }
 
     const { email, password } = req.body;
 
+    // Find user by email
     const user = await User.findOne({ email });
     if (!user) {
       return res.status(401).json({ 
         success: false, 
-        message: 'Invalid email or password' 
+        message: 'Invalid email or password. Please check your credentials.' 
       });
     }
 
+    // Check password
     const isMatch = await user.comparePassword(password);
     if (!isMatch) {
       return res.status(401).json({ 
         success: false, 
-        message: 'Invalid email or password' 
+        message: 'Invalid email or password. Please check your credentials.' 
       });
     }
 
+    // Update last active
     user.lastActive = Date.now();
     await user.save();
 
     const token = generateToken(user._id);
 
+    // ✅ SEND WELCOME MESSAGE WITH USER NAME
     res.json({
       success: true,
-      message: 'Login successful',
+      message: `Welcome back, ${user.firstName}!`, // ✅ Personalized welcome
       token,
       user: {
         id: user._id,
@@ -339,7 +338,7 @@ router.post('/login', [
     console.error('Login error:', error);
     res.status(500).json({ 
       success: false, 
-      message: 'Server error during login' 
+      message: 'Server error during login. Please try again.' 
     });
   }
 });
@@ -376,7 +375,6 @@ router.post('/google', async (req, res) => {
     const { googleId, email, firstName, lastName, profilePhoto } = req.body;
 
     let user = await User.findOne({ $or: [{ googleId }, { email }] });
-    let needsQuestionnaire = false;
 
     if (user) {
       if (!user.googleId) {
@@ -393,7 +391,6 @@ router.post('/google', async (req, res) => {
         verified: true
       });
       await user.save();
-      needsQuestionnaire = true;
     }
 
     user.lastActive = Date.now();
@@ -403,8 +400,7 @@ router.post('/google', async (req, res) => {
 
     res.json({
       success: true,
-      message: needsQuestionnaire ? 'Please complete your profile' : 'Google authentication successful',
-      needsQuestionnaire,
+      message: `Welcome back, ${user.firstName}!`,
       token,
       user: {
         id: user._id,
@@ -456,7 +452,7 @@ router.post('/facebook', async (req, res) => {
 
     res.json({
       success: true,
-      message: 'Facebook authentication successful',
+      message: `Welcome back, ${user.firstName}!`,
       token,
       user: {
         id: user._id,
