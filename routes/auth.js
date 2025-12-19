@@ -1,4 +1,4 @@
-// routes/auth.js - Authentication with RESEND (EASIEST SOLUTION)
+// routes/auth.js - FINAL COMPLETE VERSION (Copy-Paste Ready)
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
@@ -7,11 +7,11 @@ const { body, validationResult } = require('express-validator');
 const User = require('../models/User');
 const auth = require('../middleware/auth');
 
-
-// ✅ RESEND CONFIGURATION (Easiest email service ever)
-// No phone verification, no complicated setup, works on ALL platforms
+// ==========================================
+// RESEND EMAIL CONFIGURATION
+// ==========================================
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
-const FROM_EMAIL = process.env.FROM_EMAIL || 'onboarding@resend.dev'; // Free domain
+const FROM_EMAIL = process.env.FROM_EMAIL || 'onboarding@resend.dev';
 
 let emailServiceReady = false;
 let resend;
@@ -22,36 +22,42 @@ if (RESEND_API_KEY) {
   console.log('✅ Resend email service is ready');
   console.log(`📧 Sending emails from: ${FROM_EMAIL}`);
 } else {
-  console.log('❌ Resend API key not found');
-  console.log('💡 Get free Resend API key from: https://resend.com/signup');
-  console.log('💡 Add RESEND_API_KEY to your .env file');
-  console.log('💡 Setup takes only 2 minutes!');
+  console.log('⚠️ Resend API key not found');
+  console.log('💡 Get free API key: https://resend.com/signup');
 }
 
-// In-memory OTP storage
+// OTP Storage
 const otpStore = new Map();
 const OTP_EXPIRY = 10 * 60 * 1000; // 10 minutes
 
+// ==========================================
+// JWT TOKEN GENERATION
+// ==========================================
 const generateToken = (userId) => {
   return jwt.sign({ userId }, process.env.JWT_SECRET || 'fallback_secret', {
     expiresIn: '30d'
   });
 };
 
-// ✅ SEND OTP ENDPOINT
+// ==========================================
+// ✅ SEND OTP
+// ==========================================
 router.post('/send-otp', [
-  body('email').isEmail().normalizeEmail().withMessage('Valid email is required')
+  body('email').isEmail().normalizeEmail().withMessage('Valid email required')
 ], async (req, res) => {
   try {
+    console.log('📧 OTP request for:', req.body.email); // DEBUG
+
     if (!emailServiceReady) {
       return res.status(503).json({
         success: false,
-        message: 'Email service not configured. Please contact administrator.'
+        message: 'Email service not configured'
       });
     }
 
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
+      console.log('❌ Validation errors:', errors.array());
       return res.status(400).json({ 
         success: false, 
         errors: errors.array() 
@@ -60,14 +66,17 @@ router.post('/send-otp', [
 
     const { email } = req.body;
 
+    // Check if email exists
     const existingUser = await User.findOne({ email });
     if (existingUser) {
+      console.log('❌ Email already registered:', email);
       return res.status(400).json({ 
         success: false, 
-        message: 'Email already registered. Please login instead.' 
+        message: 'This email is already registered. Please login instead.' 
       });
     }
 
+    // Generate OTP
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     
     otpStore.set(email, {
@@ -75,7 +84,7 @@ router.post('/send-otp', [
       expiresAt: Date.now() + OTP_EXPIRY
     });
 
-    // Resend email configuration
+    // Send email
     const { data, error } = await resend.emails.send({
       from: FROM_EMAIL,
       to: [email],
@@ -123,14 +132,14 @@ router.post('/send-otp', [
     });
 
     if (error) {
-      console.error('Resend error:', error);
+      console.error('❌ Resend error:', error);
       return res.status(500).json({ 
         success: false, 
-        message: 'Failed to send verification code. Please try again.' 
+        message: 'Failed to send verification code' 
       });
     }
 
-    console.log(`✅ OTP sent to ${email}: ${otp} (Email ID: ${data.id})`);
+    console.log(`✅ OTP sent to ${email}: ${otp}`);
 
     res.json({
       success: true,
@@ -138,20 +147,24 @@ router.post('/send-otp', [
     });
 
   } catch (error) {
-    console.error('Send OTP error:', error);
+    console.error('💥 Send OTP error:', error);
     res.status(500).json({ 
       success: false, 
-      message: 'Failed to send verification code. Please try again later.' 
+      message: 'Failed to send verification code' 
     });
   }
 });
 
-// ✅ VERIFY OTP ENDPOINT
+// ==========================================
+// ✅ VERIFY OTP
+// ==========================================
 router.post('/verify-otp', [
-  body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
-  body('otp').isLength({ min: 6, max: 6 }).withMessage('OTP must be 6 digits')
+  body('email').isEmail().normalizeEmail(),
+  body('otp').isLength({ min: 6, max: 6 })
 ], async (req, res) => {
   try {
+    console.log('🔐 OTP verification for:', req.body.email); // DEBUG
+
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       return res.status(400).json({ 
@@ -164,6 +177,7 @@ router.post('/verify-otp', [
     const storedData = otpStore.get(email);
 
     if (!storedData) {
+      console.log('❌ No OTP found for:', email);
       return res.status(400).json({ 
         success: false, 
         message: 'No OTP found. Please request a new one.' 
@@ -171,6 +185,7 @@ router.post('/verify-otp', [
     }
 
     if (Date.now() > storedData.expiresAt) {
+      console.log('❌ OTP expired for:', email);
       otpStore.delete(email);
       return res.status(400).json({ 
         success: false, 
@@ -179,6 +194,7 @@ router.post('/verify-otp', [
     }
 
     if (storedData.otp !== otp) {
+      console.log('❌ Invalid OTP for:', email);
       return res.status(400).json({ 
         success: false, 
         message: 'Invalid OTP. Please try again.' 
@@ -186,6 +202,7 @@ router.post('/verify-otp', [
     }
 
     otpStore.delete(email);
+    console.log('✅ OTP verified for:', email);
 
     res.json({
       success: true,
@@ -194,7 +211,7 @@ router.post('/verify-otp', [
     });
 
   } catch (error) {
-    console.error('Verify OTP error:', error);
+    console.error('💥 Verify OTP error:', error);
     res.status(500).json({ 
       success: false, 
       message: 'Server error during verification' 
@@ -202,7 +219,9 @@ router.post('/verify-otp', [
   }
 });
 
-// ✅ EMAIL STATUS CHECK ENDPOINT
+// ==========================================
+// ✅ EMAIL STATUS CHECK
+// ==========================================
 router.get('/email-status', (req, res) => {
   res.json({
     success: true,
@@ -211,20 +230,25 @@ router.get('/email-status', (req, res) => {
     fromEmail: FROM_EMAIL,
     message: emailServiceReady 
       ? '✅ Email service is operational' 
-      : '❌ Email service not configured. Add RESEND_API_KEY to environment variables.'
+      : '❌ Add RESEND_API_KEY to environment'
   });
 });
 
-// ✅ FIX 1: REGISTER - Check if email already exists
+// ==========================================
+// ✅ REGISTER (With duplicate check)
+// ==========================================
 router.post('/register', [
-  body('firstName').trim().notEmpty().withMessage('First name is required'),
-  body('lastName').trim().notEmpty().withMessage('Last name is required'),
-  body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
-  body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters')
+  body('firstName').trim().notEmpty().withMessage('First name required'),
+  body('lastName').trim().notEmpty().withMessage('Last name required'),
+  body('email').isEmail().normalizeEmail().withMessage('Valid email required'),
+  body('password').isLength({ min: 6 }).withMessage('Password must be 6+ characters')
 ], async (req, res) => {
   try {
+    console.log('📝 Registration attempt:', req.body.email); // DEBUG
+
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
+      console.log('❌ Validation errors:', errors.array());
       return res.status(400).json({ 
         success: false, 
         errors: errors.array(),
@@ -234,15 +258,17 @@ router.post('/register', [
 
     const { firstName, lastName, email, password, questionnaire } = req.body;
 
-    // ✅ CHECK IF USER ALREADY EXISTS
+    // ✅ CHECK DUPLICATE EMAIL
     const existingUser = await User.findOne({ email });
     if (existingUser) {
+      console.log('❌ Email already exists:', email);
       return res.status(400).json({ 
         success: false, 
         message: 'This email is already registered. Please login instead.' 
       });
     }
 
+    // Create user
     const user = new User({
       firstName,
       lastName,
@@ -252,6 +278,8 @@ router.post('/register', [
     });
 
     await user.save();
+    console.log('✅ User registered:', email);
+
     const token = generateToken(user._id);
 
     res.status(201).json({
@@ -269,7 +297,7 @@ router.post('/register', [
     });
 
   } catch (error) {
-    console.error('Registration error:', error);
+    console.error('💥 Registration error:', error);
     res.status(500).json({ 
       success: false, 
       message: 'Server error during registration' 
@@ -277,38 +305,49 @@ router.post('/register', [
   }
 });
 
-// ✅ FIX 2: LOGIN - Proper validation with welcome message
+// ==========================================
+// ✅ LOGIN (With debug logs + welcome message)
+// ==========================================
 router.post('/login', [
-  body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
-  body('password').notEmpty().withMessage('Password is required')
+  body('email').isEmail().normalizeEmail().withMessage('Valid email required'),
+  body('password').notEmpty().withMessage('Password required')
 ], async (req, res) => {
   try {
+    console.log('🔐 Login attempt:', req.body.email); // DEBUG
+
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
+      console.log('❌ Validation errors:', errors.array());
       return res.status(400).json({ 
         success: false, 
         errors: errors.array(),
-        message: 'Please enter valid email and password'
+        message: 'Invalid email or password format'
       });
     }
 
     const { email, password } = req.body;
 
-    // Find user by email
+    // Find user
     const user = await User.findOne({ email });
     if (!user) {
+      console.log('❌ User not found:', email);
       return res.status(401).json({ 
         success: false, 
-        message: 'Invalid email or password. Please check your credentials.' 
+        message: 'Invalid email or password' 
       });
     }
 
+    console.log('✅ User found:', user.email);
+
     // Check password
     const isMatch = await user.comparePassword(password);
+    console.log('🔑 Password match:', isMatch);
+
     if (!isMatch) {
+      console.log('❌ Wrong password for:', email);
       return res.status(401).json({ 
         success: false, 
-        message: 'Invalid email or password. Please check your credentials.' 
+        message: 'Invalid email or password' 
       });
     }
 
@@ -317,11 +356,12 @@ router.post('/login', [
     await user.save();
 
     const token = generateToken(user._id);
+    console.log('✅ Login successful:', email);
 
-    // ✅ SEND WELCOME MESSAGE WITH USER NAME
+    // ✅ PERSONALIZED WELCOME MESSAGE
     res.json({
       success: true,
-      message: `Welcome back, ${user.firstName}!`, // ✅ Personalized welcome
+      message: `Welcome back, ${user.firstName}! 🎉`,
       token,
       user: {
         id: user._id,
@@ -335,15 +375,17 @@ router.post('/login', [
     });
 
   } catch (error) {
-    console.error('Login error:', error);
+    console.error('💥 Login error:', error);
     res.status(500).json({ 
       success: false, 
-      message: 'Server error during login. Please try again.' 
+      message: 'Server error during login' 
     });
   }
 });
 
+// ==========================================
 // ✅ GET CURRENT USER
+// ==========================================
 router.get('/me', auth, async (req, res) => {
   try {
     const user = await User.findById(req.userId).select('-password');
@@ -369,7 +411,9 @@ router.get('/me', auth, async (req, res) => {
   }
 });
 
+// ==========================================
 // ✅ GOOGLE AUTH
+// ==========================================
 router.post('/google', async (req, res) => {
   try {
     const { googleId, email, firstName, lastName, profilePhoto } = req.body;
@@ -400,7 +444,7 @@ router.post('/google', async (req, res) => {
 
     res.json({
       success: true,
-      message: `Welcome back, ${user.firstName}!`,
+      message: `Welcome back, ${user.firstName}! 🎉`,
       token,
       user: {
         id: user._id,
@@ -421,7 +465,9 @@ router.post('/google', async (req, res) => {
   }
 });
 
+// ==========================================
 // ✅ FACEBOOK AUTH
+// ==========================================
 router.post('/facebook', async (req, res) => {
   try {
     const { facebookId, email, firstName, lastName, profilePhoto } = req.body;
@@ -452,7 +498,7 @@ router.post('/facebook', async (req, res) => {
 
     res.json({
       success: true,
-      message: `Welcome back, ${user.firstName}!`,
+      message: `Welcome back, ${user.firstName}! 🎉`,
       token,
       user: {
         id: user._id,
