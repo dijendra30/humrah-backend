@@ -1,10 +1,9 @@
-// models/User.js - User Schema for MongoDB
+// models/User.js - Updated User Schema with Email & Photo Verification
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
-// Updated questionnaire schema to match Android app's Questionnaire data class
+// Questionnaire embedded schema
 const questionnaireSchema = new mongoose.Schema({
-  // Basic questionnaire fields
   mood: String,
   name: String,
   ageGroup: String,
@@ -12,38 +11,29 @@ const questionnaireSchema = new mongoose.Schema({
   city: String,
   area: String,
   languagePreference: String,
-  profilePhoto: String, // Base64 encoded image
-  
-  // Social preferences
-  personalityType: String, // introvert/extrovert/ambivert
-  hangoutPreferences: [String], // Array: cafe, gaming, movie, walk, talk
-  meetupPreference: String, // one-on-one or small groups
-  availableTimes: [String], // morning, afternoon, evening, weekends
-  
-  // Intent & Mood
-  lookingForOnHumrah: [String], // new friends, gaming partner, etc.
+  profilePhoto: String, // Cloudinary URL
+  profilePhotoPublicId: String, // Cloudinary public ID for deletion
+  personalityType: String,
+  hangoutPreferences: [String],
+  meetupPreference: String,
+  availableTimes: [String],
+  lookingForOnHumrah: [String],
   goodMeetupMeaning: String,
-  vibeWords: [String], // 3 words describing vibe
-  
-  // Safety
-  publicPlacesOnly: String, // Yes/No
-  verifyIdentity: String, // Yes/No
-  understandGuidelines: String, // I agree
-  
-  // Personality (optional)
+  vibeWords: [String],
+  publicPlacesOnly: String,
+  verifyIdentity: String,
+  understandGuidelines: String,
   comfortActivity: String,
   relaxActivity: String,
   vibeQuote: String,
-  
-  // Companion fields
   becomeCompanion: String,
-  openFor: [String], // outdoor, gaming, coffee, group hangouts
-  comfortZones: [String], // public cafes, parks, game zones
+  openFor: [String],
+  comfortZones: [String],
   tagline: String,
-  availability: String, // Weekdays/Weekends/All Days
-  price: String, // Price per hour
+  availability: String,
+  price: String,
   
-  // Legacy fields (kept for backward compatibility)
+  // Legacy fields
   gender: String,
   dateOfBirth: Date,
   language: String,
@@ -66,6 +56,7 @@ const questionnaireSchema = new mongoose.Schema({
   bio: String
 }, { _id: false });
 
+// Main User Schema
 const userSchema = new mongoose.Schema({
   firstName: {
     type: String,
@@ -87,51 +78,95 @@ const userSchema = new mongoose.Schema({
   },
   password: {
     type: String,
-    required: function() {
+    required: function () {
       return !this.googleId && !this.facebookId;
     },
     minlength: [6, 'Password must be at least 6 characters']
   },
-  profilePhoto: {
+  
+  // Profile Photo
+  profilePhoto: { 
+    type: String, 
+    default: null // Cloudinary URL
+  },
+  profilePhotoPublicId: {
     type: String,
+    default: null // Cloudinary public ID
+  },
+
+  // Email Verification
+  emailVerified: { 
+    type: Boolean, 
+    default: false 
+  },
+  emailVerificationToken: { 
+    type: String, 
+    default: null 
+  },
+  emailVerificationExpires: { 
+    type: Date, 
+    default: null 
+  },
+
+  // Photo Verification (Manual by Admin)
+  photoVerificationStatus: {
+    type: String,
+    enum: ['pending', 'approved', 'rejected'],
+    default: 'pending'
+  },
+  photoVerifiedAt: {
+    type: Date,
     default: null
   },
+  photoVerifiedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Admin',
+    default: null
+  },
+
+  // Verification Photo (submitted for manual verification)
+  verificationPhoto: {
+    type: String, // Cloudinary URL
+    default: null
+  },
+  verificationPhotoPublicId: {
+    type: String, // Cloudinary public ID
+    default: null
+  },
+  verificationPhotoSubmittedAt: {
+    type: Date,
+    default: null
+  },
+
   questionnaire: {
     type: questionnaireSchema,
     default: {}
   },
-  isPremium: {
-    type: Boolean,
-    default: false
+
+  isPremium: { type: Boolean, default: false },
+  premiumExpiresAt: { type: Date, default: null },
+
+  // Overall verification status (email verified + photo approved)
+  verified: { 
+    type: Boolean, 
+    default: false 
   },
-  premiumExpiresAt: {
-    type: Date,
-    default: null
-  },
-  verified: {
-    type: Boolean,
-    default: false
-  },
+
   googleId: String,
   facebookId: String,
-  lastActive: {
-    type: Date,
-    default: Date.now
-  },
-  createdAt: {
-    type: Date,
-    default: Date.now
-  }
+
+  lastActive: { type: Date, default: Date.now },
+  createdAt: { type: Date, default: Date.now }
 }, {
   timestamps: true,
   toJSON: { virtuals: true },
   toObject: { virtuals: true }
 });
 
-// Hash password before saving
-userSchema.pre('save', async function(next) {
+// Hash password before save
+userSchema.pre('save', async function (next) {
   if (!this.isModified('password')) return next();
-  
+
   try {
     const salt = await bcrypt.genSalt(10);
     this.password = await bcrypt.hash(this.password, salt);
@@ -141,20 +176,32 @@ userSchema.pre('save', async function(next) {
   }
 });
 
-// Compare password method
-userSchema.methods.comparePassword = async function(candidatePassword) {
-  return await bcrypt.compare(candidatePassword, this.password);
+// Compare password
+userSchema.methods.comparePassword = async function (candidatePassword) {
+  return bcrypt.compare(candidatePassword, this.password);
 };
 
-// Get full name
-userSchema.virtual('fullName').get(function() {
+// Virtual full name
+userSchema.virtual('fullName').get(function () {
   return `${this.firstName} ${this.lastName}`;
 });
 
-// Remove password from JSON response
-userSchema.methods.toJSON = function() {
+// Check if user is fully verified (email + photo)
+userSchema.methods.isFullyVerified = function() {
+  return this.emailVerified && this.photoVerificationStatus === 'approved';
+};
+
+// Update overall verified status
+userSchema.pre('save', function(next) {
+  this.verified = this.isFullyVerified();
+  next();
+});
+
+// Remove password from JSON output
+userSchema.methods.toJSON = function () {
   const obj = this.toObject();
   delete obj.password;
+  delete obj.emailVerificationToken;
   return obj;
 };
 
