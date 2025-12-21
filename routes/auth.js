@@ -1,272 +1,70 @@
-// routes/auth.js - FINAL COMPLETE VERSION (Copy-Paste Ready)
+// routes/auth.js - Updated Authentication Routes with Email Verification & Cloudinary
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
-const { Resend } = require('resend');
 const { body, validationResult } = require('express-validator');
 const User = require('../models/User');
 const auth = require('../middleware/auth');
+const { uploadBase64, deleteImage } = require('../config/cloudinary');
+const { 
+  generateVerificationToken, 
+  sendVerificationEmail,
+  sendWelcomeEmail 
+} = require('../config/email');
 
-// ==========================================
-// RESEND EMAIL CONFIGURATION
-// ==========================================
-const RESEND_API_KEY = process.env.RESEND_API_KEY;
-const FROM_EMAIL = process.env.FROM_EMAIL || 'onboarding@resend.dev';
-
-let emailServiceReady = false;
-let resend;
-
-if (RESEND_API_KEY) {
-  resend = new Resend(RESEND_API_KEY);
-  emailServiceReady = true;
-  console.log('✅ Resend email service is ready');
-  console.log(`📧 Sending emails from: ${FROM_EMAIL}`);
-} else {
-  console.log('⚠️ Resend API key not found');
-  console.log('💡 Get free API key: https://resend.com/signup');
-}
-
-// OTP Storage
-const otpStore = new Map();
-const OTP_EXPIRY = 10 * 60 * 1000; // 10 minutes
-
-// ==========================================
-// JWT TOKEN GENERATION
-// ==========================================
+// Generate JWT Token
 const generateToken = (userId) => {
   return jwt.sign({ userId }, process.env.JWT_SECRET || 'fallback_secret', {
     expiresIn: '30d'
   });
 };
 
-// ==========================================
-// ✅ SEND OTP
-// ==========================================
-router.post('/send-otp', [
-  body('email').isEmail().normalizeEmail().withMessage('Valid email required')
-], async (req, res) => {
-  try {
-    console.log('📧 OTP request for:', req.body.email); // DEBUG
-
-    if (!emailServiceReady) {
-      return res.status(503).json({
-        success: false,
-        message: 'Email service not configured'
-      });
-    }
-
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      console.log('❌ Validation errors:', errors.array());
-      return res.status(400).json({ 
-        success: false, 
-        errors: errors.array() 
-      });
-    }
-
-    const { email } = req.body;
-
-    // Check if email exists
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      console.log('❌ Email already registered:', email);
-      return res.status(400).json({ 
-        success: false, 
-        message: 'This email is already registered. Please login instead.' 
-      });
-    }
-
-    // Generate OTP
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    
-    otpStore.set(email, {
-      otp,
-      expiresAt: Date.now() + OTP_EXPIRY
-    });
-
-    // Send email
-    const { data, error } = await resend.emails.send({
-      from: FROM_EMAIL,
-      to: [email],
-      subject: 'Your Humrah Verification Code',
-      html: `
-        <!DOCTYPE html>
-        <html>
-        <head>
-          <style>
-            body { font-family: Arial, sans-serif; background-color: #f4f4f4; margin: 0; padding: 0; }
-            .container { max-width: 600px; margin: 50px auto; background: #ffffff; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-            .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; text-align: center; color: white; }
-            .header h1 { margin: 0; font-size: 28px; }
-            .content { padding: 40px 30px; text-align: center; }
-            .otp-box { background: #f8f9fa; border: 2px dashed #667eea; border-radius: 8px; padding: 20px; margin: 30px 0; }
-            .otp-code { font-size: 36px; font-weight: bold; color: #667eea; letter-spacing: 8px; margin: 10px 0; }
-            .footer { background: #f8f9fa; padding: 20px; text-align: center; color: #6c757d; font-size: 12px; }
-          </style>
-        </head>
-        <body>
-          <div class="container">
-            <div class="header">
-              <h1>🎉 Welcome to Humrah!</h1>
-            </div>
-            <div class="content">
-              <h2>Email Verification</h2>
-              <p>Thank you for registering with Humrah! Please use the verification code below to complete your registration:</p>
-              
-              <div class="otp-box">
-                <p style="margin: 0; color: #6c757d; font-size: 14px;">Your Verification Code</p>
-                <div class="otp-code">${otp}</div>
-                <p style="margin: 10px 0 0 0; color: #6c757d; font-size: 12px;">Valid for 10 minutes</p>
-              </div>
-
-              <p style="color: #6c757d; font-size: 14px;">If you didn't request this code, please ignore this email.</p>
-            </div>
-            <div class="footer">
-              <p>This is an automated message from Humrah. Please do not reply to this email.</p>
-              <p>&copy; ${new Date().getFullYear()} Humrah. All rights reserved.</p>
-            </div>
-          </div>
-        </body>
-        </html>
-      `
-    });
-
-    if (error) {
-      console.error('❌ Resend error:', error);
-      return res.status(500).json({ 
-        success: false, 
-        message: 'Failed to send verification code' 
-      });
-    }
-
-    console.log(`✅ OTP sent to ${email}: ${otp}`);
-
-    res.json({
-      success: true,
-      message: 'Verification code sent to your email!'
-    });
-
-  } catch (error) {
-    console.error('💥 Send OTP error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to send verification code' 
-    });
-  }
-});
-
-// ==========================================
-// ✅ VERIFY OTP
-// ==========================================
-router.post('/verify-otp', [
-  body('email').isEmail().normalizeEmail(),
-  body('otp').isLength({ min: 6, max: 6 })
-], async (req, res) => {
-  try {
-    console.log('🔐 OTP verification for:', req.body.email); // DEBUG
-
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ 
-        success: false, 
-        errors: errors.array() 
-      });
-    }
-
-    const { email, otp } = req.body;
-    const storedData = otpStore.get(email);
-
-    if (!storedData) {
-      console.log('❌ No OTP found for:', email);
-      return res.status(400).json({ 
-        success: false, 
-        message: 'No OTP found. Please request a new one.' 
-      });
-    }
-
-    if (Date.now() > storedData.expiresAt) {
-      console.log('❌ OTP expired for:', email);
-      otpStore.delete(email);
-      return res.status(400).json({ 
-        success: false, 
-        message: 'OTP expired. Please request a new one.' 
-      });
-    }
-
-    if (storedData.otp !== otp) {
-      console.log('❌ Invalid OTP for:', email);
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Invalid OTP. Please try again.' 
-      });
-    }
-
-    otpStore.delete(email);
-    console.log('✅ OTP verified for:', email);
-
-    res.json({
-      success: true,
-      verified: true,
-      message: 'Email verified successfully!'
-    });
-
-  } catch (error) {
-    console.error('💥 Verify OTP error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error during verification' 
-    });
-  }
-});
-
-// ==========================================
-// ✅ EMAIL STATUS CHECK
-// ==========================================
-router.get('/email-status', (req, res) => {
-  res.json({
-    success: true,
-    emailServiceReady,
-    provider: 'Resend',
-    fromEmail: FROM_EMAIL,
-    message: emailServiceReady 
-      ? '✅ Email service is operational' 
-      : '❌ Add RESEND_API_KEY to environment'
-  });
-});
-
-// ==========================================
-// ✅ REGISTER (With duplicate check)
-// ==========================================
+// @route   POST /api/auth/register
+// @desc    Register new user with email verification
+// @access  Public
 router.post('/register', [
-  body('firstName').trim().notEmpty().withMessage('First name required'),
-  body('lastName').trim().notEmpty().withMessage('Last name required'),
-  body('email').isEmail().normalizeEmail().withMessage('Valid email required'),
-  body('password').isLength({ min: 6 }).withMessage('Password must be 6+ characters')
+  body('firstName').trim().notEmpty().withMessage('First name is required'),
+  body('lastName').trim().notEmpty().withMessage('Last name is required'),
+  body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
+  body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters')
 ], async (req, res) => {
   try {
-    console.log('📝 Registration attempt:', req.body.email); // DEBUG
-
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      console.log('❌ Validation errors:', errors.array());
       return res.status(400).json({ 
         success: false, 
-        errors: errors.array(),
-        message: 'Validation failed' 
+        errors: errors.array() 
       });
     }
 
     const { firstName, lastName, email, password, questionnaire } = req.body;
 
-    // ✅ CHECK DUPLICATE EMAIL
+    // Check if user exists
     const existingUser = await User.findOne({ email });
     if (existingUser) {
-      console.log('❌ Email already exists:', email);
       return res.status(400).json({ 
         success: false, 
-        message: 'This email is already registered. Please login instead.' 
+        message: 'User with this email already exists' 
       });
     }
+
+    // Handle verification photo upload (if provided in questionnaire)
+    let verificationPhotoData = null;
+    if (questionnaire?.profilePhoto) {
+      try {
+        // Upload to Cloudinary
+        verificationPhotoData = await uploadBase64(
+          questionnaire.profilePhoto,
+          'humrah/verification'
+        );
+      } catch (error) {
+        console.error('Error uploading verification photo:', error);
+      }
+    }
+
+    // Generate email verification token
+    const emailVerificationToken = generateVerificationToken();
+    const emailVerificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
 
     // Create user
     const user = new User({
@@ -274,94 +72,32 @@ router.post('/register', [
       lastName,
       email,
       password,
-      questionnaire: questionnaire || {}
+      questionnaire: questionnaire || {},
+      emailVerificationToken,
+      emailVerificationExpires,
+      emailVerified: false,
+      verificationPhoto: verificationPhotoData?.url || null,
+      verificationPhotoPublicId: verificationPhotoData?.publicId || null,
+      verificationPhotoSubmittedAt: verificationPhotoData ? new Date() : null,
+      photoVerificationStatus: verificationPhotoData ? 'pending' : null
     });
 
     await user.save();
-    console.log('✅ User registered:', email);
 
+    // Send verification email
+    try {
+      await sendVerificationEmail(email, firstName, emailVerificationToken);
+    } catch (emailError) {
+      console.error('Error sending verification email:', emailError);
+      // Don't fail registration if email fails
+    }
+
+    // Generate token
     const token = generateToken(user._id);
 
     res.status(201).json({
       success: true,
-      message: 'Registration successful',
-      token,
-      user: {
-        id: user._id,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        email: user.email,
-        profilePhoto: user.profilePhoto,
-        isPremium: user.isPremium
-      }
-    });
-
-  } catch (error) {
-    console.error('💥 Registration error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error during registration' 
-    });
-  }
-});
-
-// ==========================================
-// ✅ LOGIN (With debug logs + welcome message)
-// ==========================================
-router.post('/login', [
-  body('email').isEmail().normalizeEmail().withMessage('Valid email required'),
-  body('password').notEmpty().withMessage('Password required')
-], async (req, res) => {
-  try {
-    console.log('🔐 Login attempt:', req.body.email); // DEBUG
-
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      console.log('❌ Validation errors:', errors.array());
-      return res.status(400).json({ 
-        success: false, 
-        errors: errors.array(),
-        message: 'Invalid email or password format'
-      });
-    }
-
-    const { email, password } = req.body;
-
-    // Find user
-    const user = await User.findOne({ email });
-    if (!user) {
-      console.log('❌ User not found:', email);
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Invalid email or password' 
-      });
-    }
-
-    console.log('✅ User found:', user.email);
-
-    // Check password
-    const isMatch = await user.comparePassword(password);
-    console.log('🔑 Password match:', isMatch);
-
-    if (!isMatch) {
-      console.log('❌ Wrong password for:', email);
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Invalid email or password' 
-      });
-    }
-
-    // Update last active
-    user.lastActive = Date.now();
-    await user.save();
-
-    const token = generateToken(user._id);
-    console.log('✅ Login successful:', email);
-
-    // ✅ PERSONALIZED WELCOME MESSAGE
-    res.json({
-      success: true,
-      message: `Welcome back, ${user.firstName}! 🎉`,
+      message: 'Registration successful! Please check your email to verify your account.',
       token,
       user: {
         id: user._id,
@@ -370,12 +106,176 @@ router.post('/login', [
         email: user.email,
         profilePhoto: user.profilePhoto,
         isPremium: user.isPremium,
-        questionnaire: user.questionnaire
+        emailVerified: user.emailVerified,
+        photoVerificationStatus: user.photoVerificationStatus,
+        verified: user.verified
+      },
+      emailSent: true
+    });
+
+  } catch (error) {
+    console.error('Registration error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error during registration' 
+    });
+  }
+});
+
+// @route   GET /api/auth/verify-email/:token
+// @desc    Verify user's email address
+// @access  Public
+router.get('/verify-email/:token', async (req, res) => {
+  try {
+    const { token } = req.params;
+
+    const user = await User.findOne({
+      emailVerificationToken: token,
+      emailVerificationExpires: { $gt: Date.now() }
+    });
+
+    if (!user) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid or expired verification token'
+      });
+    }
+
+    // Update user
+    user.emailVerified = true;
+    user.emailVerificationToken = null;
+    user.emailVerificationExpires = null;
+    user.verified = user.isFullyVerified(); // Update overall verified status
+    await user.save();
+
+    // Send welcome email
+    try {
+      await sendWelcomeEmail(user.email, user.firstName);
+    } catch (emailError) {
+      console.error('Error sending welcome email:', emailError);
+    }
+
+    res.json({
+      success: true,
+      message: 'Email verified successfully!',
+      emailVerified: true,
+      verified: user.verified
+    });
+
+  } catch (error) {
+    console.error('Email verification error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during verification'
+    });
+  }
+});
+
+// @route   POST /api/auth/resend-verification
+// @desc    Resend verification email
+// @access  Private
+router.post('/resend-verification', auth, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    if (user.emailVerified) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email already verified'
+      });
+    }
+
+    // Generate new token
+    const emailVerificationToken = generateVerificationToken();
+    const emailVerificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+    user.emailVerificationToken = emailVerificationToken;
+    user.emailVerificationExpires = emailVerificationExpires;
+    await user.save();
+
+    // Send email
+    await sendVerificationEmail(user.email, user.firstName, emailVerificationToken);
+
+    res.json({
+      success: true,
+      message: 'Verification email sent successfully'
+    });
+
+  } catch (error) {
+    console.error('Resend verification error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// @route   POST /api/auth/login
+// @desc    Login user
+// @access  Public
+router.post('/login', [
+  body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
+  body('password').notEmpty().withMessage('Password is required')
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ 
+        success: false, 
+        errors: errors.array() 
+      });
+    }
+
+    const { email, password } = req.body;
+
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Invalid email or password' 
+      });
+    }
+
+    const isMatch = await user.comparePassword(password);
+    if (!isMatch) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Invalid email or password' 
+      });
+    }
+
+    user.lastActive = Date.now();
+    await user.save();
+
+    const token = generateToken(user._id);
+
+    res.json({
+      success: true,
+      message: 'Login successful',
+      token,
+      user: {
+        id: user._id,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        email: user.email,
+        profilePhoto: user.profilePhoto,
+        isPremium: user.isPremium,
+        questionnaire: user.questionnaire,
+        emailVerified: user.emailVerified,
+        photoVerificationStatus: user.photoVerificationStatus,
+        verified: user.verified
       }
     });
 
   } catch (error) {
-    console.error('💥 Login error:', error);
+    console.error('Login error:', error);
     res.status(500).json({ 
       success: false, 
       message: 'Server error during login' 
@@ -383,9 +283,9 @@ router.post('/login', [
   }
 });
 
-// ==========================================
-// ✅ GET CURRENT USER
-// ==========================================
+// @route   GET /api/auth/me
+// @desc    Get current user
+// @access  Private
 router.get('/me', auth, async (req, res) => {
   try {
     const user = await User.findById(req.userId).select('-password');
@@ -411,9 +311,9 @@ router.get('/me', auth, async (req, res) => {
   }
 });
 
-// ==========================================
-// ✅ GOOGLE AUTH
-// ==========================================
+// @route   POST /api/auth/google
+// @desc    Google OAuth login/register
+// @access  Public
 router.post('/google', async (req, res) => {
   try {
     const { googleId, email, firstName, lastName, profilePhoto } = req.body;
@@ -432,7 +332,7 @@ router.post('/google', async (req, res) => {
         firstName,
         lastName,
         profilePhoto,
-        verified: true
+        emailVerified: true // Google emails are verified
       });
       await user.save();
     }
@@ -444,7 +344,7 @@ router.post('/google', async (req, res) => {
 
     res.json({
       success: true,
-      message: `Welcome back, ${user.firstName}! 🎉`,
+      message: 'Google authentication successful',
       token,
       user: {
         id: user._id,
@@ -452,7 +352,9 @@ router.post('/google', async (req, res) => {
         lastName: user.lastName,
         email: user.email,
         profilePhoto: user.profilePhoto,
-        isPremium: user.isPremium
+        isPremium: user.isPremium,
+        emailVerified: user.emailVerified,
+        verified: user.verified
       }
     });
 
@@ -465,9 +367,9 @@ router.post('/google', async (req, res) => {
   }
 });
 
-// ==========================================
-// ✅ FACEBOOK AUTH
-// ==========================================
+// @route   POST /api/auth/facebook
+// @desc    Facebook OAuth login/register
+// @access  Public
 router.post('/facebook', async (req, res) => {
   try {
     const { facebookId, email, firstName, lastName, profilePhoto } = req.body;
@@ -486,7 +388,7 @@ router.post('/facebook', async (req, res) => {
         firstName,
         lastName,
         profilePhoto,
-        verified: true
+        emailVerified: true // Facebook emails are verified
       });
       await user.save();
     }
@@ -498,7 +400,7 @@ router.post('/facebook', async (req, res) => {
 
     res.json({
       success: true,
-      message: `Welcome back, ${user.firstName}! 🎉`,
+      message: 'Facebook authentication successful',
       token,
       user: {
         id: user._id,
@@ -506,7 +408,9 @@ router.post('/facebook', async (req, res) => {
         lastName: user.lastName,
         email: user.email,
         profilePhoto: user.profilePhoto,
-        isPremium: user.isPremium
+        isPremium: user.isPremium,
+        emailVerified: user.emailVerified,
+        verified: user.verified
       }
     });
 
