@@ -1,7 +1,7 @@
-// config/cloudinary.js - Cloudinary Configuration
+// config/cloudinary.js - Cloudinary Configuration (Fixed for Production)
 const cloudinary = require('cloudinary').v2;
-const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const multer = require('multer');
+const path = require('path');
 
 // Configure Cloudinary
 cloudinary.config({
@@ -10,18 +10,8 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET
 });
 
-// Configure Cloudinary Storage for Multer
-const storage = new CloudinaryStorage({
-  cloudinary: cloudinary,
-  params: {
-    folder: 'humrah',
-    allowed_formats: ['jpg', 'jpeg', 'png', 'gif', 'webp'],
-    transformation: [
-      { width: 1000, height: 1000, crop: 'limit' },
-      { quality: 'auto:good' }
-    ]
-  }
-});
+// Configure Multer for Memory Storage (no disk writes)
+const storage = multer.memoryStorage();
 
 // Configure Multer Upload
 const upload = multer({
@@ -37,6 +27,33 @@ const upload = multer({
     }
   }
 });
+
+// Helper function to upload buffer to Cloudinary
+const uploadBuffer = async (buffer, folder = 'humrah') => {
+  return new Promise((resolve, reject) => {
+    const uploadStream = cloudinary.uploader.upload_stream(
+      {
+        folder: folder,
+        resource_type: 'image',
+        transformation: [
+          { width: 1000, height: 1000, crop: 'limit' },
+          { quality: 'auto:good' }
+        ]
+      },
+      (error, result) => {
+        if (error) {
+          reject(error);
+        } else {
+          resolve({
+            url: result.secure_url,
+            publicId: result.public_id
+          });
+        }
+      }
+    );
+    uploadStream.end(buffer);
+  });
+};
 
 // Helper function to delete image from Cloudinary
 const deleteImage = async (publicId) => {
@@ -73,6 +90,7 @@ const uploadBase64 = async (base64String, folder = 'humrah') => {
 module.exports = {
   cloudinary,
   upload,
+  uploadBuffer,
   deleteImage,
   uploadBase64
 };
