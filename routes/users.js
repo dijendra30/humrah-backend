@@ -1,9 +1,9 @@
-// routes/users.js - Updated User Profile Routes with Photo Upload & Verification
+// routes/users.js - Fixed User Profile Routes with Buffer-Based Upload
 const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
 const User = require('../models/User');
-const { upload, uploadBase64, deleteImage } = require('../config/cloudinary');
+const { upload, uploadBuffer, uploadBase64, deleteImage } = require('../config/cloudinary');
 const { sendProfileVerificationEmail } = require('../config/email');
 
 // @route   PUT /api/users/me
@@ -75,9 +75,12 @@ router.post('/upload-profile-photo', auth, upload.single('photo'), async (req, r
       await deleteImage(user.profilePhotoPublicId);
     }
 
+    // Upload buffer to Cloudinary
+    const uploadResult = await uploadBuffer(req.file.buffer, 'humrah/profiles');
+
     // Update user with new photo
-    user.profilePhoto = req.file.path; // Cloudinary URL
-    user.profilePhotoPublicId = req.file.filename; // Cloudinary public ID
+    user.profilePhoto = uploadResult.url;
+    user.profilePhotoPublicId = uploadResult.publicId;
     await user.save();
 
     res.json({
@@ -90,7 +93,7 @@ router.post('/upload-profile-photo', auth, upload.single('photo'), async (req, r
     console.error('Upload profile photo error:', error);
     res.status(500).json({
       success: false,
-      message: 'Server error'
+      message: 'Server error uploading photo'
     });
   }
 });
@@ -170,9 +173,12 @@ router.post('/submit-verification-photo', auth, upload.single('photo'), async (r
       await deleteImage(user.verificationPhotoPublicId);
     }
 
+    // Upload buffer to Cloudinary
+    const uploadResult = await uploadBuffer(req.file.buffer, 'humrah/verification');
+
     // Update user with verification photo
-    user.verificationPhoto = req.file.path;
-    user.verificationPhotoPublicId = req.file.filename;
+    user.verificationPhoto = uploadResult.url;
+    user.verificationPhotoPublicId = uploadResult.publicId;
     user.verificationPhotoSubmittedAt = new Date();
     user.photoVerificationStatus = 'pending';
     await user.save();
