@@ -1,6 +1,5 @@
-// config/email.js - Brevo Email Service
+// config/email.js - Brevo Email Service with OTP
 const brevo = require('@getbrevo/brevo');
-const crypto = require('crypto');
 
 // Initialize Brevo API client
 const apiInstance = new brevo.TransactionalEmailsApi();
@@ -9,18 +8,29 @@ apiInstance.setApiKey(
   process.env.BREVO_API_KEY
 );
 
-// Generate verification token
-const generateVerificationToken = () => {
-  return crypto.randomBytes(32).toString('hex');
+// Generate 6-digit OTP
+const generateOTP = () => {
+  return Math.floor(100000 + Math.random() * 900000).toString();
 };
 
-// Send verification email
-const sendVerificationEmail = async (userEmail, userName, verificationToken) => {
-  const verificationLink = `${process.env.FRONTEND_URL}/verify-email?token=${verificationToken}`;
+// Send verification email with OTP
+const sendVerificationEmail = async (userEmail, userName, otp) => {
+  
+  // Log OTP in console if in test mode
+  if (process.env.OTP_TEST_MODE === 'true') {
+    console.log('='.repeat(60));
+    console.log('📧 OTP VERIFICATION EMAIL');
+    console.log('='.repeat(60));
+    console.log(`📨 To: ${userEmail}`);
+    console.log(`👤 User: ${userName}`);
+    console.log(`🔐 OTP: ${otp}`);
+    console.log(`⏰ Time: ${new Date().toLocaleString()}`);
+    console.log('='.repeat(60));
+  }
 
   const sendSmtpEmail = new brevo.SendSmtpEmail();
 
-  sendSmtpEmail.subject = "Verify Your Humrah Account";
+  sendSmtpEmail.subject = "Verify Your Humrah Account - OTP Inside";
   sendSmtpEmail.htmlContent = `
     <!DOCTYPE html>
     <html>
@@ -64,22 +74,24 @@ const sendVerificationEmail = async (userEmail, userName, verificationToken) => 
           font-size: 16px;
           color: #555555;
         }
-        .button {
-          display: inline-block;
-          padding: 16px 40px;
-          margin: 30px 0;
+        .otp-box {
           background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
           color: #ffffff;
-          text-decoration: none;
-          border-radius: 50px;
+          font-size: 36px;
           font-weight: bold;
-          font-size: 16px;
-          box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
-          transition: all 0.3s ease;
+          letter-spacing: 8px;
+          text-align: center;
+          padding: 25px;
+          margin: 30px 0;
+          border-radius: 10px;
+          font-family: 'Courier New', monospace;
         }
-        .button:hover {
-          transform: translateY(-2px);
-          box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
+        .warning {
+          background-color: #fff3cd;
+          border-left: 4px solid #ffc107;
+          padding: 15px;
+          margin: 20px 0;
+          border-radius: 5px;
         }
         .footer {
           background-color: #f8f9fa;
@@ -106,31 +118,31 @@ const sendVerificationEmail = async (userEmail, userName, verificationToken) => 
           
           <div class="divider"></div>
           
-          <p><strong>To complete your registration, please verify your email address:</strong></p>
+          <p><strong>Your One-Time Password (OTP) is:</strong></p>
           
-          <center>
-            <a href="${verificationLink}" class="button">
-              ✓ Verify My Email
-            </a>
-          </center>
+          <div class="otp-box">
+            ${otp}
+          </div>
           
-          <p style="margin-top: 30px; font-size: 14px; color: #888888;">
-            If the button doesn't work, copy and paste this link into your browser:<br>
-            <a href="${verificationLink}" style="color: #667eea; word-break: break-all;">
-              ${verificationLink}
-            </a>
-          </p>
+          <div class="warning">
+            <strong>⚠️ Important:</strong>
+            <ul style="margin: 10px 0; padding-left: 20px;">
+              <li>This OTP is valid for <strong>10 minutes</strong></li>
+              <li>Never share this OTP with anyone</li>
+              <li>Humrah team will never ask for your OTP</li>
+            </ul>
+          </div>
           
           <div class="divider"></div>
           
           <p style="font-size: 14px; color: #888888;">
-            <strong>Note:</strong> This verification link will expire in 24 hours for security reasons.
+            If you didn't request this OTP, please ignore this email or contact our support team.
           </p>
         </div>
         <div class="footer">
           <p>Made with ❤️ by Humrah Team</p>
           <p style="margin: 10px 0;">
-            If you didn't create an account, please ignore this email.
+            If you have any questions, reply to this email anytime.
           </p>
         </div>
       </div>
@@ -139,15 +151,15 @@ const sendVerificationEmail = async (userEmail, userName, verificationToken) => 
   `;
 
   sendSmtpEmail.sender = {
-    name: process.env.BREVO_SENDER_NAME,
-    email: process.env.BREVO_SENDER_EMAIL
+    name: process.env.BREVO_SENDER_NAME || 'Humrah Team',
+    email: process.env.BREVO_SENDER_EMAIL || 'noreply@humrah.com'
   };
 
   sendSmtpEmail.to = [{ email: userEmail, name: userName }];
 
   try {
     const data = await apiInstance.sendTransacEmail(sendSmtpEmail);
-    console.log('✅ Verification email sent successfully:', data);
+    console.log('✅ Verification email sent successfully:', data.messageId);
     return { success: true, messageId: data.messageId };
   } catch (error) {
     console.error('❌ Error sending verification email:', error);
@@ -258,7 +270,7 @@ const sendWelcomeEmail = async (userEmail, userName) => {
           </div>
           
           <center>
-            <a href="${process.env.FRONTEND_URL}" class="button">
+            <a href="${process.env.FRONTEND_URL || 'https://humrah.app'}" class="button">
               🚀 Start Exploring
             </a>
           </center>
@@ -273,8 +285,8 @@ const sendWelcomeEmail = async (userEmail, userName) => {
   `;
 
   sendSmtpEmail.sender = {
-    name: process.env.BREVO_SENDER_NAME,
-    email: process.env.BREVO_SENDER_EMAIL
+    name: process.env.BREVO_SENDER_NAME || 'Humrah Team',
+    email: process.env.BREVO_SENDER_EMAIL || 'noreply@humrah.com'
   };
 
   sendSmtpEmail.to = [{ email: userEmail, name: userName }];
@@ -306,7 +318,7 @@ const sendProfileVerificationEmail = async (userEmail, userName, isApproved) => 
           <p>You now have a <strong style="color: #00FF88;">verified badge ✓</strong> on your profile!</p>
           <p>This increases your credibility and helps you connect with more people.</p>
           <center>
-            <a href="${process.env.FRONTEND_URL}" style="display: inline-block; padding: 15px 30px; background: #00FF88; color: white; text-decoration: none; border-radius: 50px; margin-top: 20px;">
+            <a href="${process.env.FRONTEND_URL || 'https://humrah.app'}" style="display: inline-block; padding: 15px 30px; background: #00FF88; color: white; text-decoration: none; border-radius: 50px; margin-top: 20px;">
               View My Profile
             </a>
           </center>
@@ -332,7 +344,7 @@ const sendProfileVerificationEmail = async (userEmail, userName, isApproved) => 
             <li>Recent photo</li>
           </ul>
           <center>
-            <a href="${process.env.FRONTEND_URL}/profile" style="display: inline-block; padding: 15px 30px; background: #667eea; color: white; text-decoration: none; border-radius: 50px; margin-top: 20px;">
+            <a href="${process.env.FRONTEND_URL || 'https://humrah.app'}/profile" style="display: inline-block; padding: 15px 30px; background: #667eea; color: white; text-decoration: none; border-radius: 50px; margin-top: 20px;">
               Upload New Photo
             </a>
           </center>
@@ -343,8 +355,8 @@ const sendProfileVerificationEmail = async (userEmail, userName, isApproved) => 
   }
 
   sendSmtpEmail.sender = {
-    name: process.env.BREVO_SENDER_NAME,
-    email: process.env.BREVO_SENDER_EMAIL
+    name: process.env.BREVO_SENDER_NAME || 'Humrah Team',
+    email: process.env.BREVO_SENDER_EMAIL || 'noreply@humrah.com'
   };
 
   sendSmtpEmail.to = [{ email: userEmail, name: userName }];
@@ -359,7 +371,7 @@ const sendProfileVerificationEmail = async (userEmail, userName, isApproved) => 
 };
 
 module.exports = {
-  generateVerificationToken,
+  generateOTP,
   sendVerificationEmail,
   sendWelcomeEmail,
   sendProfileVerificationEmail
