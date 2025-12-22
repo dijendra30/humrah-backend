@@ -1,7 +1,6 @@
 // middleware/security.js
 const helmet = require('helmet');
 const mongoSanitize = require('express-mongo-sanitize');
-const xss = require('xss-clean');
 const hpp = require('hpp');
 
 const setupSecurity = (app) => {
@@ -21,8 +20,6 @@ const setupSecurity = (app) => {
   // Sanitize data against NoSQL injection
   app.use(mongoSanitize());
 
-  // Prevent XSS attacks
-  app.use(xss());
 
   // Prevent HTTP Parameter Pollution
   app.use(hpp());
