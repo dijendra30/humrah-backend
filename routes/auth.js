@@ -1,11 +1,11 @@
 // routes/auth.js - Authentication Routes with OTP
-const { sendOTPEmail, sendWelcomeEmail } = require('../config/email');
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const { body, validationResult } = require('express-validator');
 const User = require('../models/User');
 const auth = require('../middleware/auth');
+const { sendOTPEmail, sendWelcomeEmail } = require('../config/email');
 
 // Generate JWT Token
 const generateToken = (userId) => {
@@ -20,7 +20,7 @@ const generateOTP = () => {
 };
 
 // @route   POST /api/auth/register
-// @desc    Register new user with questionnaire
+// @desc    Register new user with questionnaire and send OTP
 // @access  Public
 router.post('/register', [
   body('firstName').trim().notEmpty().withMessage('First name is required'),
@@ -56,7 +56,7 @@ router.post('/register', [
       email,
       password,
       questionnaire: questionnaire || {},
-      verified: false // Not verified initially
+      verified: false
     });
 
     // Generate OTP
@@ -76,6 +76,19 @@ router.post('/register', [
       console.log(`🔐 OTP: ${otp}`);
       console.log(`⏰ Expires: ${user.emailVerificationExpires.toLocaleString()}`);
       console.log('='.repeat(60) + '\n');
+    }
+
+    // Send OTP email (only if Brevo is configured)
+    if (process.env.BREVO_API_KEY) {
+      try {
+        await sendOTPEmail(email, otp, firstName);
+        console.log('✅ OTP email sent successfully to:', email);
+      } catch (emailError) {
+        console.error('❌ Failed to send OTP email:', emailError);
+        // Don't fail registration if email fails
+      }
+    } else {
+      console.log('⚠️ BREVO_API_KEY not configured - OTP logged to console only');
     }
 
     // Generate token
@@ -184,10 +197,6 @@ router.post('/login', [
   }
 });
 
-// ============================================
-// OTP EMAIL VERIFICATION ENDPOINTS
-// ============================================
-
 // @route   POST /api/auth/send-otp
 // @desc    Send OTP to email for verification
 // @access  Public
@@ -205,13 +214,17 @@ router.post('/send-otp', [
 
     const { email } = req.body;
 
-    // Check if user exists
+    // Find user
     let user = await User.findOne({ email });
     
     if (!user) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'No account found with this email. Please register first.' 
+      // If user doesn't exist, return success but log that email needs to register
+      console.log(`⚠️ OTP requested for unregistered email: ${email}`);
+      return res.json({
+        success: true,
+        message: 'If an account exists with this email, an OTP has been sent.',
+        requiresRegistration: true,
+        email: email
       });
     }
 
@@ -241,17 +254,17 @@ router.post('/send-otp', [
       console.log('='.repeat(60) + '\n');
     }
 
-    // Send actual email (only if Brevo is configured)
+    // Send email (only if Brevo is configured)
     if (process.env.BREVO_API_KEY) {
-    try {
-    await sendOTPEmail(email, otp, user.firstName);
-         } catch (error) {
-    console.error('Failed to send email, but OTP is still valid:', error);
+      try {
+        await sendOTPEmail(email, otp, user.firstName);
+        console.log('✅ OTP email sent successfully to:', email);
+      } catch (emailError) {
+        console.error('❌ Failed to send email, but OTP is still valid:', emailError);
       }
+    } else {
+      console.log('⚠️ BREVO_API_KEY not configured - OTP logged to console only');
     }
-
-    // TODO: Send actual email with OTP using Brevo/SendGrid
-    // For now, just return success in test mode
     
     res.json({
       success: true,
@@ -338,8 +351,8 @@ router.post('/verify-otp', [
     // Send welcome email (optional)
     if (process.env.BREVO_API_KEY) {
       sendWelcomeEmail(email, user.firstName).catch(err => 
-    console.log('Welcome email failed:', err)
-     );
+        console.log('Welcome email failed:', err)
+      );
     }
 
     // Generate token
@@ -390,9 +403,12 @@ router.post('/resend-otp', [
     const user = await User.findOne({ email });
     
     if (!user) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'No account found with this email' 
+      console.log(`⚠️ OTP resend requested for unregistered email: ${email}`);
+      return res.json({
+        success: true,
+        message: 'If an account exists with this email, an OTP has been sent.',
+        requiresRegistration: true,
+        email: email
       });
     }
 
@@ -407,7 +423,7 @@ router.post('/resend-otp', [
     // Generate new OTP
     const otp = generateOTP();
     user.emailVerificationOTP = otp;
-    user.emailVerificationExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+    user.emailVerificationExpires = new Date(Date.now() + 10 * 60 * 1000);
     await user.save();
 
     // Log OTP in test mode
@@ -422,7 +438,17 @@ router.post('/resend-otp', [
       console.log('='.repeat(60) + '\n');
     }
 
-    // TODO: Send actual email with OTP
+    // Send email (only if Brevo is configured)
+    if (process.env.BREVO_API_KEY) {
+      try {
+        await sendOTPEmail(email, otp, user.firstName);
+        console.log('✅ OTP email resent successfully to:', email);
+      } catch (emailError) {
+        console.error('❌ Failed to resend email, but OTP is still valid:', emailError);
+      }
+    } else {
+      console.log('⚠️ BREVO_API_KEY not configured - OTP logged to console only');
+    }
     
     res.json({
       success: true,
@@ -478,20 +504,18 @@ router.post('/google', async (req, res) => {
     let user = await User.findOne({ $or: [{ googleId }, { email }] });
 
     if (user) {
-      // Update Google ID if logging in with Google for first time
       if (!user.googleId) {
         user.googleId = googleId;
         await user.save();
       }
     } else {
-      // Create new user
       user = new User({
         googleId,
         email,
         firstName,
         lastName,
         profilePhoto,
-        verified: true // Auto-verify OAuth users
+        verified: true
       });
       await user.save();
     }
@@ -546,7 +570,7 @@ router.post('/facebook', async (req, res) => {
         firstName,
         lastName,
         profilePhoto,
-        verified: true // Auto-verify OAuth users
+        verified: true
       });
       await user.save();
     }
