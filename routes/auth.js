@@ -69,12 +69,12 @@ router.post('/register', [
     // Log OTP in test mode
     if (process.env.OTP_TEST_MODE === 'true') {
       console.log('\n' + '='.repeat(60));
-      console.log('ðŸ“§ NEW USER REGISTRATION - OTP SENT');
+      console.log('NEW USER REGISTRATION - OTP SENT');
       console.log('='.repeat(60));
-      console.log(`ðŸ“® Email: ${email}`);
-      console.log(`ðŸ‘¤ User: ${firstName} ${lastName}`);
-      console.log(`ðŸ” OTP: ${otp}`);
-      console.log(`â° Expires: ${user.emailVerificationExpires.toLocaleString()}`);
+      console.log(`Email: ${email}`);
+      console.log(`User: ${firstName} ${lastName}`);
+      console.log(`OTP: ${otp}`);
+      console.log(`Expires: ${user.emailVerificationExpires.toLocaleString()}`);
       console.log('='.repeat(60) + '\n');
     }
 
@@ -604,3 +604,4 @@ router.post('/facebook', async (req, res) => {
 });
 
 module.exports = router;
+
