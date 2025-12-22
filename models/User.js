@@ -1,4 +1,4 @@
-// models/User.js - Updated User Schema with Email & Photo Verification
+// models/User.js - Updated User Schema with Email & Photo Verification + OTP
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
@@ -33,7 +33,7 @@ const questionnaireSchema = new mongoose.Schema({
   availability: String,
   price: String,
   
-  // Legacy fields
+  // Legacy fields for backward compatibility
   gender: String,
   dateOfBirth: Date,
   language: String,
@@ -94,12 +94,12 @@ const userSchema = new mongoose.Schema({
     default: null // Cloudinary public ID
   },
 
-  // Email Verification
+  // Email Verification with OTP
   emailVerified: { 
     type: Boolean, 
     default: false 
   },
-  emailVerificationToken: { 
+  emailVerificationOTP: { 
     type: String, 
     default: null 
   },
@@ -197,11 +197,11 @@ userSchema.pre('save', function(next) {
   next();
 });
 
-// Remove password from JSON output
+// Remove sensitive data from JSON output
 userSchema.methods.toJSON = function () {
   const obj = this.toObject();
   delete obj.password;
-  delete obj.emailVerificationToken;
+  delete obj.emailVerificationOTP;
   return obj;
 };
 
