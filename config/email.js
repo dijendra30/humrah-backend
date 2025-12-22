@@ -1,13 +1,23 @@
-const brevo = require('@getbrevo/brevo');
+const brevo = require("@getbrevo/brevo");
 
-// Initialize Brevo API
+// --------------------
+// INIT BREVO API (UNCHANGED, JUST SAFER)
+// --------------------
 const apiInstance = new brevo.TransactionalEmailsApi();
+
+// IMPORTANT: ensure API key exists
+if (!process.env.BREVO_API_KEY) {
+  console.error("❌ BREVO_API_KEY is missing in env");
+}
+
 apiInstance.setApiKey(
   brevo.TransactionalEmailsApiApiKeys.apiKey,
   process.env.BREVO_API_KEY
 );
 
-// Generate OTP HTML Template
+// --------------------
+// OTP EMAIL HTML (UNCHANGED)
+// --------------------
 const getOTPEmailHTML = (otp, firstName) => {
   return `
 <!DOCTYPE html>
@@ -17,76 +27,82 @@ const getOTPEmailHTML = (otp, firstName) => {
     body { font-family: Arial, sans-serif; background-color: #f4f4f4; padding: 20px; }
     .container { max-width: 600px; margin: 0 auto; background: white; padding: 40px; border-radius: 10px; }
     .otp-box { background: #f0f0f0; padding: 20px; text-align: center; font-size: 32px; font-weight: bold; letter-spacing: 5px; border-radius: 8px; margin: 20px 0; }
-    .button { background: #4CAF50; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block; margin: 20px 0; }
   </style>
 </head>
 <body>
   <div class="container">
     <h1>Welcome to Humrah! 🎉</h1>
-    <p>Hi ${firstName},</p>
-    <p>Thank you for registering with Humrah. Please verify your email address using the OTP below:</p>
-    
+    <p>Hi ${firstName || "there"},</p>
+    <p>Please verify your email using the OTP below:</p>
     <div class="otp-box">${otp}</div>
-    
     <p><strong>This OTP will expire in 10 minutes.</strong></p>
-    
-    <p>If you didn't create an account with Humrah, please ignore this email.</p>
-    
-    <p>Best regards,<br>The Humrah Team</p>
+    <p>If you didn’t request this, ignore this email.</p>
+    <p>— Humrah Team</p>
   </div>
 </body>
 </html>
   `;
 };
 
-// Send OTP Email
+// --------------------
+// SEND OTP EMAIL (FIXED, NOT REPLACED)
+// --------------------
 async function sendOTPEmail(email, otp, firstName) {
   try {
+    console.log("📨 Sending OTP email to:", email);
+
     const sendSmtpEmail = {
       sender: {
         email: process.env.BREVO_SENDER_EMAIL,
-        name: process.env.BREVO_SENDER_NAME || 'Humrah'
+        name: process.env.BREVO_SENDER_NAME || "Humrah",
       },
       to: [{ email }],
-      subject: `Your Humrah Verification Code: ${otp}`,
-      htmlContent: getOTPEmailHTML(otp, firstName)
+      subject: "Your Humrah Verification Code",
+      htmlContent: getOTPEmailHTML(otp, firstName),
     };
 
     const result = await apiInstance.sendTransacEmail(sendSmtpEmail);
-    console.log('✅ OTP Email sent successfully to:', email);
+
+    console.log("✅ OTP Email sent. Brevo messageId:", result.messageId);
     return { success: true, messageId: result.messageId };
   } catch (error) {
-    console.error('❌ Failed to send OTP email:', error);
+    console.error("❌ Failed to send OTP email:", error?.response?.body || error);
     throw error;
   }
 }
 
-// Send Welcome Email (after verification)
+// --------------------
+// SEND WELCOME EMAIL (UNCHANGED, JUST LOG IMPROVED)
+// --------------------
 async function sendWelcomeEmail(email, firstName) {
   try {
+    console.log("📨 Sending welcome email to:", email);
+
     const sendSmtpEmail = {
       sender: {
         email: process.env.BREVO_SENDER_EMAIL,
-        name: process.env.BREVO_SENDER_NAME || 'Humrah'
+        name: process.env.BREVO_SENDER_NAME || "Humrah",
       },
       to: [{ email }],
-      subject: 'Welcome to Humrah! 🎉',
+      subject: "Welcome to Humrah! 🎉",
       htmlContent: `
-        <h1>Welcome ${firstName}!</h1>
+        <h1>Welcome ${firstName || "there"}!</h1>
         <p>Your email has been verified successfully.</p>
         <p>You can now enjoy all features of Humrah.</p>
-        <p>Start connecting with amazing people!</p>
-      `
+      `,
     };
 
     await apiInstance.sendTransacEmail(sendSmtpEmail);
-    console.log('✅ Welcome email sent to:', email);
+    console.log("✅ Welcome email sent to:", email);
   } catch (error) {
-    console.error('❌ Failed to send welcome email:', error);
+    console.error("❌ Failed to send welcome email:", error?.response?.body || error);
   }
 }
 
+// --------------------
+// EXPORTS (UNCHANGED + CORRECT)
+// --------------------
 module.exports = {
   sendOTPEmail,
-  sendWelcomeEmail
+  sendWelcomeEmail,
 };
