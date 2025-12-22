@@ -1,11 +1,16 @@
-// routes/auth.js - CORRECTED Authentication Routes with OTP
-const { sendOTPEmail, sendWelcomeEmail } = require('../config/email');
+// routes/auth.js - Updated Authentication Routes with Email Verification & Cloudinary
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const { body, validationResult } = require('express-validator');
 const User = require('../models/User');
 const auth = require('../middleware/auth');
+const { uploadBase64, deleteImage } = require('../config/cloudinary');
+const { 
+  generateVerificationToken, 
+  sendVerificationEmail,
+  sendWelcomeEmail 
+} = require('../config/email');
 
 // Generate JWT Token
 const generateToken = (userId) => {
@@ -14,166 +19,16 @@ const generateToken = (userId) => {
   });
 };
 
-// Generate 6-digit OTP
-const generateOTP = () => {
-  return Math.floor(100000 + Math.random() * 900000).toString();
-};
-
-// ==================== NEW APPROACH ====================
-// Store pending registrations in memory (or use Redis in production)
-const pendingRegistrations = new Map();
-
-// @route   POST /api/auth/send-otp-registration
-// @desc    Send OTP for new user registration (NO DATABASE SAVE YET)
-// @access  Public
-router.post('/send-otp-registration', [
-  body('email').isEmail().normalizeEmail().withMessage('Valid email is required')
-], async (req, res) => {
-  try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ 
-        success: false, 
-        errors: errors.array() 
-      });
-    }
-
-    const { email } = req.body;
-
-    // Check if user already exists in database
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'User with this email already exists' 
-      });
-    }
-
-    // Generate OTP
-    const otp = generateOTP();
-    const otpExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
-
-    // Store OTP temporarily (NOT in database yet)
-    pendingRegistrations.set(email, {
-      otp,
-      otpExpires,
-      verified: false
-    });
-
-    // Log OTP in test mode
-    if (process.env.OTP_TEST_MODE === 'true') {
-      console.log('\n' + '='.repeat(60));
-      console.log('📧 NEW USER REGISTRATION - OTP SENT (NOT SAVED YET)');
-      console.log('='.repeat(60));
-      console.log(`📮 Email: ${email}`);
-      console.log(`🔐 OTP: ${otp}`);
-      console.log(`⏰ Expires: ${otpExpires.toLocaleString()}`);
-      console.log('='.repeat(60) + '\n');
-    }
-
-    // Send email
-    if (process.env.BREVO_API_KEY) {
-      try {
-        await sendOTPEmail(email, otp, 'User');
-      } catch (error) {
-        console.error('Failed to send email:', error);
-      }
-    }
-
-    res.json({
-      success: true,
-      message: 'OTP sent to your email. Please verify to continue registration.',
-      email: email,
-      expiresIn: '10 minutes'
-    });
-
-  } catch (error) {
-    console.error('Send OTP error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error while sending OTP' 
-    });
-  }
-});
-
-// @route   POST /api/auth/verify-otp-registration
-// @desc    Verify OTP for registration (mark as verified, still NO database save)
-// @access  Public
-router.post('/verify-otp-registration', [
-  body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
-  body('otp').isLength({ min: 6, max: 6 }).withMessage('OTP must be 6 digits')
-], async (req, res) => {
-  try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ 
-        success: false, 
-        errors: errors.array() 
-      });
-    }
-
-    const { email, otp } = req.body;
-
-    // Check pending registration
-    const pendingReg = pendingRegistrations.get(email);
-
-    if (!pendingReg) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'No OTP found. Please request a new OTP.' 
-      });
-    }
-
-    // Check if OTP expired
-    if (new Date() > pendingReg.otpExpires) {
-      pendingRegistrations.delete(email);
-      return res.status(400).json({ 
-        success: false, 
-        message: 'OTP has expired. Please request a new one.' 
-      });
-    }
-
-    // Verify OTP
-    if (pendingReg.otp !== otp) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Invalid OTP. Please check and try again.' 
-      });
-    }
-
-    // Mark as verified (but DON'T save to database yet)
-    pendingReg.verified = true;
-    pendingRegistrations.set(email, pendingReg);
-
-    console.log(`✅ OTP verified for ${email} - Ready for questionnaire`);
-
-    res.json({
-      success: true,
-      message: 'Email verified successfully! Please complete the questionnaire.',
-      verified: true
-    });
-
-  } catch (error) {
-    console.error('Verify OTP error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error during verification' 
-    });
-  }
-});
-
 // @route   POST /api/auth/register
-// @desc    Complete registration with questionnaire (FINAL DATABASE SAVE)
+// @desc    Register new user with email verification
 // @access  Public
 router.post('/register', [
   body('firstName').trim().notEmpty().withMessage('First name is required'),
   body('lastName').trim().notEmpty().withMessage('Last name is required'),
   body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
-  body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
-  body('emailVerified').isBoolean().withMessage('Email verification status required')
+  body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters')
 ], async (req, res) => {
   try {
-    // Validation
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       return res.status(400).json({ 
@@ -182,61 +37,67 @@ router.post('/register', [
       });
     }
 
-    const { firstName, lastName, email, password, questionnaire, emailVerified } = req.body;
+    const { firstName, lastName, email, password, questionnaire } = req.body;
 
-    // ✅ CHECK 1: Verify email was verified via OTP
-    const pendingReg = pendingRegistrations.get(email);
-    
-    if (!emailVerified || !pendingReg || !pendingReg.verified) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Email must be verified before completing registration' 
-      });
-    }
-
-    // ✅ CHECK 2: User should NOT exist in database yet
+    // Check if user exists
     const existingUser = await User.findOne({ email });
     if (existingUser) {
-      // Clean up pending registration
-      pendingRegistrations.delete(email);
       return res.status(400).json({ 
         success: false, 
         message: 'User with this email already exists' 
       });
     }
 
-    // ✅ NOW SAVE TO DATABASE (first and only time)
+    // Handle verification photo upload (if provided in questionnaire)
+    let verificationPhotoData = null;
+    if (questionnaire?.profilePhoto) {
+      try {
+        // Upload to Cloudinary
+        verificationPhotoData = await uploadBase64(
+          questionnaire.profilePhoto,
+          'humrah/verification'
+        );
+      } catch (error) {
+        console.error('Error uploading verification photo:', error);
+      }
+    }
+
+    // Generate email verification token
+    const emailVerificationToken = generateVerificationToken();
+    const emailVerificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+
+    // Create user
     const user = new User({
       firstName,
       lastName,
       email,
       password,
       questionnaire: questionnaire || {},
-      verified: true, // Already verified via OTP
-      emailVerificationOTP: undefined, // No need to store OTP
-      emailVerificationExpires: undefined
+      emailVerificationToken,
+      emailVerificationExpires,
+      emailVerified: false,
+      verificationPhoto: verificationPhotoData?.url || null,
+      verificationPhotoPublicId: verificationPhotoData?.publicId || null,
+      verificationPhotoSubmittedAt: verificationPhotoData ? new Date() : null,
+      photoVerificationStatus: verificationPhotoData ? 'pending' : null
     });
 
     await user.save();
 
-    // Clean up pending registration
-    pendingRegistrations.delete(email);
-
-    // Send welcome email
-    if (process.env.BREVO_API_KEY) {
-      sendWelcomeEmail(email, firstName).catch(err => 
-        console.log('Welcome email failed:', err)
-      );
+    // Send verification email
+    try {
+      await sendVerificationEmail(email, firstName, emailVerificationToken);
+    } catch (emailError) {
+      console.error('Error sending verification email:', emailError);
+      // Don't fail registration if email fails
     }
 
     // Generate token
     const token = generateToken(user._id);
 
-    console.log(`✅ User registered successfully: ${email}`);
-
     res.status(201).json({
       success: true,
-      message: 'Registration completed successfully!',
+      message: 'Registration successful! Please check your email to verify your account.',
       token,
       user: {
         id: user._id,
@@ -245,9 +106,11 @@ router.post('/register', [
         email: user.email,
         profilePhoto: user.profilePhoto,
         isPremium: user.isPremium,
-        verified: user.verified,
-        questionnaire: user.questionnaire
-      }
+        emailVerified: user.emailVerified,
+        photoVerificationStatus: user.photoVerificationStatus,
+        verified: user.verified
+      },
+      emailSent: true
     });
 
   } catch (error) {
@@ -255,6 +118,101 @@ router.post('/register', [
     res.status(500).json({ 
       success: false, 
       message: 'Server error during registration' 
+    });
+  }
+});
+
+// @route   GET /api/auth/verify-email/:token
+// @desc    Verify user's email address
+// @access  Public
+router.get('/verify-email/:token', async (req, res) => {
+  try {
+    const { token } = req.params;
+
+    const user = await User.findOne({
+      emailVerificationToken: token,
+      emailVerificationExpires: { $gt: Date.now() }
+    });
+
+    if (!user) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid or expired verification token'
+      });
+    }
+
+    // Update user
+    user.emailVerified = true;
+    user.emailVerificationToken = null;
+    user.emailVerificationExpires = null;
+    user.verified = user.isFullyVerified(); // Update overall verified status
+    await user.save();
+
+    // Send welcome email
+    try {
+      await sendWelcomeEmail(user.email, user.firstName);
+    } catch (emailError) {
+      console.error('Error sending welcome email:', emailError);
+    }
+
+    res.json({
+      success: true,
+      message: 'Email verified successfully!',
+      emailVerified: true,
+      verified: user.verified
+    });
+
+  } catch (error) {
+    console.error('Email verification error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during verification'
+    });
+  }
+});
+
+// @route   POST /api/auth/resend-verification
+// @desc    Resend verification email
+// @access  Private
+router.post('/resend-verification', auth, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    if (user.emailVerified) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email already verified'
+      });
+    }
+
+    // Generate new token
+    const emailVerificationToken = generateVerificationToken();
+    const emailVerificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+    user.emailVerificationToken = emailVerificationToken;
+    user.emailVerificationExpires = emailVerificationExpires;
+    await user.save();
+
+    // Send email
+    await sendVerificationEmail(user.email, user.firstName, emailVerificationToken);
+
+    res.json({
+      success: true,
+      message: 'Verification email sent successfully'
+    });
+
+  } catch (error) {
+    console.error('Resend verification error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
     });
   }
 });
@@ -277,7 +235,6 @@ router.post('/login', [
 
     const { email, password } = req.body;
 
-    // Find user
     const user = await User.findOne({ email });
     if (!user) {
       return res.status(401).json({ 
@@ -286,7 +243,6 @@ router.post('/login', [
       });
     }
 
-    // Check password
     const isMatch = await user.comparePassword(password);
     if (!isMatch) {
       return res.status(401).json({ 
@@ -295,21 +251,9 @@ router.post('/login', [
       });
     }
 
-    // Check if email is verified
-    if (!user.verified) {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Please verify your email before logging in.',
-        requiresVerification: true,
-        email: user.email
-      });
-    }
-
-    // Update last active
     user.lastActive = Date.now();
     await user.save();
 
-    // Generate token
     const token = generateToken(user._id);
 
     res.json({
@@ -323,8 +267,10 @@ router.post('/login', [
         email: user.email,
         profilePhoto: user.profilePhoto,
         isPremium: user.isPremium,
-        verified: user.verified,
-        questionnaire: user.questionnaire
+        questionnaire: user.questionnaire,
+        emailVerified: user.emailVerified,
+        photoVerificationStatus: user.photoVerificationStatus,
+        verified: user.verified
       }
     });
 
@@ -336,9 +282,6 @@ router.post('/login', [
     });
   }
 });
-
-// Keep all other routes (send-otp, verify-otp, resend-otp, /me, google, facebook) unchanged...
-// Copy them from your original file
 
 // @route   GET /api/auth/me
 // @desc    Get current user
@@ -389,7 +332,7 @@ router.post('/google', async (req, res) => {
         firstName,
         lastName,
         profilePhoto,
-        verified: true
+        emailVerified: true // Google emails are verified
       });
       await user.save();
     }
@@ -410,6 +353,7 @@ router.post('/google', async (req, res) => {
         email: user.email,
         profilePhoto: user.profilePhoto,
         isPremium: user.isPremium,
+        emailVerified: user.emailVerified,
         verified: user.verified
       }
     });
@@ -444,7 +388,7 @@ router.post('/facebook', async (req, res) => {
         firstName,
         lastName,
         profilePhoto,
-        verified: true
+        emailVerified: true // Facebook emails are verified
       });
       await user.save();
     }
@@ -465,6 +409,7 @@ router.post('/facebook', async (req, res) => {
         email: user.email,
         profilePhoto: user.profilePhoto,
         isPremium: user.isPremium,
+        emailVerified: user.emailVerified,
         verified: user.verified
       }
     });
