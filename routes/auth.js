@@ -1,4 +1,4 @@
-// routes/auth.js - Updated Authentication Routes with Email Verification & Cloudinary
+// routes/auth.js - Updated Authentication Routes with OTP Email Verification & Cloudinary
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
@@ -7,7 +7,7 @@ const User = require('../models/User');
 const auth = require('../middleware/auth');
 const { uploadBase64, deleteImage } = require('../config/cloudinary');
 const { 
-  generateVerificationToken, 
+  generateOTP, 
   sendVerificationEmail,
   sendWelcomeEmail 
 } = require('../config/email');
@@ -20,7 +20,7 @@ const generateToken = (userId) => {
 };
 
 // @route   POST /api/auth/register
-// @desc    Register new user with email verification
+// @desc    Register new user with email OTP verification
 // @access  Public
 router.post('/register', [
   body('firstName').trim().notEmpty().withMessage('First name is required'),
@@ -57,14 +57,15 @@ router.post('/register', [
           questionnaire.profilePhoto,
           'humrah/verification'
         );
+        console.log('✅ Verification photo uploaded to Cloudinary:', verificationPhotoData.url);
       } catch (error) {
-        console.error('Error uploading verification photo:', error);
+        console.error('❌ Error uploading verification photo:', error);
       }
     }
 
-    // Generate email verification token
-    const emailVerificationToken = generateVerificationToken();
-    const emailVerificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+    // Generate OTP
+    const otp = generateOTP();
+    const otpExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
     // Create user
     const user = new User({
@@ -73,8 +74,8 @@ router.post('/register', [
       email,
       password,
       questionnaire: questionnaire || {},
-      emailVerificationToken,
-      emailVerificationExpires,
+      emailVerificationOTP: otp,
+      emailVerificationExpires: otpExpires,
       emailVerified: false,
       verificationPhoto: verificationPhotoData?.url || null,
       verificationPhotoPublicId: verificationPhotoData?.publicId || null,
@@ -84,11 +85,12 @@ router.post('/register', [
 
     await user.save();
 
-    // Send verification email
+    // Send verification email with OTP
     try {
-      await sendVerificationEmail(email, firstName, emailVerificationToken);
+      await sendVerificationEmail(email, firstName, otp);
+      console.log(`✅ OTP sent to ${email}: ${otp}`);
     } catch (emailError) {
-      console.error('Error sending verification email:', emailError);
+      console.error('❌ Error sending verification email:', emailError);
       // Don't fail registration if email fails
     }
 
@@ -97,7 +99,7 @@ router.post('/register', [
 
     res.status(201).json({
       success: true,
-      message: 'Registration successful! Please check your email to verify your account.',
+      message: 'Registration successful! Please check your email for OTP verification.',
       token,
       user: {
         id: user._id,
@@ -110,11 +112,12 @@ router.post('/register', [
         photoVerificationStatus: user.photoVerificationStatus,
         verified: user.verified
       },
-      emailSent: true
+      emailSent: true,
+      requiresOTP: true
     });
 
   } catch (error) {
-    console.error('Registration error:', error);
+    console.error('❌ Registration error:', error);
     res.status(500).json({ 
       success: false, 
       message: 'Server error during registration' 
@@ -122,48 +125,83 @@ router.post('/register', [
   }
 });
 
-// @route   GET /api/auth/verify-email/:token
-// @desc    Verify user's email address
-// @access  Public
-router.get('/verify-email/:token', async (req, res) => {
+// @route   POST /api/auth/verify-otp
+// @desc    Verify email using OTP
+// @access  Private
+router.post('/verify-otp', auth, [
+  body('otp').trim().isLength({ min: 6, max: 6 }).withMessage('OTP must be 6 digits')
+], async (req, res) => {
   try {
-    const { token } = req.params;
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ 
+        success: false, 
+        errors: errors.array() 
+      });
+    }
 
-    const user = await User.findOne({
-      emailVerificationToken: token,
-      emailVerificationExpires: { $gt: Date.now() }
-    });
+    const { otp } = req.body;
 
+    const user = await User.findById(req.userId);
     if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    if (user.emailVerified) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid or expired verification token'
+        message: 'Email already verified'
+      });
+    }
+
+    // Check if OTP is expired
+    if (!user.emailVerificationExpires || user.emailVerificationExpires < new Date()) {
+      return res.status(400).json({
+        success: false,
+        message: 'OTP has expired. Please request a new one.'
+      });
+    }
+
+    // Verify OTP
+    if (user.emailVerificationOTP !== otp) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid OTP. Please try again.'
       });
     }
 
     // Update user
     user.emailVerified = true;
-    user.emailVerificationToken = null;
+    user.emailVerificationOTP = null;
     user.emailVerificationExpires = null;
     user.verified = user.isFullyVerified(); // Update overall verified status
     await user.save();
+
+    console.log(`✅ Email verified for user: ${user.email}`);
 
     // Send welcome email
     try {
       await sendWelcomeEmail(user.email, user.firstName);
     } catch (emailError) {
-      console.error('Error sending welcome email:', emailError);
+      console.error('❌ Error sending welcome email:', emailError);
     }
 
     res.json({
       success: true,
       message: 'Email verified successfully!',
-      emailVerified: true,
-      verified: user.verified
+      user: {
+        id: user._id,
+        emailVerified: user.emailVerified,
+        verified: user.verified,
+        photoVerificationStatus: user.photoVerificationStatus
+      }
     });
 
   } catch (error) {
-    console.error('Email verification error:', error);
+    console.error('❌ OTP verification error:', error);
     res.status(500).json({
       success: false,
       message: 'Server error during verification'
@@ -171,10 +209,10 @@ router.get('/verify-email/:token', async (req, res) => {
   }
 });
 
-// @route   POST /api/auth/resend-verification
-// @desc    Resend verification email
+// @route   POST /api/auth/resend-otp
+// @desc    Resend OTP verification email
 // @access  Private
-router.post('/resend-verification', auth, async (req, res) => {
+router.post('/resend-otp', auth, async (req, res) => {
   try {
     const user = await User.findById(req.userId);
 
@@ -192,24 +230,25 @@ router.post('/resend-verification', auth, async (req, res) => {
       });
     }
 
-    // Generate new token
-    const emailVerificationToken = generateVerificationToken();
-    const emailVerificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    // Generate new OTP
+    const otp = generateOTP();
+    const otpExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
-    user.emailVerificationToken = emailVerificationToken;
-    user.emailVerificationExpires = emailVerificationExpires;
+    user.emailVerificationOTP = otp;
+    user.emailVerificationExpires = otpExpires;
     await user.save();
 
     // Send email
-    await sendVerificationEmail(user.email, user.firstName, emailVerificationToken);
+    await sendVerificationEmail(user.email, user.firstName, otp);
+    console.log(`✅ OTP resent to ${user.email}: ${otp}`);
 
     res.json({
       success: true,
-      message: 'Verification email sent successfully'
+      message: 'OTP sent successfully to your email'
     });
 
   } catch (error) {
-    console.error('Resend verification error:', error);
+    console.error('❌ Resend OTP error:', error);
     res.status(500).json({
       success: false,
       message: 'Server error'
@@ -271,11 +310,12 @@ router.post('/login', [
         emailVerified: user.emailVerified,
         photoVerificationStatus: user.photoVerificationStatus,
         verified: user.verified
-      }
+      },
+      requiresOTP: !user.emailVerified
     });
 
   } catch (error) {
-    console.error('Login error:', error);
+    console.error('❌ Login error:', error);
     res.status(500).json({ 
       success: false, 
       message: 'Server error during login' 
@@ -303,7 +343,7 @@ router.get('/me', auth, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Get user error:', error);
+    console.error('❌ Get user error:', error);
     res.status(500).json({ 
       success: false, 
       message: 'Server error' 
@@ -359,7 +399,7 @@ router.post('/google', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Google auth error:', error);
+    console.error('❌ Google auth error:', error);
     res.status(500).json({ 
       success: false, 
       message: 'Google authentication failed' 
@@ -415,7 +455,7 @@ router.post('/facebook', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Facebook auth error:', error);
+    console.error('❌ Facebook auth error:', error);
     res.status(500).json({ 
       success: false, 
       message: 'Facebook authentication failed' 
