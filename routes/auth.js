@@ -1,4 +1,5 @@
 // routes/auth.js - Authentication Routes with OTP
+const { sendOTPEmail, sendWelcomeEmail } = require('../config/email');
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
@@ -240,6 +241,15 @@ router.post('/send-otp', [
       console.log('='.repeat(60) + '\n');
     }
 
+    // Send actual email (only if Brevo is configured)
+    if (process.env.BREVO_API_KEY) {
+    try {
+    await sendOTPEmail(email, otp, user.firstName);
+         } catch (error) {
+    console.error('Failed to send email, but OTP is still valid:', error);
+      }
+    }
+
     // TODO: Send actual email with OTP using Brevo/SendGrid
     // For now, just return success in test mode
     
@@ -324,6 +334,13 @@ router.post('/verify-otp', [
     user.emailVerificationOTP = undefined;
     user.emailVerificationExpires = undefined;
     await user.save();
+
+    // Send welcome email (optional)
+    if (process.env.BREVO_API_KEY) {
+      sendWelcomeEmail(email, user.firstName).catch(err => 
+    console.log('Welcome email failed:', err)
+     );
+    }
 
     // Generate token
     const token = generateToken(user._id);
