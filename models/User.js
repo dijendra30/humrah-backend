@@ -4,30 +4,52 @@ const bcrypt = require('bcryptjs');
 
 // Questionnaire embedded schema
 const questionnaireSchema = new mongoose.Schema({
+  // Basic
   mood: String,
-  gender: String,
-  dateOfBirth: Date,
+  name: String,
+  ageGroup: String,
+
+  // Location
   state: String,
   city: String,
-  language: String,
+  area: String,
+
+  // Preferences
   languagePreference: String,
-  interests: [String],
-  hobbies: [String],
-  musicPreference: String,
-  movieGenre: String,
-  favoriteFood: String,
-  travelPreference: String,
-  petPreference: String,
-  fitnessLevel: String,
-  smokingStatus: String,
-  drinkingStatus: String,
-  relationshipStatus: String,
-  lookingFor: String,
-  connectAndEarn: String,
-  profession: String,
-  education: String,
-  income: String,
-  bio: String
+  personalityType: String,
+
+  // Media
+  profilePhoto: String, // base64
+
+  // Social / meetup
+  hangoutPreferences: [String],
+  meetupPreference: String,
+  availableTimes: [String],
+  lookingForOnHumrah: [String],
+  goodMeetupMeaning: String,
+
+  // Vibe & personality
+  vibeWords: [String],
+  vibeQuote: String,
+
+  // Safety & rules
+  publicPlacesOnly: String,
+  verifyIdentity: String,
+  understandGuidelines: String,
+
+  // Emotional
+  comfortActivity: String,
+  relaxActivity: String,
+
+  // Monetization
+  becomeCompanion: String,
+  openFor: [String],
+  comfortZones: [String],
+  availability: String,
+  price: String,
+
+  // Profile
+  tagline: String
 }, { _id: false });
 
 // Main User Schema
@@ -117,5 +139,6 @@ userSchema.methods.toJSON = function () {
   delete obj.emailVerificationOTP; // Don't expose OTP
   return obj;
 };
+
 
 module.exports = mongoose.model('User', userSchema);
