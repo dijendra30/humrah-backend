@@ -1,4 +1,4 @@
-// routes/auth.js - Authentication Routes with CORRECTED Three-Step Registration
+// routes/auth.js - Authentication Routes with OTP (UPDATED - Registration Flow)
 const { sendOTPEmail, sendWelcomeEmail } = require('../config/email');
 const express = require('express');
 const router = express.Router();
@@ -6,21 +6,6 @@ const jwt = require('jsonwebtoken');
 const { body, validationResult } = require('express-validator');
 const User = require('../models/User');
 const auth = require('../middleware/auth');
-
-// ==================== IN-MEMORY STORAGE ====================
-// Store pending registrations temporarily (email → registration data)
-const pendingRegistrations = new Map();
-
-// Cleanup expired registrations every 15 minutes
-setInterval(() => {
-  const now = Date.now();
-  for (const [email, data] of pendingRegistrations.entries()) {
-    if (now > data.expiresAt) {
-      pendingRegistrations.delete(email);
-      console.log(`🗑️ Cleaned up expired registration for: ${email}`);
-    }
-  }
-}, 15 * 60 * 1000);
 
 // Generate JWT Token
 const generateToken = (userId) => {
@@ -34,15 +19,27 @@ const generateOTP = () => {
   return Math.floor(100000 + Math.random() * 900000).toString();
 };
 
+// ==================== IN-MEMORY OTP STORAGE ====================
+// Format: { email: { otp: '123456', expires: Date, verified: false, tempUserData: {...} } }
+const otpStore = new Map();
+
+// Cleanup expired OTPs every 15 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [email, data] of otpStore.entries()) {
+    if (data.expires < now) {
+      otpStore.delete(email);
+      console.log(`🧹 Cleaned up expired OTP for: ${email}`);
+    }
+  }
+}, 15 * 60 * 1000);
+
 // ==================== STEP 1: SEND OTP FOR REGISTRATION ====================
 // @route   POST /api/auth/send-otp-registration
-// @desc    Send OTP for new registration (NO DATABASE SAVE)
+// @desc    Send OTP for NEW user registration (before user exists in DB)
 // @access  Public
 router.post('/send-otp-registration', [
-  body('firstName').trim().notEmpty().withMessage('First name is required'),
-  body('lastName').trim().notEmpty().withMessage('Last name is required'),
-  body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
-  body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters')
+  body('email').isEmail().normalizeEmail().withMessage('Valid email is required')
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -53,48 +50,44 @@ router.post('/send-otp-registration', [
       });
     }
 
-    const { firstName, lastName, email, password } = req.body;
+    const { email } = req.body;
 
-    // Check if user already exists in database
+    // Check if user already exists
     const existingUser = await User.findOne({ email });
     if (existingUser) {
       return res.status(400).json({ 
         success: false, 
-        message: 'User with this email already exists' 
+        message: 'User with this email already exists. Please login instead.' 
       });
     }
 
     // Generate OTP
     const otp = generateOTP();
-    const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
+    const expires = Date.now() + 10 * 60 * 1000; // 10 minutes
 
-    // Store in memory (NOT in database)
-    pendingRegistrations.set(email, {
-      firstName,
-      lastName,
-      email,
-      password,
+    // Store in memory
+    otpStore.set(email, {
       otp,
-      expiresAt,
-      verified: false
+      expires,
+      verified: false,
+      tempUserData: null
     });
 
     // Log OTP in test mode
     if (process.env.OTP_TEST_MODE === 'true') {
       console.log('\n' + '='.repeat(60));
-      console.log('📧 REGISTRATION OTP SENT (STEP 1)');
+      console.log('📧 REGISTRATION OTP SENT');
       console.log('='.repeat(60));
       console.log(`📮 Email: ${email}`);
-      console.log(`👤 User: ${firstName} ${lastName}`);
       console.log(`🔐 OTP: ${otp}`);
-      console.log(`⏰ Expires: ${new Date(expiresAt).toLocaleString()}`);
+      console.log(`⏰ Expires: ${new Date(expires).toLocaleString()}`);
       console.log('='.repeat(60) + '\n');
     }
 
     // Send actual email (only if Brevo is configured)
     if (process.env.BREVO_API_KEY) {
       try {
-        await sendOTPEmail(email, otp, firstName);
+        await sendOTPEmail(email, otp, 'User');
       } catch (error) {
         console.error('Failed to send email, but OTP is still valid:', error);
       }
@@ -108,7 +101,7 @@ router.post('/send-otp-registration', [
     });
 
   } catch (error) {
-    console.error('Send OTP Registration error:', error);
+    console.error('Send registration OTP error:', error);
     res.status(500).json({ 
       success: false, 
       message: 'Server error while sending OTP' 
@@ -116,9 +109,9 @@ router.post('/send-otp-registration', [
   }
 });
 
-// ==================== STEP 2: VERIFY OTP ====================
+// ==================== STEP 2: VERIFY OTP FOR REGISTRATION ====================
 // @route   POST /api/auth/verify-otp-registration
-// @desc    Verify OTP for registration (NO DATABASE SAVE)
+// @desc    Verify OTP for registration (OTP is in memory, user not yet in DB)
 // @access  Public
 router.post('/verify-otp-registration', [
   body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
@@ -135,47 +128,48 @@ router.post('/verify-otp-registration', [
 
     const { email, otp } = req.body;
 
-    // Check if registration exists in memory
-    const registration = pendingRegistrations.get(email);
+    // Get OTP data from memory
+    const otpData = otpStore.get(email);
     
-    if (!registration) {
+    if (!otpData) {
       return res.status(400).json({ 
         success: false, 
-        message: 'No pending registration found. Please start registration again.' 
+        message: 'No OTP found. Please request a new OTP.' 
       });
     }
 
-    // Check if expired
-    if (Date.now() > registration.expiresAt) {
-      pendingRegistrations.delete(email);
+    // Check if OTP expired
+    if (Date.now() > otpData.expires) {
+      otpStore.delete(email);
       return res.status(400).json({ 
         success: false, 
-        message: 'OTP has expired. Please start registration again.' 
+        message: 'OTP has expired. Please request a new one.' 
       });
     }
 
     // Verify OTP
-    if (registration.otp !== otp) {
+    if (otpData.otp !== otp) {
       return res.status(400).json({ 
         success: false, 
         message: 'Invalid OTP. Please check and try again.' 
       });
     }
 
-    // Mark as verified in memory (NOT in database)
-    registration.verified = true;
-    pendingRegistrations.set(email, registration);
+    // Mark as verified in memory (but don't create user yet)
+    otpData.verified = true;
+    otpStore.set(email, otpData);
 
-    console.log(`✅ OTP VERIFIED (STEP 2) for: ${email}`);
+    console.log(`✅ OTP verified for registration: ${email}`);
 
     res.json({
       success: true,
-      message: 'Email verified successfully! Please complete the questionnaire.',
-      verified: true
+      message: 'Email verified! You can now complete registration.',
+      verified: true,
+      email: email
     });
 
   } catch (error) {
-    console.error('Verify OTP Registration error:', error);
+    console.error('Verify registration OTP error:', error);
     res.status(500).json({ 
       success: false, 
       message: 'Server error during verification' 
@@ -185,7 +179,7 @@ router.post('/verify-otp-registration', [
 
 // ==================== STEP 3: COMPLETE REGISTRATION ====================
 // @route   POST /api/auth/register
-// @desc    Complete registration with questionnaire (SINGLE DATABASE SAVE)
+// @desc    Complete registration with verified email
 // @access  Public
 router.post('/register', [
   body('firstName').trim().notEmpty().withMessage('First name is required'),
@@ -195,6 +189,7 @@ router.post('/register', [
   body('emailVerified').isBoolean().withMessage('Email verification status required')
 ], async (req, res) => {
   try {
+    // Validation
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       return res.status(400).json({ 
@@ -205,12 +200,12 @@ router.post('/register', [
 
     const { firstName, lastName, email, password, questionnaire, emailVerified } = req.body;
 
-    // Verify OTP was completed
-    const registration = pendingRegistrations.get(email);
-    if (!registration || !registration.verified) {
+    // Check if email was verified
+    const otpData = otpStore.get(email);
+    if (!emailVerified || !otpData || !otpData.verified) {
       return res.status(400).json({ 
         success: false, 
-        message: 'Email verification required. Please verify OTP first.' 
+        message: 'Please verify your email first with OTP' 
       });
     }
 
@@ -223,25 +218,22 @@ router.post('/register', [
       });
     }
 
-    // Create user with ALL data in ONE save
+    // Create user with verified email
     const user = new User({
       firstName,
       lastName,
       email,
       password,
       questionnaire: questionnaire || {},
-      verified: emailVerified || registration.verified
+      verified: true // Email is pre-verified
     });
 
     await user.save();
 
-    // Clean up memory
-    pendingRegistrations.delete(email);
+    // Clean up OTP from memory
+    otpStore.delete(email);
 
-    console.log(`✅ REGISTRATION COMPLETE (STEP 3) for: ${email}`);
-    console.log(`📊 Questionnaire saved: ${questionnaire ? 'Yes' : 'No'}`);
-
-    // Send welcome email (optional)
+    // Send welcome email
     if (process.env.BREVO_API_KEY) {
       sendWelcomeEmail(email, user.firstName).catch(err => 
         console.log('Welcome email failed:', err)
@@ -251,9 +243,11 @@ router.post('/register', [
     // Generate token
     const token = generateToken(user._id);
 
+    console.log(`✅ Registration completed for: ${email}`);
+
     res.status(201).json({
       success: true,
-      message: 'Registration completed successfully!',
+      message: 'Registration successful!',
       token,
       user: {
         id: user._id,
@@ -275,7 +269,85 @@ router.post('/register', [
   }
 });
 
-// ==================== EXISTING LOGIN ENDPOINT ====================
+// ==================== LEGACY: SEND OTP FOR LOGIN ====================
+// @route   POST /api/auth/send-otp
+// @desc    Send OTP to existing user's email for login verification
+// @access  Public
+router.post('/send-otp', [
+  body('email').isEmail().normalizeEmail().withMessage('Valid email is required')
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ 
+        success: false, 
+        errors: errors.array() 
+      });
+    }
+
+    const { email } = req.body;
+
+    // Check if user exists (REQUIRED for this endpoint)
+    let user = await User.findOne({ email });
+    
+    if (!user) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'No account found with this email. Please register first.' 
+      });
+    }
+
+    // Check if already verified
+    if (user.verified) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Email is already verified. You can login now.' 
+      });
+    }
+
+    // Generate OTP
+    const otp = generateOTP();
+    user.emailVerificationOTP = otp;
+    user.emailVerificationExpires = new Date(Date.now() + 10 * 60 * 1000);
+    await user.save();
+
+    // Log OTP in test mode
+    if (process.env.OTP_TEST_MODE === 'true') {
+      console.log('\n' + '='.repeat(60));
+      console.log('📧 OTP EMAIL VERIFICATION (LEGACY)');
+      console.log('='.repeat(60));
+      console.log(`📮 Email: ${email}`);
+      console.log(`👤 User: ${user.firstName} ${user.lastName}`);
+      console.log(`🔐 OTP: ${otp}`);
+      console.log(`⏰ Expires: ${user.emailVerificationExpires.toLocaleString()}`);
+      console.log('='.repeat(60) + '\n');
+    }
+
+    // Send actual email (only if Brevo is configured)
+    if (process.env.BREVO_API_KEY) {
+      try {
+        await sendOTPEmail(email, otp, user.firstName);
+      } catch (error) {
+        console.error('Failed to send email, but OTP is still valid:', error);
+      }
+    }
+    
+    res.json({
+      success: true,
+      message: 'OTP sent to your email. Please verify within 10 minutes.',
+      email: email,
+      expiresIn: '10 minutes'
+    });
+
+  } catch (error) {
+    console.error('Send OTP error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error while sending OTP' 
+    });
+  }
+});
+
 // @route   POST /api/auth/login
 // @desc    Login user
 // @access  Public
@@ -354,85 +426,8 @@ router.post('/login', [
   }
 });
 
-// ==================== LEGACY OTP ENDPOINTS (Keep for existing verified users) ====================
-// @route   POST /api/auth/send-otp
-// @desc    Send OTP to email for existing users
-// @access  Public
-router.post('/send-otp', [
-  body('email').isEmail().normalizeEmail().withMessage('Valid email is required')
-], async (req, res) => {
-  try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ 
-        success: false, 
-        errors: errors.array() 
-      });
-    }
-
-    const { email } = req.body;
-
-    // Check if user exists
-    let user = await User.findOne({ email });
-    
-    if (!user) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'No account found with this email. Please register first.' 
-      });
-    }
-
-    // Check if already verified
-    if (user.verified) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Email is already verified. You can login now.' 
-      });
-    }
-
-    // Generate OTP
-    const otp = generateOTP();
-    user.emailVerificationOTP = otp;
-    user.emailVerificationExpires = new Date(Date.now() + 10 * 60 * 1000);
-    await user.save();
-
-    if (process.env.OTP_TEST_MODE === 'true') {
-      console.log('\n' + '='.repeat(60));
-      console.log('📧 OTP EMAIL VERIFICATION (EXISTING USER)');
-      console.log('='.repeat(60));
-      console.log(`📮 Email: ${email}`);
-      console.log(`👤 User: ${user.firstName} ${user.lastName}`);
-      console.log(`🔐 OTP: ${otp}`);
-      console.log(`⏰ Expires: ${user.emailVerificationExpires.toLocaleString()}`);
-      console.log('='.repeat(60) + '\n');
-    }
-
-    if (process.env.BREVO_API_KEY) {
-      try {
-        await sendOTPEmail(email, otp, user.firstName);
-      } catch (error) {
-        console.error('Failed to send email, but OTP is still valid:', error);
-      }
-    }
-
-    res.json({
-      success: true,
-      message: 'OTP sent to your email. Please verify within 10 minutes.',
-      email: email,
-      expiresIn: '10 minutes'
-    });
-
-  } catch (error) {
-    console.error('Send OTP error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error while sending OTP' 
-    });
-  }
-});
-
 // @route   POST /api/auth/verify-otp
-// @desc    Verify OTP and activate existing user account
+// @desc    Verify OTP and activate account (LEGACY - for existing users)
 // @access  Public
 router.post('/verify-otp', [
   body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
@@ -449,6 +444,7 @@ router.post('/verify-otp', [
 
     const { email, otp } = req.body;
 
+    // Find user
     const user = await User.findOne({ email });
     
     if (!user) {
@@ -458,6 +454,7 @@ router.post('/verify-otp', [
       });
     }
 
+    // Check if already verified
     if (user.verified) {
       return res.status(400).json({ 
         success: false, 
@@ -465,6 +462,7 @@ router.post('/verify-otp', [
       });
     }
 
+    // Check if OTP exists
     if (!user.emailVerificationOTP) {
       return res.status(400).json({ 
         success: false, 
@@ -472,6 +470,7 @@ router.post('/verify-otp', [
       });
     }
 
+    // Check if OTP expired
     if (new Date() > user.emailVerificationExpires) {
       return res.status(400).json({ 
         success: false, 
@@ -479,6 +478,7 @@ router.post('/verify-otp', [
       });
     }
 
+    // Verify OTP
     if (user.emailVerificationOTP !== otp) {
       return res.status(400).json({ 
         success: false, 
@@ -486,17 +486,20 @@ router.post('/verify-otp', [
       });
     }
 
+    // Mark as verified
     user.verified = true;
     user.emailVerificationOTP = undefined;
     user.emailVerificationExpires = undefined;
     await user.save();
 
+    // Send welcome email (optional)
     if (process.env.BREVO_API_KEY) {
       sendWelcomeEmail(email, user.firstName).catch(err => 
         console.log('Welcome email failed:', err)
       );
     }
 
+    // Generate token
     const token = generateToken(user._id);
 
     res.json({
@@ -539,6 +542,8 @@ router.post('/resend-otp', [
     }
 
     const { email } = req.body;
+
+    // Find user
     const user = await User.findOne({ email });
     
     if (!user) {
@@ -548,6 +553,7 @@ router.post('/resend-otp', [
       });
     }
 
+    // Check if already verified
     if (user.verified) {
       return res.status(400).json({ 
         success: false, 
@@ -555,11 +561,13 @@ router.post('/resend-otp', [
       });
     }
 
+    // Generate new OTP
     const otp = generateOTP();
     user.emailVerificationOTP = otp;
     user.emailVerificationExpires = new Date(Date.now() + 10 * 60 * 1000);
     await user.save();
 
+    // Log OTP in test mode
     if (process.env.OTP_TEST_MODE === 'true') {
       console.log('\n' + '='.repeat(60));
       console.log('📧 OTP RESEND');
@@ -570,7 +578,7 @@ router.post('/resend-otp', [
       console.log(`⏰ Expires: ${user.emailVerificationExpires.toLocaleString()}`);
       console.log('='.repeat(60) + '\n');
     }
-
+    
     res.json({
       success: true,
       message: 'New OTP sent to your email',
