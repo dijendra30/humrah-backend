@@ -4,53 +4,39 @@ const bcrypt = require('bcryptjs');
 
 // Questionnaire embedded schema
 const questionnaireSchema = new mongoose.Schema({
-  // Basic
   mood: String,
   name: String,
-  ageGroup: String,
 
-  // Location
-  state: String,
-  city: String,
+  ageGroup: String,
   area: String,
 
-  // Preferences
-  languagePreference: String,
-  personalityType: String,
-
-  // Media
-  profilePhoto: String, // base64
-
-  // Social / meetup
-  hangoutPreferences: [String],
-  meetupPreference: String,
+  availability: String,
   availableTimes: [String],
-  lookingForOnHumrah: [String],
-  goodMeetupMeaning: String,
 
-  // Vibe & personality
+  hangoutPreferences: [String],
   vibeWords: [String],
   vibeQuote: String,
 
-  // Safety & rules
-  publicPlacesOnly: String,
-  verifyIdentity: String,
-  understandGuidelines: String,
+  lookingForOnHumrah: [String],
+  goodMeetupMeaning: String,
 
-  // Emotional
-  comfortActivity: String,
-  relaxActivity: String,
-
-  // Monetization
   becomeCompanion: String,
-  openFor: [String],
-  comfortZones: [String],
-  availability: String,
   price: String,
+  tagline: String,
 
-  // Profile
-  tagline: String
-}, { _id: false });
+  comfortZones: [String],
+  openFor: [String],
+
+  languagePreference: String,
+  city: String,
+  state: String,
+
+  understandGuidelines: String,
+  verifyIdentity: String,
+  publicPlacesOnly: String,
+
+  bio: String
+}, { _id: false })
 
 // Main User Schema
 const userSchema = new mongoose.Schema({
@@ -142,3 +128,4 @@ userSchema.methods.toJSON = function () {
 
 
 module.exports = mongoose.model('User', userSchema);
+
