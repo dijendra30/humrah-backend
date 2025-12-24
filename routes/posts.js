@@ -19,7 +19,9 @@ router.post('/', auth, async (req, res) => {
       });
     }
 
-    // ✅ THIS IS THE CORRECT CALL
+    // ALWAYS log this once
+    console.log('🧪 Base64 starts with:', imageBase64.substring(0, 30));
+
     const uploadResult = await uploadBase64(
       imageBase64.startsWith('data:')
         ? imageBase64
@@ -27,10 +29,19 @@ router.post('/', auth, async (req, res) => {
       'humrah/posts'
     );
 
+    // 🚨 THIS IS THE KEY CHECK
+    if (!uploadResult || !uploadResult.url || !uploadResult.publicId) {
+      console.error('❌ Cloudinary upload failed:', uploadResult);
+      return res.status(500).json({
+        success: false,
+        message: 'Image upload failed'
+      });
+    }
+
     const post = new Post({
       userId: req.userId,
-      imageUrl: uploadResult.secure_url,
-      imagePublicId: uploadResult.public_id,
+      imageUrl: uploadResult.url,
+      imagePublicId: uploadResult.publicId,
       caption: caption || '',
       location: location || null,
       musicTrack: musicTrack || null
@@ -48,37 +59,11 @@ router.post('/', auth, async (req, res) => {
     console.error('🔥 Create post error:', error);
     res.status(500).json({
       success: false,
-      message: 'Server error while creating post'
+      message: error.message || 'Server error'
     });
   }
 });
 
-// @route   GET /api/posts
-// @desc    Get all posts (feed)
-// @access  Private
-router.get('/', auth, async (req, res) => {
-  try {
-    const { limit = 20, skip = 0 } = req.query;
-
-    const posts = await Post.find()
-      .populate('userId', 'firstName lastName profilePhoto')
-      .sort({ createdAt: -1 })
-      .limit(parseInt(limit))
-      .skip(parseInt(skip));
-
-    res.json({
-      success: true,
-      posts
-    });
-
-  } catch (error) {
-    console.error('Get posts error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error'
-    });
-  }
-});
 
 // @route   GET /api/posts/user/:userId
 // @desc    Get posts by specific user
