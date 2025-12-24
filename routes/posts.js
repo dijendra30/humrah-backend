@@ -3,9 +3,7 @@ const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
 const Post = require('../models/Post');
-const User = require('../models/User');
 const cloudinary = require('../config/cloudinary');
-const { deleteImage } = require('../config/cloudinary');
 
 // @route   POST /api/posts
 // @desc    Create a new post with image
@@ -21,6 +19,7 @@ router.post('/', auth, async (req, res) => {
       });
     }
 
+    // Upload image to Cloudinary
     const uploadResult = await cloudinary.uploader.upload(
       imageBase64.startsWith('data:')
         ? imageBase64
@@ -54,7 +53,6 @@ router.post('/', auth, async (req, res) => {
   }
 });
 
-
 // @route   GET /api/posts
 // @desc    Get all posts (feed)
 // @access  Private
@@ -75,9 +73,9 @@ router.get('/', auth, async (req, res) => {
 
   } catch (error) {
     console.error('Get posts error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error' 
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
     });
   }
 });
@@ -98,9 +96,9 @@ router.get('/user/:userId', auth, async (req, res) => {
 
   } catch (error) {
     console.error('Get user posts error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error' 
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
     });
   }
 });
@@ -113,19 +111,17 @@ router.post('/:id/like', auth, async (req, res) => {
     const post = await Post.findById(req.params.id);
 
     if (!post) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Post not found' 
+      return res.status(404).json({
+        success: false,
+        message: 'Post not found'
       });
     }
 
     const likeIndex = post.likes.indexOf(req.userId);
 
     if (likeIndex > -1) {
-      // Unlike
       post.likes.splice(likeIndex, 1);
     } else {
-      // Like
       post.likes.push(req.userId);
     }
 
@@ -140,9 +136,9 @@ router.post('/:id/like', auth, async (req, res) => {
 
   } catch (error) {
     console.error('Like post error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error' 
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
     });
   }
 });
@@ -155,18 +151,18 @@ router.post('/:id/comment', auth, async (req, res) => {
     const { text } = req.body;
 
     if (!text || !text.trim()) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Comment text is required' 
+      return res.status(400).json({
+        success: false,
+        message: 'Comment text is required'
       });
     }
 
     const post = await Post.findById(req.params.id);
 
     if (!post) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Post not found' 
+      return res.status(404).json({
+        success: false,
+        message: 'Post not found'
       });
     }
 
@@ -187,9 +183,9 @@ router.post('/:id/comment', auth, async (req, res) => {
 
   } catch (error) {
     console.error('Add comment error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error' 
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
     });
   }
 });
@@ -202,23 +198,21 @@ router.delete('/:id', auth, async (req, res) => {
     const post = await Post.findById(req.params.id);
 
     if (!post) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Post not found' 
+      return res.status(404).json({
+        success: false,
+        message: 'Post not found'
       });
     }
 
-    // Check ownership
     if (post.userId.toString() !== req.userId) {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Not authorized to delete this post' 
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to delete this post'
       });
     }
 
-    // Delete image from Cloudinary
     if (post.imagePublicId) {
-      await deleteImage(post.imagePublicId);
+      await cloudinary.uploader.destroy(post.imagePublicId);
     }
 
     await post.deleteOne();
@@ -230,9 +224,9 @@ router.delete('/:id', auth, async (req, res) => {
 
   } catch (error) {
     console.error('Delete post error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error' 
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
     });
   }
 });
