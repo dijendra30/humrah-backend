@@ -33,6 +33,7 @@ const eventRoutes = require('./routes/events');
 const companionRoutes = require('./routes/companions');
 const bookingRoutes = require('./routes/bookings');
 const messageRoutes = require('./routes/messages');
+const postRoutes = require('./routes/posts'); // ✅ ADD THIS
 
 // Use Routes
 app.use('/api/auth', authRoutes);
@@ -41,6 +42,7 @@ app.use('/api/events', eventRoutes);
 app.use('/api/companions', companionRoutes);
 app.use('/api/bookings', bookingRoutes);
 app.use('/api/messages', messageRoutes);
+app.use('/api/posts', postRoutes); // ✅ ADD THIS
 
 // Health Check
 app.get('/api/health', (req, res) => {
