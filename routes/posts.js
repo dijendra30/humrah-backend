@@ -3,7 +3,7 @@ const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
 const Post = require('../models/Post');
-const cloudinary = require('../config/cloudinary');
+const { uploadBase64, deleteImage } = require('../config/cloudinary');
 
 // @route   POST /api/posts
 // @desc    Create a new post with image
@@ -19,12 +19,12 @@ router.post('/', auth, async (req, res) => {
       });
     }
 
-    // Upload image to Cloudinary
-    const uploadResult = await cloudinary.uploader.upload(
+    // ✅ THIS IS THE CORRECT CALL
+    const uploadResult = await uploadBase64(
       imageBase64.startsWith('data:')
         ? imageBase64
         : `data:image/jpeg;base64,${imageBase64}`,
-      { folder: 'humrah/posts' }
+      'humrah/posts'
     );
 
     const post = new Post({
