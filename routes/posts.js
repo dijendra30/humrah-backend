@@ -3,7 +3,7 @@ const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
 const Post = require('../models/Post');
-const { uploadBase64, deleteImage } = require('../config/cloudinary');
+const { cloudinary, uploadBase64, deleteImage } = require('../config/cloudinary');
 
 // @route   POST /api/posts
 // @desc    Create a new post with image
