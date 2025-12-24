@@ -4,7 +4,8 @@ const router = express.Router();
 const auth = require('../middleware/auth');
 const Post = require('../models/Post');
 const User = require('../models/User');
-const { uploadBase64, deleteImage } = require('../config/cloudinary');
+const cloudinary = require('../config/cloudinary');
+const { deleteImage } = require('../config/cloudinary');
 
 // @route   POST /api/posts
 // @desc    Create a new post with image
@@ -14,27 +15,29 @@ router.post('/', auth, async (req, res) => {
     const { imageBase64, caption, location, musicTrack } = req.body;
 
     if (!imageBase64) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Image is required' 
+      return res.status(400).json({
+        success: false,
+        message: 'Image is required'
       });
     }
 
-    // Upload image to Cloudinary
-    const uploadResult = await uploadBase64(imageBase64, 'humrah/posts');
+    const uploadResult = await cloudinary.uploader.upload(
+      imageBase64.startsWith('data:')
+        ? imageBase64
+        : `data:image/jpeg;base64,${imageBase64}`,
+      { folder: 'humrah/posts' }
+    );
 
-    // Create post
     const post = new Post({
       userId: req.userId,
-      imageUrl: uploadResult.url,
-      imagePublicId: uploadResult.publicId,
+      imageUrl: uploadResult.secure_url,
+      imagePublicId: uploadResult.public_id,
       caption: caption || '',
       location: location || null,
       musicTrack: musicTrack || null
     });
 
     await post.save();
-    await post.populate('userId', 'firstName lastName profilePhoto');
 
     res.status(201).json({
       success: true,
@@ -43,13 +46,14 @@ router.post('/', auth, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Create post error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error while creating post' 
+    console.error('🔥 Create post error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while creating post'
     });
   }
 });
+
 
 // @route   GET /api/posts
 // @desc    Get all posts (feed)
