@@ -10,7 +10,20 @@ const { cloudinary, uploadBase64, deleteImage } = require('../config/cloudinary'
 // @access  Private
 router.post('/', auth, async (req, res) => {
   try {
-    const { imageBase64, caption, location, musicTrack } = req.body;
+    const { 
+      imageBase64, 
+      caption, 
+      location, 
+      disappearMode,
+      disappearHours,
+      vibeMode,
+      allowComments,
+      allowLikes,
+      onlyFollowers,
+      hasPoll,
+      pollQuestion,
+      pollOptions
+    } = req.body;
 
     if (!imageBase64) {
       return res.status(400).json({
@@ -38,20 +51,43 @@ router.post('/', auth, async (req, res) => {
       });
     }
 
+    // Parse poll options if provided
+    let parsedPollOptions = [];
+    if (hasPoll === 'true' && pollOptions) {
+      const optionsArray = typeof pollOptions === 'string' 
+        ? pollOptions.split(',').filter(opt => opt.trim())
+        : pollOptions;
+      
+      parsedPollOptions = optionsArray.map(opt => ({
+        optionText: opt.trim(),
+        votes: []
+      }));
+    }
+
     const post = new Post({
       userId: req.userId,
       imageUrl: uploadResult.url,
       imagePublicId: uploadResult.publicId,
       caption: caption || '',
       location: location || null,
-      musicTrack: musicTrack || null
+      
+      // New Gen Z features
+      disappearMode: disappearMode || 'PERMANENT',
+      disappearHours: disappearHours ? parseInt(disappearHours) : null,
+      vibeMode: vibeMode || 'NORMAL',
+      allowComments: allowComments === 'true',
+      allowLikes: allowLikes === 'true',
+      onlyFollowers: onlyFollowers === 'true',
+      hasPoll: hasPoll === 'true',
+      pollQuestion: pollQuestion || null,
+      pollOptions: parsedPollOptions
     });
 
     await post.save();
 
     res.status(201).json({
       success: true,
-      message: 'Post created successfully',
+      message: 'Post created successfully ✨',
       post
     });
 
@@ -65,18 +101,90 @@ router.post('/', auth, async (req, res) => {
 });
 
 
+// @route   GET /api/posts/feed
+// @desc    Get feed with all visible posts
+// @access  Private
+router.get('/feed', auth, async (req, res) => {
+  try {
+    const { page = 1, limit = 20 } = req.query;
+    
+    // Get all active posts
+    const posts = await Post.find({ isActive: true })
+      .populate('userId', 'firstName lastName profilePhoto')
+      .populate('comments.userId', 'firstName lastName profilePhoto')
+      .sort({ createdAt: -1 })
+      .limit(parseInt(limit))
+      .skip((parseInt(page) - 1) * parseInt(limit));
+
+    // Filter visible posts
+    const visiblePosts = posts.filter(post => {
+      // Check if post is expired
+      if (post.disappearMode !== 'PERMANENT' && post.expiresAt) {
+        if (new Date() > post.expiresAt) {
+          return false;
+        }
+      }
+      
+      // Check if followers only
+      // TODO: Add follower check when User model has followers array
+      // if (post.onlyFollowers && !isFollowing) return false;
+      
+      return true;
+    });
+
+    const total = await Post.countDocuments({ isActive: true });
+
+    res.json({
+      success: true,
+      posts: visiblePosts,
+      pagination: {
+        currentPage: parseInt(page),
+        totalPages: Math.ceil(total / parseInt(limit)),
+        totalPosts: total
+      }
+    });
+
+  } catch (error) {
+    console.error('Get feed error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
 // @route   GET /api/posts/user/:userId
 // @desc    Get posts by specific user
 // @access  Private
 router.get('/user/:userId', auth, async (req, res) => {
   try {
-    const posts = await Post.find({ userId: req.params.userId })
+    // Get all posts by user
+    const posts = await Post.find({ 
+      userId: req.params.userId,
+      isActive: true
+    })
       .populate('userId', 'firstName lastName profilePhoto')
       .sort({ createdAt: -1 });
 
+    // Filter visible posts (not expired)
+    const visiblePosts = posts.filter(post => {
+      // Check if post is expired
+      if (post.disappearMode !== 'PERMANENT' && post.expiresAt) {
+        if (new Date() > post.expiresAt) {
+          return false;
+        }
+      }
+      
+      // Check if followers only and user is not following
+      // TODO: Add follower check when User model has followers array
+      // if (post.onlyFollowers && !isFollowing) return false;
+      
+      return true;
+    });
+
     res.json({
       success: true,
-      posts
+      posts: visiblePosts
     });
 
   } catch (error) {
@@ -102,6 +210,14 @@ router.post('/:id/like', auth, async (req, res) => {
       });
     }
 
+    // Check if likes are allowed
+    if (!post.allowLikes) {
+      return res.status(403).json({
+        success: false,
+        message: 'Likes are disabled for this post'
+      });
+    }
+
     const likeIndex = post.likes.indexOf(req.userId);
 
     if (likeIndex > -1) {
@@ -115,7 +231,7 @@ router.post('/:id/like', auth, async (req, res) => {
 
     res.json({
       success: true,
-      message: likeIndex > -1 ? 'Post unliked' : 'Post liked',
+      message: likeIndex > -1 ? 'Post unliked' : 'Post liked ❤️',
       post
     });
 
@@ -151,6 +267,14 @@ router.post('/:id/comment', auth, async (req, res) => {
       });
     }
 
+    // Check if comments are allowed
+    if (!post.allowComments) {
+      return res.status(403).json({
+        success: false,
+        message: 'Comments are disabled for this post'
+      });
+    }
+
     post.comments.push({
       userId: req.userId,
       text: text.trim()
@@ -168,6 +292,134 @@ router.post('/:id/comment', auth, async (req, res) => {
 
   } catch (error) {
     console.error('Add comment error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// @route   POST /api/posts/:id/poll/vote
+// @desc    Vote on a poll option
+// @access  Private
+router.post('/:id/poll/vote', auth, async (req, res) => {
+  try {
+    const { optionIndex } = req.body;
+
+    if (optionIndex === undefined || optionIndex === null) {
+      return res.status(400).json({
+        success: false,
+        message: 'Option index is required'
+      });
+    }
+
+    const post = await Post.findById(req.params.id);
+
+    if (!post) {
+      return res.status(404).json({
+        success: false,
+        message: 'Post not found'
+      });
+    }
+
+    if (!post.hasPoll) {
+      return res.status(400).json({
+        success: false,
+        message: 'This post does not have a poll'
+      });
+    }
+
+    if (optionIndex < 0 || optionIndex >= post.pollOptions.length) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid option index'
+      });
+    }
+
+    // Remove user's previous vote if exists
+    post.pollOptions.forEach(option => {
+      const voteIndex = option.votes.indexOf(req.userId);
+      if (voteIndex > -1) {
+        option.votes.splice(voteIndex, 1);
+      }
+    });
+
+    // Add new vote
+    post.pollOptions[optionIndex].votes.push(req.userId);
+
+    await post.save();
+    await post.populate('userId', 'firstName lastName profilePhoto');
+
+    res.json({
+      success: true,
+      message: 'Vote recorded ✨',
+      post
+    });
+
+  } catch (error) {
+    console.error('Poll vote error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// @route   POST /api/posts/:id/repost
+// @desc    Repost a post
+// @access  Private
+router.post('/:id/repost', auth, async (req, res) => {
+  try {
+    const post = await Post.findById(req.params.id);
+
+    if (!post) {
+      return res.status(404).json({
+        success: false,
+        message: 'Post not found'
+      });
+    }
+
+    // Check if reposts are allowed
+    if (!post.allowReposts) {
+      return res.status(403).json({
+        success: false,
+        message: 'Reposts are disabled for this post'
+      });
+    }
+
+    // Check if user already reposted
+    const repostIndex = post.reposts.findIndex(
+      repost => repost.userId.toString() === req.userId
+    );
+
+    if (repostIndex > -1) {
+      // Undo repost
+      post.reposts.splice(repostIndex, 1);
+      await post.save();
+
+      res.json({
+        success: true,
+        message: 'Repost removed',
+        post
+      });
+    } else {
+      // Add repost
+      post.reposts.push({
+        userId: req.userId
+      });
+
+      await post.save();
+      await post.populate('userId', 'firstName lastName profilePhoto');
+
+      res.json({
+        success: true,
+        message: 'Post reposted 🔄',
+        post
+      });
+    }
+
+  } catch (error) {
+    console.error('Repost error:', error);
     res.status(500).json({
       success: false,
       message: 'Server error'
