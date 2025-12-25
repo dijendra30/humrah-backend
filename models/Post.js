@@ -59,7 +59,7 @@ const postSchema = new mongoose.Schema(
       default: true
     },
 
-    allowLike: {
+    allowLikes: {
       type: Boolean,
       default: true
     },
