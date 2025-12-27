@@ -1,5 +1,5 @@
 // controllers/spotlight.controller.js
-const User = require('../models/User.model');
+const User = require('../models/User.js');
 
 /**
  * @route   GET /api/spotlight
