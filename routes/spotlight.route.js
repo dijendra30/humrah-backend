@@ -1,13 +1,16 @@
 // routes/spotlight.route.js
 const express = require('express');
 const router = express.Router();
-const { protect } = require('../middleware/auth');
-const {
-  getSpotlightCompanions
-} = require('../controllers/spotlight.controller');
+const auth = require('../middleware/auth');
+const spotlightController = require('../controllers/spotlight.controller');
+
+// ✅ Debug: Check if controller loaded correctly
+console.log('Spotlight controller loaded:', {
+  controllerExists: !!spotlightController,
+  getSpotlightCompanions: typeof spotlightController.getSpotlightCompanions
+});
 
 // GET /api/spotlight
-// Fetch personalized companion recommendations based on shared hangout preferences
-router.get('/', protect, getSpotlightCompanions);
+router.get('/', auth, spotlightController.getSpotlightCompanions);
 
 module.exports = router;
