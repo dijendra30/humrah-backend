@@ -1,5 +1,5 @@
 // controllers/spotlight.controller.js
-const User = require('../models/User');
+const User = require('../models/User.model');
 
 /**
  * @route   GET /api/spotlight
@@ -15,7 +15,7 @@ const User = require('../models/User');
  */
 exports.getSpotlightCompanions = async (req, res) => {
   try {
-    const currentUserId = req.user.id; // Set by protect middleware
+    const currentUserId = req.userId; // ✅ FIXED: Your auth middleware sets req.userId, not req.user.id
 
     // 1. Fetch current user with their hangout preferences
     const currentUser = await User.findById(currentUserId).select('hangoutPreferences');
