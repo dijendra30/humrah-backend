@@ -1,10 +1,10 @@
-// models/User.js - Updated User Schema for MongoDB with Profile Questions
+// models/User.js - User Schema for MongoDB
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
-// Questionnaire embedded schema with BOTH onboarding AND profile fields
+// Questionnaire embedded schema
 const questionnaireSchema = new mongoose.Schema({
-  // ==================== ONBOARDING FIELDS (Required at signup) ====================
+  // ==================== ONBOARDING FIELDS (9 core questions) ====================
   name: String,
   city: String,
   languagePreference: String,
@@ -15,7 +15,7 @@ const questionnaireSchema = new mongoose.Schema({
   vibeWords: [String],
   publicPlacesOnly: String,
 
-  // ==================== PROFILE FIELDS (Optional post-onboarding) ====================
+  // ==================== PROFILE FIELDS (Progressive disclosure) ====================
   
   // Section 1: Basic Details
   ageGroup: String,
@@ -37,7 +37,7 @@ const questionnaireSchema = new mongoose.Schema({
   comfortZones: [String],
   hangoutFrequency: String,
 
-  // Section 5: Companion Mode
+  // Section 5: Companion Mode (Conditional)
   becomeCompanion: String,
   openFor: [String],
   availability: String,
@@ -48,10 +48,27 @@ const questionnaireSchema = new mongoose.Schema({
   verifyIdentity: String,
   understandGuidelines: String,
 
-  // ==================== DEPRECATED/LEGACY FIELDS ====================
-  // Keeping these for backward compatibility
+  // ==================== DEPRECATED/LEGACY ====================
   mood: String,
-  personalityType: String
+  personalityType: String,
+  gender: String,
+  dateOfBirth: String,
+  language: String,
+  interests: [String],
+  hobbies: [String],
+  movieGenre: String,
+  favoriteFood: String,
+  travelPreference: String,
+  petPreference: String,
+  fitnessLevel: String,
+  smokingStatus: String,
+  drinkingStatus: String,
+  relationshipStatus: String,
+  lookingFor: String,
+  connectAndEarn: String,
+  profession: String,
+  education: String,
+  income: String
 }, { _id: false })
 
 // Main User Schema
@@ -95,21 +112,21 @@ const userSchema = new mongoose.Schema({
   verified: { type: Boolean, default: false },
   emailVerified: { type: Boolean, default: false },
 
-  // OTP Email Verification Fields
-  emailVerificationOTP: { type: String, default: null },
-  emailVerificationExpires: { type: Date, default: null },
-
-  // Photo Verification Fields
+  // Photo Verification
+  verificationPhoto: { type: String, default: null },
+  verificationPhotoPublicId: { type: String, default: null },
   photoVerificationStatus: { 
     type: String, 
     enum: ['not_submitted', 'pending', 'approved', 'rejected'],
     default: 'not_submitted'
   },
-  verificationPhoto: { type: String, default: null },
-  verificationPhotoPublicId: { type: String, default: null },
   verificationPhotoSubmittedAt: { type: Date, default: null },
   photoVerifiedAt: { type: Date, default: null },
-  photoVerifiedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  photoVerifiedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+
+  // OTP Email Verification Fields
+  emailVerificationOTP: { type: String, default: null },
+  emailVerificationExpires: { type: Date, default: null },
 
   googleId: String,
   facebookId: String,
@@ -125,12 +142,11 @@ const userSchema = new mongoose.Schema({
 // =============================================
 // HASH PASSWORD BEFORE SAVE
 // =============================================
-userSchema.pre('save', async function (next) {
-  if (!this.isModified('password')) return next();
+userSchema.pre('save', async function () {
+  if (!this.isModified('password')) return;
 
   const salt = await bcrypt.genSalt(10);
   this.password = await bcrypt.hash(this.password, salt);
-  next();
 });
 
 // =============================================
@@ -141,7 +157,14 @@ userSchema.methods.comparePassword = async function (candidatePassword) {
 };
 
 // =============================================
-// CHECK IF FULLY VERIFIED
+// VIRTUAL FULL NAME
+// =============================================
+userSchema.virtual('fullName').get(function () {
+  return `${this.firstName} ${this.lastName}`;
+});
+
+// =============================================
+// CHECK IF FULLY VERIFIED (EMAIL + PHOTO)
 // =============================================
 userSchema.methods.isFullyVerified = function () {
   return this.emailVerified && this.photoVerificationStatus === 'approved';
@@ -150,72 +173,56 @@ userSchema.methods.isFullyVerified = function () {
 // =============================================
 // CALCULATE PROFILE COMPLETENESS
 // =============================================
-userSchema.methods.getProfileCompleteness = function () {
+userSchema.virtual('profileCompleteness').get(function () {
+  if (!this.questionnaire) return 40; // Only onboarding completed
+
   const q = this.questionnaire;
-  if (!q) return 40; // Only onboarding completed
-  
-  let score = 40; // Base score from onboarding
-  
-  // Basic Details (10 points)
+  let score = 40; // Base score from onboarding (9 essential questions)
+
+  // SECTION 1: Basic Details (10 points)
   if (q.ageGroup) score += 3;
   if (q.state) score += 3;
   if (q.area) score += 4;
-  
-  // About You (10 points)
+
+  // SECTION 2: About You (10 points)
   if (q.bio) score += 4;
   if (q.goodMeetupMeaning) score += 3;
   if (q.vibeQuote) score += 3;
-  
-  // Lifestyle & Interests (10 points)
+
+  // SECTION 3: Lifestyle & Interests (10 points)
   if (q.comfortActivity) score += 3;
   if (q.relaxActivity) score += 3;
   if (q.musicPreference) score += 4;
-  
-  // Hangout Preferences (10 points)
+
+  // SECTION 4: Hangout Preferences (10 points)
   if (q.budgetComfort) score += 3;
-  if (q.comfortZones?.length > 0) score += 4;
+  if (q.comfortZones && q.comfortZones.length > 0) score += 4;
   if (q.hangoutFrequency) score += 3;
-  
-  // Companion Mode (10 points)
+
+  // SECTION 5: Companion Mode (10 points)
   if (q.becomeCompanion === "Yes! I'd love to connect and earn 💰") {
-    if (q.openFor?.length > 0) score += 3;
+    if (q.openFor && q.openFor.length > 0) score += 3;
     if (q.availability) score += 2;
     if (q.price) score += 2;
     if (q.tagline) score += 3;
   } else if (q.becomeCompanion) {
-    score += 10; // Completed section by choosing "No"
+    score += 10; // Answered no, section complete
   }
-  
-  // Trust & Safety (10 points)
+
+  // SECTION 6: Trust & Safety (10 points)
   if (q.verifyIdentity) score += 5;
   if (q.understandGuidelines) score += 5;
-  
+
   return Math.min(score, 100);
-};
-
-// =============================================
-// VIRTUAL FULL NAME
-// =============================================
-userSchema.virtual('fullName').get(function () {
-  return `${this.firstName} ${this.lastName}`;
 });
 
 // =============================================
-// VIRTUAL PROFILE COMPLETENESS
-// =============================================
-userSchema.virtual('profileCompleteness').get(function () {
-  return this.getProfileCompleteness();
-});
-
-// =============================================
-// REMOVE SENSITIVE DATA FROM JSON OUTPUT
+// REMOVE PASSWORD FROM JSON OUTPUT
 // =============================================
 userSchema.methods.toJSON = function () {
   const obj = this.toObject();
   delete obj.password;
-  delete obj.emailVerificationOTP;
-  delete obj.profilePhotoPublicId;
-  delete obj.verificationPhotoPublicId;
+  delete obj.emailVerificationOTP; // Don't expose OTP
   return obj;
 };
 
