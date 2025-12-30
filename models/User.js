@@ -27,13 +27,20 @@ const questionnaireSchema = new mongoose.Schema({
   goodMeetupMeaning: String,
   vibeQuote: String,
 
-  // Section 3: Lifestyle & Interests
-  comfortActivity: {
+ // Section 3: Lifestyle & Interests
+comfortActivity: {
   type: [String],
   default: []
 },
-  relaxActivity: String,
-  musicPreference: String,
+relaxActivity: {
+  type: [String],
+  default: []
+},
+musicPreference: {
+  type: [String],
+  default: []
+},
+
 
   // Section 4: Hangout Preferences
   budgetComfort: String,
@@ -230,4 +237,5 @@ userSchema.methods.toJSON = function () {
 };
 
 module.exports = mongoose.model('User', userSchema);
+
 
