@@ -253,31 +253,34 @@ router.post('/submit-verification-photo-base64', auth, async (req, res) => {
 });
 
 // @route   PUT /api/users/me/questionnaire
-// @desc    Update only questionnaire
+// @desc    Merge & update questionnaire safely (multi-step onboarding)
 // @access  Private
 router.put('/me/questionnaire', auth, async (req, res) => {
   try {
     const { questionnaire } = req.body;
 
-    if (!questionnaire) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Questionnaire data is required' 
+    if (!questionnaire || typeof questionnaire !== 'object') {
+      return res.status(400).json({
+        success: false,
+        message: 'Questionnaire data is required'
       });
     }
 
-    const user = await User.findByIdAndUpdate(
-      req.userId,
-      { questionnaire },
-      { new: true, runValidators: true }
-    ).select('-password');
-
+    const user = await User.findById(req.userId);
     if (!user) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'User not found' 
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
       });
     }
+
+    // ✅ Merge questionnaire instead of overwriting
+    user.questionnaire = {
+      ...(user.questionnaire?.toObject?.() || user.questionnaire || {}),
+      ...questionnaire
+    };
+
+    await user.save();
 
     res.json({
       success: true,
@@ -287,9 +290,9 @@ router.put('/me/questionnaire', auth, async (req, res) => {
 
   } catch (error) {
     console.error('Save questionnaire error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error' 
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
     });
   }
 });
@@ -412,3 +415,4 @@ router.get('/admin/pending-verifications', auth, async (req, res) => {
 });
 
 module.exports = router;
+
