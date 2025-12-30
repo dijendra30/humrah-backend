@@ -28,7 +28,10 @@ const questionnaireSchema = new mongoose.Schema({
   vibeQuote: String,
 
   // Section 3: Lifestyle & Interests
-  comfortActivity: String,
+  comfortActivity: {
+  type: [String],
+  default: []
+},
   relaxActivity: String,
   musicPreference: String,
 
@@ -227,3 +230,4 @@ userSchema.methods.toJSON = function () {
 };
 
 module.exports = mongoose.model('User', userSchema);
+
