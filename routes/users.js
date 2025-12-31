@@ -1,7 +1,7 @@
 // routes/users.js - Fixed User Profile Routes with Buffer-Based Upload
 const express = require('express');
 const router = express.Router();
-const { auth, adminOnly } = require('../middleware/auth');
+const auth = require('../middleware/auth');
 const User = require('../models/User');
 const { upload, uploadBuffer, uploadBase64, deleteImage } = require('../config/cloudinary');
 const { sendProfileVerificationEmail } = require('../config/email');
