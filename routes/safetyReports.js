@@ -3,7 +3,7 @@ const router = express.Router();
 const SafetyReport = require('../models/SafetyReport');
 const User = require('../models/User');
 const { protect, adminOnly } = require('../middleware/auth');
-const { uploadEvidence } = require('../middleware/upload');
+//const { uploadEvidence } = require('../middleware/upload');
 
 // ==================== USER ENDPOINTS ====================
 
