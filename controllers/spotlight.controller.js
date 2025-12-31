@@ -60,7 +60,7 @@ exports.getSpotlightCompanions = async (req, res) => {
       
       const overlapCount = sharedHangouts.length;
 
-     return {
+  return {
   id: companion._id.toString(),
   name: `${companion.firstName} ${companion.lastName}`.trim(),
   profilePhoto: companion.profilePhoto || null,
@@ -80,9 +80,11 @@ exports.getSpotlightCompanions = async (req, res) => {
   comfortZones: companion.questionnaire?.comfortZones || [],
   becomeCompanion: companion.questionnaire?.becomeCompanion || null,
   price: companion.questionnaire?.price || null,
-photoVerificationStatus: companion.photoVerificationStatus || "not_submitted"
 
+  // 🔥 THIS IS THE MISSING LINE 🔥
+  photoVerificationStatus: companion.photoVerificationStatus
 };
+
  
     });
 
