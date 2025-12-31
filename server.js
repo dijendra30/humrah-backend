@@ -34,7 +34,8 @@ const companionRoutes = require('./routes/companions');
 const bookingRoutes = require('./routes/bookings');
 const messageRoutes = require('./routes/messages');
 const postRoutes = require('./routes/posts');
-const spotlightRoutes = require('./routes/spotlight.route');// ✅ ADD THIS
+const spotlightRoutes = require('./routes/spotlight.route');
+const safetyReportRoutes = require('./routes/safetyReports');// ✅ ADD THIS
 
 // Use Routes
 app.use('/api/auth', authRoutes);
@@ -44,7 +45,8 @@ app.use('/api/companions', companionRoutes);
 app.use('/api/bookings', bookingRoutes);
 app.use('/api/messages', messageRoutes);
 app.use('/api/posts', postRoutes);
-app.use('/api/spotlight', spotlightRoutes);// ✅ ADD THIS
+app.use('/api/spotlight', spotlightRoutes);
+app.use('/api/safety', safetyReportRoutes);// ✅ ADD THIS
 
 // Health Check
 app.get('/api/health', (req, res) => {
