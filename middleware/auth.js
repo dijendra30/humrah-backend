@@ -56,24 +56,3 @@ exports.auth = async (req, res, next) => {
   }
 };
 
-// =====================
-// ADMIN-ONLY MIDDLEWARE
-// =====================
-exports.adminOnly = (req, res, next) => {
-  // auth middleware MUST run before this
-  if (!req.user) {
-    return res.status(401).json({
-      success: false,
-      message: 'Authentication required'
-    });
-  }
-
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({
-      success: false,
-      message: 'Admin access required'
-    });
-  }
-
-  next();
-};
