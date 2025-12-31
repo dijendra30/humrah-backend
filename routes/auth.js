@@ -5,7 +5,7 @@ const router = express.Router();
 const jwt = require('jsonwebtoken');
 const { body, validationResult } = require('express-validator');
 const User = require('../models/User');
-const { auth } = require('../middleware/auth');
+const auth = require('../middleware/auth');
 
 
 // Generate JWT Token
@@ -735,4 +735,5 @@ router.post('/facebook', async (req, res) => {
 });
 
 module.exports = router;
+
 
