@@ -60,14 +60,30 @@ exports.getSpotlightCompanions = async (req, res) => {
       
       const overlapCount = sharedHangouts.length;
 
-      return {
-        id: companion._id.toString(),
-        name: `${companion.firstName} ${companion.lastName}`.trim(),
-        profilePhoto: companion.profilePhoto || null,
-        sharedHangouts: sharedHangouts,
-        overlapCount: overlapCount,
-        lastActiveAt: companion.lastActive || companion.createdAt
-      };
+     return {
+  id: companion._id.toString(),
+  name: `${companion.firstName} ${companion.lastName}`.trim(),
+  profilePhoto: companion.profilePhoto || null,
+
+  sharedHangouts,
+  overlapCount,
+
+  bio: companion.questionnaire?.bio || null,
+  tagline: companion.questionnaire?.tagline || null,
+  vibeWords: companion.questionnaire?.vibeWords || [],
+
+  city: companion.questionnaire?.city || null,
+  state: companion.questionnaire?.state || null,
+  availableTimes: companion.questionnaire?.availableTimes || [],
+  languagePreference: companion.questionnaire?.languagePreference || null,
+
+  comfortZones: companion.questionnaire?.comfortZones || [],
+  becomeCompanion: companion.questionnaire?.becomeCompanion || null,
+  price: companion.questionnaire?.price || null,
+
+  verified: companion.verified || false
+};
+ 
     });
 
     // 5. Sort companions by overlap count (DESC), then by last active
