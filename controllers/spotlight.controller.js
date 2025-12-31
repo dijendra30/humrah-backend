@@ -41,9 +41,11 @@ exports.getSpotlightCompanions = async (req, res) => {
   lastName
   profilePhoto
   verified
+  photoVerificationStatus
   questionnaire
   lastActive
 `)
+
 
     .limit(50); // Get more to filter from
 
