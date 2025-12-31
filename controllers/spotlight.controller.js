@@ -35,7 +35,16 @@ exports.getSpotlightCompanions = async (req, res) => {
       // profileCompletion: { $gte: 80 },
       // lastActiveAt: { $gte: seventyTwoHoursAgo }
     })
-    .select('_id firstName lastName profilePhoto questionnaire.hangoutPreferences lastActive')
+    .select(`
+  _id
+  firstName
+  lastName
+  profilePhoto
+  verified
+  questionnaire
+  lastActive
+`)
+
     .limit(50); // Get more to filter from
 
     console.log(`Found ${eligibleCompanions.length} eligible companions`);
