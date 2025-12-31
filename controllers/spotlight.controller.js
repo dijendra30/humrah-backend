@@ -80,8 +80,8 @@ exports.getSpotlightCompanions = async (req, res) => {
   comfortZones: companion.questionnaire?.comfortZones || [],
   becomeCompanion: companion.questionnaire?.becomeCompanion || null,
   price: companion.questionnaire?.price || null,
+photoVerificationStatus: companion.photoVerificationStatus || "not_submitted"
 
-  verified: companion.verified || false
 };
  
     });
