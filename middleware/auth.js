@@ -1,6 +1,6 @@
-// middleware/auth.js
+// middleware/auth.js - Authentication & Authorization Middleware
 const jwt = require('jsonwebtoken');
-const User = require('../models/User'); // adjust path if needed
+const User = require('../models/User');
 
 // =====================
 // AUTHENTICATION MIDDLEWARE
@@ -56,3 +56,84 @@ exports.auth = async (req, res, next) => {
   }
 };
 
+// =====================
+// ADMIN AUTHORIZATION MIDDLEWARE
+// =====================
+exports.adminOnly = async (req, res, next) => {
+  try {
+    // Check if user is attached (auth middleware should run first)
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    // Check if user has admin role
+    // TODO: Add 'role' field to User model if not present
+    // For now, you can use email-based check or add role field
+    
+    // Option 1: Check by email (temporary solution)
+    const adminEmails = [
+      'admin@humrah.com',
+      'safety@humrah.com'
+      // Add your admin emails here
+    ];
+    
+    if (!adminEmails.includes(req.user.email)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required'
+      });
+    }
+
+    // Option 2: Check by role field (recommended - add to User model)
+    // if (req.user.role !== 'admin') {
+    //   return res.status(403).json({
+    //     success: false,
+    //     message: 'Admin access required'
+    //   });
+    // }
+
+    next();
+  } catch (error) {
+    console.error('Admin check error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+};
+
+// =====================
+// OPTIONAL: MODERATOR MIDDLEWARE
+// =====================
+exports.moderatorOnly = async (req, res, next) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    // Check if user is admin or moderator
+    const allowedRoles = ['admin', 'moderator'];
+    
+    // TODO: Add role field to User model
+    // if (!allowedRoles.includes(req.user.role)) {
+    //   return res.status(403).json({
+    //     success: false,
+    //     message: 'Moderator or Admin access required'
+    //   });
+    // }
+
+    next();
+  } catch (error) {
+    console.error('Moderator check error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+};
