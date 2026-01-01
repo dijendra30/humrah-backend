@@ -1,4 +1,4 @@
-// models/User.js - User Schema for MongoDB
+// models/User.js - User Schema for MongoDB (Updated with Role Field)
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
@@ -27,20 +27,19 @@ const questionnaireSchema = new mongoose.Schema({
   goodMeetupMeaning: String,
   vibeQuote: String,
 
- // Section 3: Lifestyle & Interests
-comfortActivity: {
-  type: [String],
-  default: []
-},
-relaxActivity: {
-  type: [String],
-  default: []
-},
-musicPreference: {
-  type: [String],
-  default: []
-},
-
+  // Section 3: Lifestyle & Interests
+  comfortActivity: {
+    type: [String],
+    default: []
+  },
+  relaxActivity: {
+    type: [String],
+    default: []
+  },
+  musicPreference: {
+    type: [String],
+    default: []
+  },
 
   // Section 4: Hangout Preferences
   budgetComfort: String,
@@ -108,6 +107,14 @@ const userSchema = new mongoose.Schema({
     },
     minlength: [6, 'Password must be at least 6 characters']
   },
+  
+  // ✅ NEW: Role-based access control
+  role: {
+    type: String,
+    enum: ['user', 'moderator', 'admin'],
+    default: 'user'
+  },
+  
   profilePhoto: { type: String, default: null },
   profilePhotoPublicId: { type: String, default: null },
 
@@ -181,6 +188,20 @@ userSchema.methods.isFullyVerified = function () {
 };
 
 // =============================================
+// CHECK IF USER IS ADMIN
+// =============================================
+userSchema.methods.isAdmin = function () {
+  return this.role === 'admin';
+};
+
+// =============================================
+// CHECK IF USER IS MODERATOR OR ADMIN
+// =============================================
+userSchema.methods.isModeratorOrAdmin = function () {
+  return ['admin', 'moderator'].includes(this.role);
+};
+
+// =============================================
 // CALCULATE PROFILE COMPLETENESS
 // =============================================
 userSchema.virtual('profileCompleteness').get(function () {
@@ -237,5 +258,3 @@ userSchema.methods.toJSON = function () {
 };
 
 module.exports = mongoose.model('User', userSchema);
-
-
