@@ -1,7 +1,7 @@
 // routes/bookings.js - Booking Routes
 const express = require('express');
 const router = express.Router();
-const auth = require('../middleware/auth');
+const { auth } = require('../middleware/auth');
 const Booking = require('../models/Booking');
 const User = require('../models/User');
 
@@ -122,5 +122,6 @@ router.put('/:id/status', auth, async (req, res) => {
     });
   }
 });
+
 
 module.exports = router;
