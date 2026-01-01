@@ -1,7 +1,7 @@
 // routes/messages.js - Message Routes
 const express = require('express');
 const router = express.Router();
-const auth = require('../middleware/auth');
+const { auth } = require('../middleware/auth');
 const Message = require('../models/Message');
 const User = require('../models/User');
 
@@ -137,5 +137,6 @@ router.post('/', auth, async (req, res) => {
     });
   }
 });
+
 
 module.exports = router;
