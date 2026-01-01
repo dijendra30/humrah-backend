@@ -12,11 +12,11 @@ const SafetyReportSchema = new mongoose.Schema({
     
     // Reported user
     reportedUserId: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: 'User',
-        required: true,
-        index: true // For efficient queries
-    },
+  type: mongoose.Schema.Types.ObjectId,
+  ref: 'User',
+  required: false,
+  default: null
+   },
     
     // Report details
     category: {
