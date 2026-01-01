@@ -1,7 +1,7 @@
 // routes/posts.js - Post Routes
 const express = require('express');
 const router = express.Router();
-const auth = require('../middleware/auth');
+const { auth } = require('../middleware/auth');
 const Post = require('../models/Post');
 const { cloudinary, uploadBase64, deleteImage } = require('../config/cloudinary');
 
