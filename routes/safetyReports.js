@@ -32,23 +32,25 @@ router.post('/reports', auth, async (req, res) => {
         }
 
         // ✅ If reportedUserId exists, validate it
-        let reportedUser = null;
-        // Can't report yourself
-        if (reportedUserId === req.userId.toString()) {
-            return res.status(400).json({
-                success: false,
-                message: 'You cannot report yourself'
-            });
-        }
-        
-        // Check if reported user exists
-        const reportedUser = await User.findById(reportedUserId);
-        if (!reportedUser) {
-            return res.status(404).json({
-                success: false,
-                message: 'Reported user not found'
-            });
-        }
+       let reportedUser = null;
+
+if (reportedUserId) {
+    if (reportedUserId === req.userId.toString()) {
+        return res.status(400).json({
+            success: false,
+            message: 'You cannot report yourself'
+        });
+    }
+
+    reportedUser = await User.findById(reportedUserId);
+    if (!reportedUser) {
+        return res.status(404).json({
+            success: false,
+            message: 'Reported user not found'
+        });
+    }
+}
+
         
         // Validate phone number if phone contact is selected
         if (contactPreference?.phone && !contactPreference?.phoneNumber) {
