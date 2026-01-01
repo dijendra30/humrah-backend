@@ -50,7 +50,8 @@ router.post('/reports', auth, async (req, res) => {
             category,
             description: description?.trim(),
             evidenceUrls: evidenceUrls || [],
-            contactPreference: contactPreference || {}
+            contactPreference: contactPreference || {},
+            isGeneralReport: !reportedUserId
         });
         
         // Log report for monitoring
