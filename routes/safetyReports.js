@@ -34,22 +34,15 @@ router.post('/reports', auth, async (req, res) => {
         // ✅ If reportedUserId exists, validate it
        let reportedUser = null;
 
-if (reportedUserId) {
-    if (reportedUserId === req.userId.toString()) {
-        return res.status(400).json({
-            success: false,
-            message: 'You cannot report yourself'
-        });
-    }
 
-    reportedUser = await User.findById(reportedUserId);
-    if (!reportedUser) {
-        return res.status(404).json({
-            success: false,
-            message: 'Reported user not found'
-        });
-    }
-}
+const report = await SafetyReport.create({
+    reporterId: req.userId,
+    reportedUserId: reportedUserId || null, // optional now
+    category,
+    description: description?.trim(),
+    evidenceUrls: evidenceUrls || [],
+    contactPreference: contactPreference || {}
+});
 
         
         // Validate phone number if phone contact is selected
