@@ -34,16 +34,6 @@ router.post('/reports', auth, async (req, res) => {
         // ✅ If reportedUserId exists, validate it
        let reportedUser = null;
 
-
-const report = await SafetyReport.create({
-    reporterId: req.userId,
-    reportedUserId: reportedUserId || null, // optional now
-    category,
-    description: description?.trim(),
-    evidenceUrls: evidenceUrls || [],
-    contactPreference: contactPreference || {}
-});
-
         
         // Validate phone number if phone contact is selected
         if (contactPreference?.phone && !contactPreference?.phoneNumber) {
@@ -56,7 +46,7 @@ const report = await SafetyReport.create({
         // Create report
         const report = await SafetyReport.create({
             reporterId: req.userId,
-            reportedUserId,
+            reportedUserId: reportedUserId || null, // optional now
             category,
             description: description?.trim(),
             evidenceUrls: evidenceUrls || [],
