@@ -1,7 +1,7 @@
 // routes/events.js - Event Routes
 const express = require('express');
 const router = express.Router();
-const auth = require('../middleware/auth');
+const { auth } = require('../middleware/auth');
 const Event = require('../models/Event');
 
 // @route   GET /api/events
@@ -114,5 +114,6 @@ router.post('/:id/leave', auth, async (req, res) => {
     });
   }
 });
+
 
 module.exports = router;
