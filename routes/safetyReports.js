@@ -23,14 +23,16 @@ router.post('/reports', auth, async (req, res) => {
             contactPreference
         } = req.body;
         
-        // Validation
-        if (!reportedUserId || !category) {
+         // ✅ category is mandatory
+        if (!category) {
             return res.status(400).json({
                 success: false,
-                message: 'Reported user and category are required'
+                message: 'Category is required'
             });
         }
-        
+
+        // ✅ If reportedUserId exists, validate it
+        let reportedUser = null;
         // Can't report yourself
         if (reportedUserId === req.userId.toString()) {
             return res.status(400).json({
