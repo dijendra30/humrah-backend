@@ -1,7 +1,7 @@
 // routes/spotlight.route.js
 const express = require('express');
 const router = express.Router();
-const auth = require('../middleware/auth');
+const { auth } = require('../middleware/auth');
 const spotlightController = require('../controllers/spotlight.controller');
 
 // ✅ Debug: Check if controller loaded correctly
