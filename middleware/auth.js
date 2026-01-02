@@ -1,4 +1,4 @@
-// middleware/auth.js - Enhanced Authentication & Authorization Middleware
+// middleware/auth.js - Backward Compatible Authentication & Authorization Middleware
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const AuditLog = require('../models/AuditLog');
@@ -9,7 +9,7 @@ const AuditLog = require('../models/AuditLog');
 /**
  * Verify JWT token and attach user to request
  */
-exports.authenticate = async (req, res, next) => {
+const authenticate = async (req, res, next) => {
   try {
     // Get token from Authorization header
     const authHeader = req.header('Authorization');
@@ -40,8 +40,8 @@ exports.authenticate = async (req, res, next) => {
       });
     }
 
-    // Check if account is locked
-    if (user.isLocked()) {
+    // Check if account is locked (if method exists)
+    if (user.isLocked && user.isLocked()) {
       return res.status(403).json({
         success: false,
         message: 'Account is temporarily locked. Please try again later.'
@@ -49,7 +49,7 @@ exports.authenticate = async (req, res, next) => {
     }
 
     // Check if account is active
-    if (user.status !== 'ACTIVE') {
+    if (user.status && user.status !== 'ACTIVE') {
       return res.status(403).json({
         success: false,
         message: `Account is ${user.status.toLowerCase()}`,
@@ -116,13 +116,19 @@ exports.authenticate = async (req, res, next) => {
 };
 
 // =============================================
+// BACKWARD COMPATIBILITY
+// Export as both 'auth' and 'authenticate'
+// =============================================
+const auth = authenticate;
+
+// =============================================
 // ROLE-BASED AUTHORIZATION MIDDLEWARE
 // =============================================
 /**
  * Check if user has one of the required roles
  * Usage: authorize(['SAFETY_ADMIN', 'SUPER_ADMIN'])
  */
-exports.authorize = (...allowedRoles) => {
+const authorize = (...allowedRoles) => {
   return async (req, res, next) => {
     try {
       // Ensure user is authenticated
@@ -133,33 +139,48 @@ exports.authorize = (...allowedRoles) => {
         });
       }
 
+      // Get user role (handle both old and new User models)
+      const userRole = req.user.role || 'user';
+
+      // Normalize roles (handle both uppercase and lowercase)
+      const normalizedUserRole = userRole.toUpperCase();
+      const normalizedAllowedRoles = allowedRoles.map(role => 
+        typeof role === 'string' ? role.toUpperCase() : role
+      );
+
       // Check if user's role is in allowed roles
-      if (!allowedRoles.includes(req.user.role)) {
-        // Log unauthorized access attempt
-        await AuditLog.logAction({
-          actorId: req.user._id,
-          actorRole: req.user.role,
-          actorEmail: req.user.email,
-          action: 'UNAUTHORIZED_ACCESS_ATTEMPT',
-          targetType: 'SYSTEM',
-          details: {
-            requestedPath: req.path,
-            requestedMethod: req.method,
-            requiredRoles: allowedRoles,
-            userRole: req.user.role
-          },
-          ipAddress: req.ip,
-          userAgent: req.get('user-agent'),
-          requestMethod: req.method,
-          requestPath: req.path,
-          isSuccessful: false
-        });
+      if (!normalizedAllowedRoles.includes(normalizedUserRole)) {
+        // Log unauthorized access attempt (if AuditLog exists)
+        try {
+          if (AuditLog) {
+            await AuditLog.logAction({
+              actorId: req.user._id,
+              actorRole: userRole,
+              actorEmail: req.user.email,
+              action: 'UNAUTHORIZED_ACCESS_ATTEMPT',
+              targetType: 'SYSTEM',
+              details: {
+                requestedPath: req.path,
+                requestedMethod: req.method,
+                requiredRoles: allowedRoles,
+                userRole: userRole
+              },
+              ipAddress: req.ip,
+              userAgent: req.get('user-agent'),
+              requestMethod: req.method,
+              requestPath: req.path,
+              isSuccessful: false
+            });
+          }
+        } catch (auditError) {
+          console.error('Audit log error:', auditError);
+        }
 
         return res.status(403).json({
           success: false,
           message: 'Insufficient permissions',
           required: allowedRoles,
-          current: req.user.role
+          current: userRole
         });
       }
 
@@ -181,7 +202,7 @@ exports.authorize = (...allowedRoles) => {
  * Check if user has specific permission
  * Usage: requirePermission('canBanUsers')
  */
-exports.requirePermission = (permission) => {
+const requirePermission = (permission) => {
   return async (req, res, next) => {
     try {
       if (!req.user) {
@@ -191,36 +212,29 @@ exports.requirePermission = (permission) => {
         });
       }
 
-      // Super admin has all permissions
-      if (req.user.role === 'SUPER_ADMIN') {
+      const userRole = req.user.role || 'user';
+
+      // Super admin has all permissions (handle both cases)
+      if (userRole.toUpperCase() === 'SUPER_ADMIN') {
         return next();
       }
 
-      // Check specific permission
-      if (!req.user.hasPermission(permission)) {
-        await AuditLog.logAction({
-          actorId: req.user._id,
-          actorRole: req.user.role,
-          actorEmail: req.user.email,
-          action: 'UNAUTHORIZED_ACCESS_ATTEMPT',
-          targetType: 'SYSTEM',
-          details: {
-            requestedPath: req.path,
-            requestedMethod: req.method,
-            requiredPermission: permission,
-            userPermissions: req.user.adminPermissions
-          },
-          ipAddress: req.ip,
-          userAgent: req.get('user-agent'),
-          requestMethod: req.method,
-          requestPath: req.path,
-          isSuccessful: false
-        });
-
+      // Check specific permission (if hasPermission method exists)
+      if (req.user.hasPermission && !req.user.hasPermission(permission)) {
         return res.status(403).json({
           success: false,
           message: `Missing permission: ${permission}`
         });
+      }
+
+      // If hasPermission method doesn't exist, check adminPermissions directly
+      if (!req.user.hasPermission && req.user.adminPermissions) {
+        if (!req.user.adminPermissions[permission]) {
+          return res.status(403).json({
+            success: false,
+            message: `Missing permission: ${permission}`
+          });
+        }
       }
 
       next();
@@ -242,7 +256,7 @@ exports.requirePermission = (permission) => {
  * (checks for suspensions/restrictions)
  * Usage: canPerformAction('chat')
  */
-exports.canPerformAction = (action) => {
+const canPerformAction = (action) => {
   return (req, res, next) => {
     try {
       if (!req.user) {
@@ -252,7 +266,8 @@ exports.canPerformAction = (action) => {
         });
       }
 
-      if (!req.user.canPerformAction(action)) {
+      // If canPerformAction method exists, use it
+      if (req.user.canPerformAction && !req.user.canPerformAction(action)) {
         return res.status(403).json({
           success: false,
           message: `You are restricted from ${action}`,
@@ -272,119 +287,54 @@ exports.canPerformAction = (action) => {
 };
 
 // =============================================
-// ADMIN-ONLY MIDDLEWARE (Shortcut)
+// ADMIN-ONLY MIDDLEWARE (Shortcuts)
 // =============================================
 /**
  * Ensure user is SAFETY_ADMIN or SUPER_ADMIN
  */
-exports.adminOnly = exports.authorize('SAFETY_ADMIN', 'SUPER_ADMIN');
+const adminOnly = authorize('SAFETY_ADMIN', 'SUPER_ADMIN', 'admin', 'moderator');
 
 /**
  * Ensure user is SUPER_ADMIN only
  */
-exports.superAdminOnly = exports.authorize('SUPER_ADMIN');
+const superAdminOnly = authorize('SUPER_ADMIN', 'admin');
 
 /**
  * Ensure user is regular USER only
  */
-exports.userOnly = exports.authorize('USER');
+const userOnly = authorize('USER', 'user');
 
 // =============================================
-// OWNERSHIP VERIFICATION
+// MODERATOR MIDDLEWARE (for backward compatibility)
 // =============================================
-/**
- * Check if user owns the resource (e.g., their own profile)
- * Usage: verifyOwnership('userId')
- */
-exports.verifyOwnership = (paramName = 'userId') => {
-  return (req, res, next) => {
-    try {
-      if (!req.user) {
-        return res.status(401).json({
-          success: false,
-          message: 'Authentication required'
-        });
-      }
-
-      const resourceOwnerId = req.params[paramName] || req.body[paramName];
-
-      // Admins can access any resource
-      if (req.user.role !== 'USER') {
-        return next();
-      }
-
-      // Regular users can only access their own resources
-      if (req.user._id.toString() !== resourceOwnerId) {
-        return res.status(403).json({
-          success: false,
-          message: 'You can only access your own resources'
-        });
-      }
-
-      next();
-    } catch (error) {
-      console.error('Ownership verification error:', error);
-      return res.status(500).json({
+const moderatorOnly = async (req, res, next) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
         success: false,
-        message: 'Ownership verification failed'
+        message: 'Authentication required'
       });
     }
-  };
-};
 
-// =============================================
-// RATE LIMITING MIDDLEWARE
-// =============================================
-const rateLimitMap = new Map();
-
-/**
- * Simple in-memory rate limiter
- * Usage: rateLimit(10, 60000) // 10 requests per minute
- */
-exports.rateLimit = (maxRequests = 10, windowMs = 60000) => {
-  return (req, res, next) => {
-    try {
-      const key = req.user ? req.user._id.toString() : req.ip;
-      const now = Date.now();
-      
-      if (!rateLimitMap.has(key)) {
-        rateLimitMap.set(key, { count: 1, resetTime: now + windowMs });
-        return next();
-      }
-      
-      const userData = rateLimitMap.get(key);
-      
-      if (now > userData.resetTime) {
-        rateLimitMap.set(key, { count: 1, resetTime: now + windowMs });
-        return next();
-      }
-      
-      if (userData.count >= maxRequests) {
-        return res.status(429).json({
-          success: false,
-          message: 'Too many requests, please try again later',
-          retryAfter: Math.ceil((userData.resetTime - now) / 1000)
-        });
-      }
-      
-      userData.count++;
-      return next();
-    } catch (error) {
-      console.error('Rate limit error:', error);
-      return next(); // Don't block on error
+    const userRole = req.user.role || 'user';
+    const allowedRoles = ['admin', 'moderator', 'SAFETY_ADMIN', 'SUPER_ADMIN'];
+    
+    if (!allowedRoles.includes(userRole)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Moderator or Admin access required'
+      });
     }
-  };
-};
 
-// Clean up rate limit map periodically
-setInterval(() => {
-  const now = Date.now();
-  for (const [key, data] of rateLimitMap.entries()) {
-    if (now > data.resetTime) {
-      rateLimitMap.delete(key);
-    }
+    next();
+  } catch (error) {
+    console.error('Moderator check error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
   }
-}, 60000); // Clean every minute
+};
 
 // =============================================
 // AUDIT LOGGING MIDDLEWARE
@@ -393,8 +343,13 @@ setInterval(() => {
  * Automatically log admin actions
  * Usage: auditLog('VIEW_REPORT')
  */
-exports.auditLog = (action, targetType = 'SYSTEM') => {
+const auditLog = (action, targetType = 'SYSTEM') => {
   return async (req, res, next) => {
+    // Only log if AuditLog model exists
+    if (!AuditLog) {
+      return next();
+    }
+
     // Store start time
     const startTime = Date.now();
     
@@ -407,7 +362,7 @@ exports.auditLog = (action, targetType = 'SYSTEM') => {
       const responseTime = Date.now() - startTime;
       
       // Log the action (async, don't wait)
-      if (req.user && req.user.isAdmin) {
+      if (req.user && (req.user.role === 'SAFETY_ADMIN' || req.user.role === 'SUPER_ADMIN' || req.user.role === 'admin' || req.user.role === 'moderator')) {
         AuditLog.logAction({
           actorId: req.user._id,
           actorRole: req.user.role,
@@ -457,30 +412,20 @@ function sanitizeBody(body) {
 }
 
 // =============================================
-// EXPORTS SUMMARY
+// EXPORTS
 // =============================================
 module.exports = {
-  // Core authentication
-  authenticate: exports.authenticate,
+  // Primary exports (new names)
+  authenticate,
+  authorize,
+  requirePermission,
+  canPerformAction,
+  auditLog,
   
-  // Role-based authorization
-  authorize: exports.authorize,
-  adminOnly: exports.adminOnly,
-  superAdminOnly: exports.superAdminOnly,
-  userOnly: exports.userOnly,
-  
-  // Permission-based authorization
-  requirePermission: exports.requirePermission,
-  
-  // Action-based authorization
-  canPerformAction: exports.canPerformAction,
-  
-  // Ownership verification
-  verifyOwnership: exports.verifyOwnership,
-  
-  // Rate limiting
-  rateLimit: exports.rateLimit,
-  
-  // Audit logging
-  auditLog: exports.auditLog
+  // Backward compatibility (old names)
+  auth,  // ✅ This is the key export for backward compatibility
+  adminOnly,
+  superAdminOnly,
+  userOnly,
+  moderatorOnly
 };
