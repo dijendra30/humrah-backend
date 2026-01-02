@@ -1,740 +1,554 @@
-// routes/auth.js - Authentication Routes with OTP (UPDATED - Registration Flow)
-const { sendOTPEmail, sendWelcomeEmail } = require('../config/email');
+// routes/auth.js - Enhanced Authentication Routes with Role Support
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
-const { body, validationResult } = require('express-validator');
 const User = require('../models/User');
-const { auth } = require('../middleware/auth');  // ✅ FIXED: Destructure auth function
+const AuditLog = require('../models/AuditLog');
+const { authenticate, superAdminOnly, auditLog } = require('../middleware/auth');
+const { sendOTPEmail, sendWelcomeEmail } = require('../config/email');
 
-
-// Generate JWT Token
-const generateToken = (userId) => {
-  return jwt.sign({ userId }, process.env.JWT_SECRET || 'fallback_secret', {
-    expiresIn: '30d'
-  });
+// =============================================
+// HELPER: GENERATE JWT TOKEN
+// =============================================
+const generateToken = (userId, role) => {
+  return jwt.sign(
+    { userId, role },
+    process.env.JWT_SECRET || 'fallback_secret_change_in_production',
+    { expiresIn: '7d' }
+  );
 };
 
-// Generate 6-digit OTP
-const generateOTP = () => {
-  return Math.floor(100000 + Math.random() * 900000).toString();
-};
+// =============================================
+// PUBLIC ROUTES
+// =============================================
 
-// ==================== IN-MEMORY OTP STORAGE ====================
-// Format: { email: { otp: '123456', expires: Date, verified: false, tempUserData: {...} } }
-const otpStore = new Map();
-
-// Cleanup expired OTPs every 15 minutes
-setInterval(() => {
-  const now = Date.now();
-  for (const [email, data] of otpStore.entries()) {
-    if (data.expires < now) {
-      otpStore.delete(email);
-      console.log(`🧹 Cleaned up expired OTP for: ${email}`);
-    }
-  }
-}, 15 * 60 * 1000);
-
-// ==================== STEP 1: SEND OTP FOR REGISTRATION ====================
-// @route   POST /api/auth/send-otp-registration
-// @desc    Send OTP for NEW user registration (before user exists in DB)
-// @access  Public
-router.post('/send-otp-registration', [
-  body('email').isEmail().normalizeEmail().withMessage('Valid email is required')
-], async (req, res) => {
+/**
+ * @route   POST /api/auth/register
+ * @desc    Register new user (USER role only)
+ * @access  Public
+ */
+router.post('/register', async (req, res) => {
   try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ 
-        success: false, 
-        errors: errors.array() 
-      });
-    }
-
-    const { email } = req.body;
-
-    // Check if user already exists
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'User with this email already exists. Please login instead.' 
-      });
-    }
-
-    // Generate OTP
-    const otp = generateOTP();
-    const expires = Date.now() + 10 * 60 * 1000; // 10 minutes
-
-    // Store in memory
-    otpStore.set(email, {
-      otp,
-      expires,
-      verified: false,
-      tempUserData: null
-    });
-
-    // Log OTP in test mode
-    if (process.env.OTP_TEST_MODE === 'true') {
-      console.log('\n' + '='.repeat(60));
-      console.log('📧 REGISTRATION OTP SENT');
-      console.log('='.repeat(60));
-      console.log(`📮 Email: ${email}`);
-      console.log(`🔐 OTP: ${otp}`);
-      console.log(`⏰ Expires: ${new Date(expires).toLocaleString()}`);
-      console.log('='.repeat(60) + '\n');
-    }
-
-    // Send actual email (only if Brevo is configured)
-    if (process.env.BREVO_API_KEY) {
-      try {
-        await sendOTPEmail(email, otp, 'User');
-      } catch (error) {
-        console.error('Failed to send email, but OTP is still valid:', error);
-      }
-    }
-
-    res.json({
-      success: true,
-      message: 'OTP sent to your email. Please verify within 10 minutes.',
-      email: email,
-      expiresIn: '10 minutes'
-    });
-
-  } catch (error) {
-    console.error('Send registration OTP error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error while sending OTP' 
-    });
-  }
-});
-
-// ==================== STEP 2: VERIFY OTP FOR REGISTRATION ====================
-// @route   POST /api/auth/verify-otp-registration
-// @desc    Verify OTP for registration (OTP is in memory, user not yet in DB)
-// @access  Public
-router.post('/verify-otp-registration', [
-  body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
-  body('otp').isLength({ min: 6, max: 6 }).withMessage('OTP must be 6 digits')
-], async (req, res) => {
-  try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ 
-        success: false, 
-        errors: errors.array() 
-      });
-    }
-
-    const { email, otp } = req.body;
-
-    // Get OTP data from memory
-    const otpData = otpStore.get(email);
-    
-    if (!otpData) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'No OTP found. Please request a new OTP.' 
-      });
-    }
-
-    // Check if OTP expired
-    if (Date.now() > otpData.expires) {
-      otpStore.delete(email);
-      return res.status(400).json({ 
-        success: false, 
-        message: 'OTP has expired. Please request a new one.' 
-      });
-    }
-
-    // Verify OTP
-    if (otpData.otp !== otp) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Invalid OTP. Please check and try again.' 
-      });
-    }
-
-    // Mark as verified in memory (but don't create user yet)
-    otpData.verified = true;
-    otpStore.set(email, otpData);
-
-    console.log(`✅ OTP verified for registration: ${email}`);
-
-    res.json({
-      success: true,
-      message: 'Email verified! You can now complete registration.',
-      verified: true,
-      email: email
-    });
-
-  } catch (error) {
-    console.error('Verify registration OTP error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error during verification' 
-    });
-  }
-});
-
-// ==================== STEP 3: COMPLETE REGISTRATION ====================
-// @route   POST /api/auth/register
-// @desc    Complete registration with verified email
-// @access  Public
-router.post('/register', [
-  body('firstName').trim().notEmpty().withMessage('First name is required'),
-  body('lastName').trim().notEmpty().withMessage('Last name is required'),
-  body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
-  body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
-  body('emailVerified').isBoolean().withMessage('Email verification status required')
-], async (req, res) => {
-  try {
-    // Validation
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ 
-        success: false, 
-        errors: errors.array() 
-      });
-    }
-
-    const { firstName, lastName, email, password, questionnaire, emailVerified } = req.body;
-
-    // Check if email was verified
-    const otpData = otpStore.get(email);
-    if (!emailVerified || !otpData || !otpData.verified) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Please verify your email first with OTP' 
-      });
-    }
-
-    // Check if user already exists
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'User with this email already exists' 
-      });
-    }
-
-    // Create user with verified email
-    const user = new User({
+    const {
       firstName,
       lastName,
       email,
       password,
-      questionnaire: questionnaire || {},
-      verified: true // Email is pre-verified
+      questionnaire,
+      emailVerified
+    } = req.body;
+
+    // Validation
+    if (!firstName || !lastName || !email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'All fields are required'
+      });
+    }
+
+    // Check if user exists
+    const existingUser = await User.findOne({ email: email.toLowerCase() });
+    if (existingUser) {
+      return res.status(400).json({
+        success: false,
+        message: 'User already exists with this email'
+      });
+    }
+
+    // Create user (ALWAYS with USER role)
+    const user = new User({
+      firstName,
+      lastName,
+      email: email.toLowerCase(),
+      password,
+      role: 'USER', // EXPLICIT: Public registration only creates USER role
+      status: emailVerified ? 'ACTIVE' : 'PENDING_VERIFICATION',
+      emailVerified: emailVerified || false,
+      questionnaire: questionnaire || {}
     });
 
     await user.save();
 
-    // Clean up OTP from memory
-    otpStore.delete(email);
+    // Generate token
+    const token = generateToken(user._id, user.role);
 
-    // Send welcome email
-    if (process.env.BREVO_API_KEY) {
-      sendWelcomeEmail(email, user.firstName).catch(err => 
-        console.log('Welcome email failed:', err)
-      );
+    // Send welcome email if verified
+    if (emailVerified) {
+      try {
+        await sendWelcomeEmail(user.email, user.firstName);
+      } catch (emailError) {
+        console.error('Welcome email error:', emailError);
+      }
     }
 
-    // Generate token
-    const token = generateToken(user._id);
-
-    console.log(`✅ Registration completed for: ${email}`);
+    console.log(`✅ New user registered: ${user.email} (${user.role})`);
 
     res.status(201).json({
       success: true,
-      message: 'Registration successful!',
+      message: 'Registration successful',
       token,
       user: {
-        id: user._id,
+        _id: user._id,
         firstName: user.firstName,
         lastName: user.lastName,
         email: user.email,
-        profilePhoto: user.profilePhoto,
-        isPremium: user.isPremium,
-        verified: user.verified
+        role: user.role,
+        emailVerified: user.emailVerified,
+        status: user.status
       }
     });
 
   } catch (error) {
     console.error('Registration error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error during registration' 
+    res.status(500).json({
+      success: false,
+      message: 'Server error during registration'
     });
   }
 });
 
-// ==================== LEGACY: SEND OTP FOR LOGIN ====================
-// @route   POST /api/auth/send-otp
-// @desc    Send OTP to existing user's email for login verification
-// @access  Public
-router.post('/send-otp', [
-  body('email').isEmail().normalizeEmail().withMessage('Valid email is required')
-], async (req, res) => {
+/**
+ * @route   POST /api/auth/login
+ * @desc    Login user (all roles use same endpoint)
+ * @access  Public
+ */
+router.post('/login', async (req, res) => {
   try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ 
-        success: false, 
-        errors: errors.array() 
-      });
-    }
-
-    const { email } = req.body;
-
-    // Check if user exists (REQUIRED for this endpoint)
-    let user = await User.findOne({ email });
-    
-    if (!user) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'No account found with this email. Please register first.' 
-      });
-    }
-
-    // Check if already verified
-    if (user.verified) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Email is already verified. You can login now.' 
-      });
-    }
-
-    // Generate OTP
-    const otp = generateOTP();
-    user.emailVerificationOTP = otp;
-    user.emailVerificationExpires = new Date(Date.now() + 10 * 60 * 1000);
-    await user.save();
-
-    // Log OTP in test mode
-    if (process.env.OTP_TEST_MODE === 'true') {
-      console.log('\n' + '='.repeat(60));
-      console.log('📧 OTP EMAIL VERIFICATION (LEGACY)');
-      console.log('='.repeat(60));
-      console.log(`📮 Email: ${email}`);
-      console.log(`👤 User: ${user.firstName} ${user.lastName}`);
-      console.log(`🔐 OTP: ${otp}`);
-      console.log(`⏰ Expires: ${user.emailVerificationExpires.toLocaleString()}`);
-      console.log('='.repeat(60) + '\n');
-    }
-
-    // Send actual email (only if Brevo is configured)
-    if (process.env.BREVO_API_KEY) {
-      try {
-        await sendOTPEmail(email, otp, user.firstName);
-      } catch (error) {
-        console.error('Failed to send email, but OTP is still valid:', error);
-      }
-    }
-    
-    res.json({
-      success: true,
-      message: 'OTP sent to your email. Please verify within 10 minutes.',
-      email: email,
-      expiresIn: '10 minutes'
-    });
-
-  } catch (error) {
-    console.error('Send OTP error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error while sending OTP' 
-    });
-  }
-});
-
-// @route   POST /api/auth/login
-// @desc    Login user
-// @access  Public
-router.post('/login', [
-  body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
-  body('password').notEmpty().withMessage('Password is required')
-], async (req, res) => {
-  try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ 
-        success: false, 
-        errors: errors.array() 
-      });
-    }
-
     const { email, password } = req.body;
 
-    // Find user
-    const user = await User.findOne({ email });
+    // Validation
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email and password are required'
+      });
+    }
+
+    // Find user (include password for comparison)
+    const user = await User.findOne({ email: email.toLowerCase() }).select('+password');
+    
     if (!user) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Invalid email or password' 
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid credentials'
       });
     }
 
-    // Check password
+    // Check if account is locked
+    if (user.isLocked()) {
+      return res.status(403).json({
+        success: false,
+        message: 'Account is temporarily locked due to multiple failed login attempts'
+      });
+    }
+
+    // Verify password
     const isMatch = await user.comparePassword(password);
+    
     if (!isMatch) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Invalid email or password' 
+      // Increment failed attempts
+      await user.incLoginAttempts();
+      
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid credentials'
       });
     }
 
-    // Check if email is verified
-    if (!user.verified) {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Please verify your email before logging in. Check your inbox for OTP.',
-        requiresVerification: true,
-        email: user.email
+    // Check account status
+    if (user.status !== 'ACTIVE') {
+      return res.status(403).json({
+        success: false,
+        message: `Account is ${user.status.toLowerCase()}`,
+        status: user.status
       });
+    }
+
+    // Check if suspended
+    if (user.suspensionInfo?.isSuspended) {
+      return res.status(403).json({
+        success: false,
+        message: 'Account is suspended',
+        suspensionInfo: {
+          reason: user.suspensionInfo.suspensionReason,
+          until: user.suspensionInfo.suspendedUntil,
+          restrictions: user.suspensionInfo.restrictions
+        }
+      });
+    }
+
+    // Check if banned
+    if (user.banInfo?.isBanned) {
+      return res.status(403).json({
+        success: false,
+        message: 'Account is banned',
+        banInfo: {
+          reason: user.banInfo.banReason,
+          permanent: user.banInfo.isPermanent
+        }
+      });
+    }
+
+    // Reset login attempts on successful login
+    if (user.loginAttempts > 0) {
+      await user.resetLoginAttempts();
     }
 
     // Update last active
-    user.lastActive = Date.now();
+    user.lastActive = new Date();
     await user.save();
 
-    // Generate token
-    const token = generateToken(user._id);
+    // Generate token (includes role)
+    const token = generateToken(user._id, user.role);
+
+    console.log(`✅ Login successful: ${user.email} (${user.role})`);
+
+    // Log admin logins
+    if (user.role !== 'USER') {
+      await AuditLog.logAction({
+        actorId: user._id,
+        actorRole: user.role,
+        actorEmail: user.email,
+        action: 'ADMIN_LOGIN',
+        targetType: 'SYSTEM',
+        details: {
+          loginTime: new Date()
+        },
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent')
+      });
+    }
 
     res.json({
       success: true,
       message: 'Login successful',
       token,
       user: {
-        id: user._id,
+        _id: user._id,
         firstName: user.firstName,
         lastName: user.lastName,
         email: user.email,
+        role: user.role, // ✅ CRITICAL: Return role to frontend
         profilePhoto: user.profilePhoto,
-        isPremium: user.isPremium,
+        emailVerified: user.emailVerified,
         verified: user.verified,
-        questionnaire: user.questionnaire
+        status: user.status,
+        adminPermissions: user.adminPermissions // Include for admin users
       }
     });
 
   } catch (error) {
     console.error('Login error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error during login' 
+    res.status(500).json({
+      success: false,
+      message: 'Server error during login'
     });
   }
 });
 
-// @route   POST /api/auth/verify-otp
-// @desc    Verify OTP and activate account (LEGACY - for existing users)
-// @access  Public
-router.post('/verify-otp', [
-  body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
-  body('otp').isLength({ min: 6, max: 6 }).withMessage('OTP must be 6 digits')
-], async (req, res) => {
+/**
+ * @route   POST /api/auth/send-otp-registration
+ * @desc    Send OTP for email verification during registration
+ * @access  Public
+ */
+router.post('/send-otp-registration', async (req, res) => {
   try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ 
-        success: false, 
-        errors: errors.array() 
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email is required'
       });
     }
 
-    const { email, otp } = req.body;
-
-    // Find user
-    const user = await User.findOne({ email });
-    
-    if (!user) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'User not found' 
+    // Check if email already exists
+    const existingUser = await User.findOne({ email: email.toLowerCase() });
+    if (existingUser) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email already registered'
       });
     }
 
-    // Check if already verified
-    if (user.verified) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Email is already verified' 
-      });
-    }
+    // Generate 6-digit OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
-    // Check if OTP exists
-    if (!user.emailVerificationOTP) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'No OTP found. Please request a new OTP.' 
-      });
-    }
+    // Store OTP temporarily (you might want to use Redis for this)
+    // For now, we'll use a simple approach
+    global.otpStore = global.otpStore || {};
+    global.otpStore[email.toLowerCase()] = {
+      otp,
+      expires
+    };
 
-    // Check if OTP expired
-    if (new Date() > user.emailVerificationExpires) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'OTP has expired. Please request a new one.' 
-      });
-    }
-
-    // Verify OTP
-    if (user.emailVerificationOTP !== otp) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Invalid OTP. Please check and try again.' 
-      });
-    }
-
-    // Mark as verified
-    user.verified = true;
-    user.emailVerificationOTP = undefined;
-    user.emailVerificationExpires = undefined;
-    await user.save();
-
-    // Send welcome email (optional)
-    if (process.env.BREVO_API_KEY) {
-      sendWelcomeEmail(email, user.firstName).catch(err => 
-        console.log('Welcome email failed:', err)
-      );
-    }
-
-    // Generate token
-    const token = generateToken(user._id);
+    // Send OTP email
+    await sendOTPEmail(email, otp);
 
     res.json({
       success: true,
-      message: 'Email verified successfully!',
-      token,
-      user: {
-        id: user._id,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        email: user.email,
-        profilePhoto: user.profilePhoto,
-        isPremium: user.isPremium,
-        verified: user.verified
-      }
+      message: 'OTP sent successfully',
+      emailSent: true
+    });
+
+  } catch (error) {
+    console.error('Send OTP error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to send OTP'
+    });
+  }
+});
+
+/**
+ * @route   POST /api/auth/verify-otp-registration
+ * @desc    Verify OTP during registration
+ * @access  Public
+ */
+router.post('/verify-otp-registration', async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+
+    if (!email || !otp) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email and OTP are required'
+      });
+    }
+
+    // Check OTP
+    const storedOTP = global.otpStore?.[email.toLowerCase()];
+    
+    if (!storedOTP) {
+      return res.status(400).json({
+        success: false,
+        message: 'OTP not found or expired'
+      });
+    }
+
+    if (new Date() > storedOTP.expires) {
+      delete global.otpStore[email.toLowerCase()];
+      return res.status(400).json({
+        success: false,
+        message: 'OTP expired'
+      });
+    }
+
+    if (storedOTP.otp !== otp) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid OTP'
+      });
+    }
+
+    // Clear OTP
+    delete global.otpStore[email.toLowerCase()];
+
+    res.json({
+      success: true,
+      message: 'Email verified successfully',
+      verified: true
     });
 
   } catch (error) {
     console.error('Verify OTP error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error during verification' 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to verify OTP'
     });
   }
 });
 
-// @route   POST /api/auth/resend-otp
-// @desc    Resend OTP to email
-// @access  Public
-router.post('/resend-otp', [
-  body('email').isEmail().normalizeEmail().withMessage('Valid email is required')
-], async (req, res) => {
+// =============================================
+// PROTECTED ROUTES
+// =============================================
+
+/**
+ * @route   GET /api/auth/me
+ * @desc    Get current user info (refreshes role from DB)
+ * @access  Private
+ */
+router.get('/me', authenticate, async (req, res) => {
   try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ 
-        success: false, 
-        errors: errors.array() 
-      });
-    }
-
-    const { email } = req.body;
-
-    // Find user
-    const user = await User.findOne({ email });
-    
-    if (!user) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'No account found with this email' 
-      });
-    }
-
-    // Check if already verified
-    if (user.verified) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Email is already verified' 
-      });
-    }
-
-    // Generate new OTP
-    const otp = generateOTP();
-    user.emailVerificationOTP = otp;
-    user.emailVerificationExpires = new Date(Date.now() + 10 * 60 * 1000);
-    await user.save();
-
-    // Log OTP in test mode
-    if (process.env.OTP_TEST_MODE === 'true') {
-      console.log('\n' + '='.repeat(60));
-      console.log('📧 OTP RESEND');
-      console.log('='.repeat(60));
-      console.log(`📮 Email: ${email}`);
-      console.log(`👤 User: ${user.firstName} ${user.lastName}`);
-      console.log(`🔐 NEW OTP: ${otp}`);
-      console.log(`⏰ Expires: ${user.emailVerificationExpires.toLocaleString()}`);
-      console.log('='.repeat(60) + '\n');
-    }
-    
+    // User is already attached by authenticate middleware
+    // and includes fresh data from database
     res.json({
       success: true,
-      message: 'New OTP sent to your email',
-      email: email,
-      expiresIn: '10 minutes'
+      user: req.user
     });
-
   } catch (error) {
-    console.error('Resend OTP error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error while resending OTP' 
+    console.error('Get me error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch user data'
     });
   }
 });
 
-// @route   GET /api/auth/me
-// @desc    Get current user
-// @access  Private
-router.get('/me', auth, async (req, res) => {
-  try {
-    const user = await User.findById(req.userId).select('-password');
-    
-    if (!user) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'User not found' 
-      });
-    }
+// =============================================
+// ADMIN CREATION (SUPER_ADMIN ONLY)
+// =============================================
 
-    res.json({
-      success: true,
-      user
-    });
-
-  } catch (error) {
-    console.error('Get user error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error' 
-    });
-  }
-});
-
-// @route   POST /api/auth/google
-// @desc    Google OAuth login/register
-// @access  Public
-router.post('/google', async (req, res) => {
-  try {
-    const { googleId, email, firstName, lastName, profilePhoto } = req.body;
-
-    let user = await User.findOne({ $or: [{ googleId }, { email }] });
-
-    if (user) {
-      if (!user.googleId) {
-        user.googleId = googleId;
-        await user.save();
-      }
-    } else {
-      user = new User({
-        googleId,
-        email,
+/**
+ * @route   POST /api/auth/create-admin
+ * @desc    Create new admin account (SUPER_ADMIN only)
+ * @access  Private (SUPER_ADMIN)
+ */
+router.post(
+  '/create-admin',
+  authenticate,
+  superAdminOnly,
+  auditLog('CREATE_ADMIN', 'ADMIN'),
+  async (req, res) => {
+    try {
+      const {
         firstName,
         lastName,
-        profilePhoto,
-        verified: true
-      });
-      await user.save();
-    }
-
-    user.lastActive = Date.now();
-    await user.save();
-
-    const token = generateToken(user._id);
-
-    res.json({
-      success: true,
-      message: 'Google authentication successful',
-      token,
-      user: {
-        id: user._id,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        email: user.email,
-        profilePhoto: user.profilePhoto,
-        isPremium: user.isPremium,
-        verified: user.verified
-      }
-    });
-
-  } catch (error) {
-    console.error('Google auth error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Google authentication failed' 
-    });
-  }
-});
-
-// @route   POST /api/auth/facebook
-// @desc    Facebook OAuth login/register
-// @access  Public
-router.post('/facebook', async (req, res) => {
-  try {
-    const { facebookId, email, firstName, lastName, profilePhoto } = req.body;
-
-    let user = await User.findOne({ $or: [{ facebookId }, { email }] });
-
-    if (user) {
-      if (!user.facebookId) {
-        user.facebookId = facebookId;
-        await user.save();
-      }
-    } else {
-      user = new User({
-        facebookId,
         email,
+        password,
+        role,
+        permissions
+      } = req.body;
+
+      // Validation
+      if (!firstName || !lastName || !email || !password || !role) {
+        return res.status(400).json({
+          success: false,
+          message: 'All fields are required'
+        });
+      }
+
+      // Validate role
+      if (!['SAFETY_ADMIN', 'SUPER_ADMIN'].includes(role)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid admin role'
+        });
+      }
+
+      // Check if email exists
+      const existingUser = await User.findOne({ email: email.toLowerCase() });
+      if (existingUser) {
+        return res.status(400).json({
+          success: false,
+          message: 'User already exists with this email'
+        });
+      }
+
+      // Create admin user
+      const admin = new User({
         firstName,
         lastName,
-        profilePhoto,
-        verified: true
+        email: email.toLowerCase(),
+        password,
+        role,
+        status: 'ACTIVE',
+        emailVerified: true,
+        verified: true,
+        adminPermissions: permissions,
+        createdBy: req.user._id
       });
-      await user.save();
+
+      await admin.save();
+
+      console.log(`✅ Admin created: ${admin.email} (${admin.role}) by ${req.user.email}`);
+
+      res.status(201).json({
+        success: true,
+        message: 'Admin account created successfully',
+        user: {
+          _id: admin._id,
+          firstName: admin.firstName,
+          lastName: admin.lastName,
+          email: admin.email,
+          role: admin.role,
+          adminPermissions: admin.adminPermissions,
+          status: admin.status
+        }
+      });
+
+    } catch (error) {
+      console.error('Create admin error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to create admin account'
+      });
     }
-
-    user.lastActive = Date.now();
-    await user.save();
-
-    const token = generateToken(user._id);
-
-    res.json({
-      success: true,
-      message: 'Facebook authentication successful',
-      token,
-      user: {
-        id: user._id,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        email: user.email,
-        profilePhoto: user.profilePhoto,
-        isPremium: user.isPremium,
-        verified: user.verified
-      }
-    });
-
-  } catch (error) {
-    console.error('Facebook auth error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Facebook authentication failed' 
-    });
   }
-});
+);
+
+/**
+ * @route   PUT /api/auth/update-admin-role
+ * @desc    Update admin role or permissions (SUPER_ADMIN only)
+ * @access  Private (SUPER_ADMIN)
+ */
+router.put(
+  '/update-admin-role',
+  authenticate,
+  superAdminOnly,
+  auditLog('UPDATE_ADMIN_ROLE', 'ADMIN'),
+  async (req, res) => {
+    try {
+      const { adminId, role, permissions } = req.body;
+
+      if (!adminId) {
+        return res.status(400).json({
+          success: false,
+          message: 'Admin ID is required'
+        });
+      }
+
+      const admin = await User.findById(adminId);
+      
+      if (!admin) {
+        return res.status(404).json({
+          success: false,
+          message: 'Admin not found'
+        });
+      }
+
+      // Prevent changing own role
+      if (admin._id.toString() === req.user._id.toString()) {
+        return res.status(403).json({
+          success: false,
+          message: 'Cannot modify your own role'
+        });
+      }
+
+      // Update role if provided
+      if (role && ['USER', 'SAFETY_ADMIN', 'SUPER_ADMIN'].includes(role)) {
+        admin.role = role;
+      }
+
+      // Update permissions if provided
+      if (permissions) {
+        admin.adminPermissions = permissions;
+      }
+
+      await admin.save();
+
+      console.log(`✅ Admin updated: ${admin.email} - new role: ${admin.role}`);
+
+      res.json({
+        success: true,
+        message: 'Admin role updated successfully',
+        user: {
+          _id: admin._id,
+          email: admin.email,
+          role: admin.role,
+          adminPermissions: admin.adminPermissions
+        }
+      });
+
+    } catch (error) {
+      console.error('Update admin role error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to update admin role'
+      });
+    }
+  }
+);
 
 module.exports = router;
-
-
-
