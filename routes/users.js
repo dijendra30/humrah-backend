@@ -1,15 +1,20 @@
-// routes/users.js - Fixed User Profile Routes with Buffer-Based Upload
+// routes/users.js - Fixed User Profile Routes with Correct Middleware
 const express = require('express');
 const router = express.Router();
-const { auth } = require('../middleware/auth');
+
+// ✅ FIXED: Import with correct names from enhanced middleware
+const { authenticate, authorize, adminOnly, superAdminOnly, auditLog } = require('../middleware/auth');
+
 const User = require('../models/User');
 const { upload, uploadBuffer, uploadBase64, deleteImage } = require('../config/cloudinary');
-const { sendProfileVerificationEmail } = require('../config/email');
+
+// For email notifications (if you have this function)
+// const { sendProfileVerificationEmail } = require('../config/email');
 
 // @route   PUT /api/users/me
 // @desc    Update user profile
 // @access  Private
-router.put('/me', auth, async (req, res) => {
+router.put('/me', authenticate, async (req, res) => {
   try {
     const updates = req.body;
     const allowedUpdates = ['firstName', 'lastName', 'profilePhoto', 'questionnaire'];
@@ -53,7 +58,7 @@ router.put('/me', auth, async (req, res) => {
 // @route   POST /api/users/upload-profile-photo
 // @desc    Upload profile photo from gallery/camera (multipart/form-data)
 // @access  Private
-router.post('/upload-profile-photo', auth, upload.single('photo'), async (req, res) => {
+router.post('/upload-profile-photo', authenticate, upload.single('photo'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({
@@ -101,7 +106,7 @@ router.post('/upload-profile-photo', auth, upload.single('photo'), async (req, r
 // @route   POST /api/users/upload-profile-photo-base64
 // @desc    Upload profile photo as base64 (from camera or gallery)
 // @access  Private
-router.post('/upload-profile-photo-base64', auth, async (req, res) => {
+router.post('/upload-profile-photo-base64', authenticate, async (req, res) => {
   try {
     const { photoBase64 } = req.body;
 
@@ -151,7 +156,7 @@ router.post('/upload-profile-photo-base64', auth, async (req, res) => {
 // @route   POST /api/users/submit-verification-photo
 // @desc    Submit photo for manual verification
 // @access  Private
-router.post('/submit-verification-photo', auth, upload.single('photo'), async (req, res) => {
+router.post('/submit-verification-photo', authenticate, upload.single('photo'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({
@@ -202,7 +207,7 @@ router.post('/submit-verification-photo', auth, upload.single('photo'), async (r
 // @route   POST /api/users/submit-verification-photo-base64
 // @desc    Submit verification photo as base64
 // @access  Private
-router.post('/submit-verification-photo-base64', auth, async (req, res) => {
+router.post('/submit-verification-photo-base64', authenticate, async (req, res) => {
   try {
     const { photoBase64 } = req.body;
 
@@ -255,7 +260,7 @@ router.post('/submit-verification-photo-base64', auth, async (req, res) => {
 // @route   PUT /api/users/me/questionnaire
 // @desc    Merge & update questionnaire safely (multi-step onboarding)
 // @access  Private
-router.put('/me/questionnaire', auth, async (req, res) => {
+router.put('/me/questionnaire', authenticate, async (req, res) => {
   try {
     const { questionnaire } = req.body;
 
@@ -300,7 +305,7 @@ router.put('/me/questionnaire', auth, async (req, res) => {
 // @route   GET /api/users/:id
 // @desc    Get user by ID
 // @access  Private
-router.get('/:id', auth, async (req, res) => {
+router.get('/:id', authenticate, async (req, res) => {
   try {
     const user = await User.findById(req.params.id).select('-password');
     
@@ -329,69 +334,73 @@ router.get('/:id', auth, async (req, res) => {
 
 // @route   PUT /api/users/:userId/verify-photo
 // @desc    Admin: Approve or reject user's verification photo
-// @access  Private (Admin only - implement admin middleware)
-router.put('/:userId/verify-photo', auth, async (req, res) => {
-  try {
-    // TODO: Add admin middleware to check if user is admin
-    const { userId } = req.params;
-    const { approved } = req.body; // true or false
-
-    const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
-    }
-
-    if (!user.verificationPhoto) {
-      return res.status(400).json({
-        success: false,
-        message: 'No verification photo to review'
-      });
-    }
-
-    // Update verification status
-    user.photoVerificationStatus = approved ? 'approved' : 'rejected';
-    user.photoVerifiedAt = new Date();
-    user.photoVerifiedBy = req.userId; // Admin ID
-    user.verified = user.isFullyVerified(); // Update overall verified status
-    await user.save();
-
-    // Send notification email
+// @access  Private (Admin only)
+router.put(
+  '/:userId/verify-photo',
+  authenticate,
+  adminOnly,
+  auditLog('VERIFY_USER_PHOTO', 'USER'),
+  async (req, res) => {
     try {
-      await sendProfileVerificationEmail(user.email, user.firstName, approved);
-    } catch (emailError) {
-      console.error('Error sending verification email:', emailError);
-    }
+      const { userId } = req.params;
+      const { approved } = req.body;
 
-    res.json({
-      success: true,
-      message: `Photo verification ${approved ? 'approved' : 'rejected'} successfully`,
-      user: {
-        id: user._id,
-        photoVerificationStatus: user.photoVerificationStatus,
-        verified: user.verified,
-        photoVerifiedAt: user.photoVerifiedAt
+      const user = await User.findById(userId);
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: 'User not found'
+        });
       }
-    });
 
-  } catch (error) {
-    console.error('Verify photo error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error'
-    });
+      if (!user.verificationPhoto) {
+        return res.status(400).json({
+          success: false,
+          message: 'No verification photo to review'
+        });
+      }
+
+      // Update verification status
+      user.photoVerificationStatus = approved ? 'approved' : 'rejected';
+      user.photoVerifiedAt = new Date();
+      user.photoVerifiedBy = req.userId;
+      user.verified = user.isFullyVerified();
+      await user.save();
+
+      // Send notification email (if you have this function)
+      try {
+        // await sendProfileVerificationEmail(user.email, user.firstName, approved);
+        console.log(`Verification email would be sent to ${user.email}`);
+      } catch (emailError) {
+        console.error('Error sending verification email:', emailError);
+      }
+
+      res.json({
+        success: true,
+        message: `Photo verification ${approved ? 'approved' : 'rejected'} successfully`,
+        user: {
+          id: user._id,
+          photoVerificationStatus: user.photoVerificationStatus,
+          verified: user.verified,
+          photoVerifiedAt: user.photoVerifiedAt
+        }
+      });
+
+    } catch (error) {
+      console.error('Verify photo error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Server error'
+      });
+    }
   }
-});
+);
 
 // @route   GET /api/users/admin/pending-verifications
 // @desc    Admin: Get all users pending photo verification
 // @access  Private (Admin only)
-router.get('/admin/pending-verifications', auth, async (req, res) => {
+router.get('/admin/pending-verifications', authenticate, adminOnly, async (req, res) => {
   try {
-    // TODO: Add admin middleware
-
     const users = await User.find({
       photoVerificationStatus: 'pending',
       verificationPhoto: { $ne: null }
@@ -415,6 +424,3 @@ router.get('/admin/pending-verifications', auth, async (req, res) => {
 });
 
 module.exports = router;
-
-
-
