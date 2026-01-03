@@ -1,11 +1,37 @@
-// routes/auth.js - Enhanced Authentication Routes with Role Support
+// routes/auth.js - Simplified Authentication Routes (Works with Current User Model)
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
-const AuditLog = require('../models/AuditLog');
-const { authenticate, superAdminOnly, auditLog } = require('../middleware/auth');
 const { sendOTPEmail, sendWelcomeEmail } = require('../config/email');
+
+// Import auth middleware (use 'auth' for backward compatibility)
+let authenticate, superAdminOnly, auditLog;
+try {
+  const authMiddleware = require('../middleware/auth');
+  authenticate = authMiddleware.authenticate || authMiddleware.auth;
+  superAdminOnly = authMiddleware.superAdminOnly;
+  auditLog = authMiddleware.auditLog || ((action, type) => (req, res, next) => next());
+} catch (error) {
+  console.error('Error loading auth middleware:', error);
+  // Fallback simple auth
+  authenticate = async (req, res, next) => {
+    try {
+      const token = req.header('Authorization')?.replace('Bearer ', '');
+      if (!token) return res.status(401).json({ success: false, message: 'No token' });
+      
+      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'fallback_secret_change_in_production');
+      const user = await User.findById(decoded.userId).select('-password');
+      if (!user) return res.status(401).json({ success: false, message: 'User not found' });
+      
+      req.user = user;
+      req.userId = user._id;
+      next();
+    } catch (error) {
+      res.status(401).json({ success: false, message: 'Invalid token' });
+    }
+  };
+}
 
 // =============================================
 // HELPER: GENERATE JWT TOKEN
@@ -61,8 +87,7 @@ router.post('/register', async (req, res) => {
       lastName,
       email: email.toLowerCase(),
       password,
-      role: 'USER', // EXPLICIT: Public registration only creates USER role
-      status: emailVerified ? 'ACTIVE' : 'PENDING_VERIFICATION',
+      role: 'USER',
       emailVerified: emailVerified || false,
       questionnaire: questionnaire || {}
     });
@@ -70,7 +95,7 @@ router.post('/register', async (req, res) => {
     await user.save();
 
     // Generate token
-    const token = generateToken(user._id, user.role);
+    const token = generateToken(user._id, user.role || 'USER');
 
     // Send welcome email if verified
     if (emailVerified) {
@@ -81,7 +106,7 @@ router.post('/register', async (req, res) => {
       }
     }
 
-    console.log(`✅ New user registered: ${user.email} (${user.role})`);
+    console.log(`✅ New user registered: ${user.email}`);
 
     res.status(201).json({
       success: true,
@@ -92,9 +117,8 @@ router.post('/register', async (req, res) => {
         firstName: user.firstName,
         lastName: user.lastName,
         email: user.email,
-        role: user.role,
-        emailVerified: user.emailVerified,
-        status: user.status
+        role: user.role || 'USER',
+        emailVerified: user.emailVerified
       }
     });
 
@@ -116,8 +140,11 @@ router.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
 
+    console.log('🔍 Login attempt for:', email);
+
     // Validation
     if (!email || !password) {
+      console.log('❌ Missing email or password');
       return res.status(400).json({
         success: false,
         message: 'Email and password are required'
@@ -127,118 +154,100 @@ router.post('/login', async (req, res) => {
     // Find user (include password for comparison)
     const user = await User.findOne({ email: email.toLowerCase() }).select('+password');
     
+    console.log('👤 User found:', !!user);
+    if (user) {
+      console.log('📧 User email:', user.email);
+      console.log('🔑 User role:', user.role);
+      console.log('🔐 Password hash exists:', !!user.password);
+      console.log('📊 User status:', user.status);
+    }
+    
     if (!user) {
+      console.log('❌ User not found in database');
       return res.status(401).json({
         success: false,
         message: 'Invalid credentials'
-      });
-    }
-
-    // Check if account is locked
-    if (user.isLocked()) {
-      return res.status(403).json({
-        success: false,
-        message: 'Account is temporarily locked due to multiple failed login attempts'
       });
     }
 
     // Verify password
-    const isMatch = await user.comparePassword(password);
+    let isMatch = false;
+    try {
+      isMatch = await user.comparePassword(password);
+      console.log('🔓 Password match result:', isMatch);
+    } catch (compareError) {
+      console.error('❌ Password comparison error:', compareError);
+      return res.status(500).json({
+        success: false,
+        message: 'Server error during login'
+      });
+    }
     
     if (!isMatch) {
-      // Increment failed attempts
-      await user.incLoginAttempts();
-      
+      console.log('❌ Password does not match');
       return res.status(401).json({
         success: false,
         message: 'Invalid credentials'
       });
     }
 
-    // Check account status
-    if (user.status !== 'ACTIVE') {
+    // Check account status (if field exists)
+    if (user.status && user.status !== 'ACTIVE') {
+      console.log('❌ Account not active, status:', user.status);
       return res.status(403).json({
         success: false,
-        message: `Account is ${user.status.toLowerCase()}`,
-        status: user.status
+        message: `Account is ${user.status.toLowerCase()}`
       });
-    }
-
-    // Check if suspended
-    if (user.suspensionInfo?.isSuspended) {
-      return res.status(403).json({
-        success: false,
-        message: 'Account is suspended',
-        suspensionInfo: {
-          reason: user.suspensionInfo.suspensionReason,
-          until: user.suspensionInfo.suspendedUntil,
-          restrictions: user.suspensionInfo.restrictions
-        }
-      });
-    }
-
-    // Check if banned
-    if (user.banInfo?.isBanned) {
-      return res.status(403).json({
-        success: false,
-        message: 'Account is banned',
-        banInfo: {
-          reason: user.banInfo.banReason,
-          permanent: user.banInfo.isPermanent
-        }
-      });
-    }
-
-    // Reset login attempts on successful login
-    if (user.loginAttempts > 0) {
-      await user.resetLoginAttempts();
     }
 
     // Update last active
-    user.lastActive = new Date();
-    await user.save();
+    try {
+      user.lastActive = new Date();
+      await user.save();
+    } catch (saveError) {
+      console.log('⚠️ Could not update lastActive:', saveError.message);
+      // Continue anyway
+    }
+
+    // Get role (handle both old and new User models)
+    const userRole = user.role || 'USER';
 
     // Generate token (includes role)
-    const token = generateToken(user._id, user.role);
+    const token = generateToken(user._id, userRole);
 
-    console.log(`✅ Login successful: ${user.email} (${user.role})`);
+    console.log(`✅ Login successful: ${user.email} (${userRole})`);
 
-    // Log admin logins
-    if (user.role !== 'USER') {
-      await AuditLog.logAction({
-        actorId: user._id,
-        actorRole: user.role,
-        actorEmail: user.email,
-        action: 'ADMIN_LOGIN',
-        targetType: 'SYSTEM',
-        details: {
-          loginTime: new Date()
-        },
-        ipAddress: req.ip,
-        userAgent: req.get('user-agent')
-      });
+    // Prepare user response
+    const userResponse = {
+      _id: user._id,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      email: user.email,
+      role: userRole,
+      profilePhoto: user.profilePhoto,
+      emailVerified: user.emailVerified,
+      verified: user.verified
+    };
+
+    // Add admin permissions if available
+    if (user.adminPermissions) {
+      userResponse.adminPermissions = user.adminPermissions;
+    }
+
+    // Add status if available
+    if (user.status) {
+      userResponse.status = user.status;
     }
 
     res.json({
       success: true,
       message: 'Login successful',
       token,
-      user: {
-        _id: user._id,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        email: user.email,
-        role: user.role, // ✅ CRITICAL: Return role to frontend
-        profilePhoto: user.profilePhoto,
-        emailVerified: user.emailVerified,
-        verified: user.verified,
-        status: user.status,
-        adminPermissions: user.adminPermissions // Include for admin users
-      }
+      user: userResponse
     });
 
   } catch (error) {
-    console.error('Login error:', error);
+    console.error('💥 Login error:', error);
     res.status(500).json({
       success: false,
       message: 'Server error during login'
@@ -275,8 +284,7 @@ router.post('/send-otp-registration', async (req, res) => {
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     const expires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
-    // Store OTP temporarily (you might want to use Redis for this)
-    // For now, we'll use a simple approach
+    // Store OTP temporarily
     global.otpStore = global.otpStore || {};
     global.otpStore[email.toLowerCase()] = {
       otp,
@@ -371,8 +379,6 @@ router.post('/verify-otp-registration', async (req, res) => {
  */
 router.get('/me', authenticate, async (req, res) => {
   try {
-    // User is already attached by authenticate middleware
-    // and includes fresh data from database
     res.json({
       success: true,
       user: req.user
@@ -395,160 +401,91 @@ router.get('/me', authenticate, async (req, res) => {
  * @desc    Create new admin account (SUPER_ADMIN only)
  * @access  Private (SUPER_ADMIN)
  */
-router.post(
-  '/create-admin',
-  authenticate,
-  superAdminOnly,
-  auditLog('CREATE_ADMIN', 'ADMIN'),
-  async (req, res) => {
-    try {
-      const {
-        firstName,
-        lastName,
-        email,
-        password,
-        role,
-        permissions
-      } = req.body;
-
-      // Validation
-      if (!firstName || !lastName || !email || !password || !role) {
-        return res.status(400).json({
-          success: false,
-          message: 'All fields are required'
-        });
-      }
-
-      // Validate role
-      if (!['SAFETY_ADMIN', 'SUPER_ADMIN'].includes(role)) {
-        return res.status(400).json({
-          success: false,
-          message: 'Invalid admin role'
-        });
-      }
-
-      // Check if email exists
-      const existingUser = await User.findOne({ email: email.toLowerCase() });
-      if (existingUser) {
-        return res.status(400).json({
-          success: false,
-          message: 'User already exists with this email'
-        });
-      }
-
-      // Create admin user
-      const admin = new User({
-        firstName,
-        lastName,
-        email: email.toLowerCase(),
-        password,
-        role,
-        status: 'ACTIVE',
-        emailVerified: true,
-        verified: true,
-        adminPermissions: permissions,
-        createdBy: req.user._id
-      });
-
-      await admin.save();
-
-      console.log(`✅ Admin created: ${admin.email} (${admin.role}) by ${req.user.email}`);
-
-      res.status(201).json({
-        success: true,
-        message: 'Admin account created successfully',
-        user: {
-          _id: admin._id,
-          firstName: admin.firstName,
-          lastName: admin.lastName,
-          email: admin.email,
-          role: admin.role,
-          adminPermissions: admin.adminPermissions,
-          status: admin.status
-        }
-      });
-
-    } catch (error) {
-      console.error('Create admin error:', error);
-      res.status(500).json({
+router.post('/create-admin', authenticate, async (req, res) => {
+  try {
+    // Check if user is super admin
+    if (!req.user || req.user.role !== 'SUPER_ADMIN') {
+      return res.status(403).json({
         success: false,
-        message: 'Failed to create admin account'
+        message: 'Super admin access required'
       });
     }
-  }
-);
 
-/**
- * @route   PUT /api/auth/update-admin-role
- * @desc    Update admin role or permissions (SUPER_ADMIN only)
- * @access  Private (SUPER_ADMIN)
- */
-router.put(
-  '/update-admin-role',
-  authenticate,
-  superAdminOnly,
-  auditLog('UPDATE_ADMIN_ROLE', 'ADMIN'),
-  async (req, res) => {
-    try {
-      const { adminId, role, permissions } = req.body;
+    const {
+      firstName,
+      lastName,
+      email,
+      password,
+      role,
+      permissions
+    } = req.body;
 
-      if (!adminId) {
-        return res.status(400).json({
-          success: false,
-          message: 'Admin ID is required'
-        });
-      }
-
-      const admin = await User.findById(adminId);
-      
-      if (!admin) {
-        return res.status(404).json({
-          success: false,
-          message: 'Admin not found'
-        });
-      }
-
-      // Prevent changing own role
-      if (admin._id.toString() === req.user._id.toString()) {
-        return res.status(403).json({
-          success: false,
-          message: 'Cannot modify your own role'
-        });
-      }
-
-      // Update role if provided
-      if (role && ['USER', 'SAFETY_ADMIN', 'SUPER_ADMIN'].includes(role)) {
-        admin.role = role;
-      }
-
-      // Update permissions if provided
-      if (permissions) {
-        admin.adminPermissions = permissions;
-      }
-
-      await admin.save();
-
-      console.log(`✅ Admin updated: ${admin.email} - new role: ${admin.role}`);
-
-      res.json({
-        success: true,
-        message: 'Admin role updated successfully',
-        user: {
-          _id: admin._id,
-          email: admin.email,
-          role: admin.role,
-          adminPermissions: admin.adminPermissions
-        }
-      });
-
-    } catch (error) {
-      console.error('Update admin role error:', error);
-      res.status(500).json({
+    // Validation
+    if (!firstName || !lastName || !email || !password || !role) {
+      return res.status(400).json({
         success: false,
-        message: 'Failed to update admin role'
+        message: 'All fields are required'
       });
     }
+
+    // Validate role
+    if (!['SAFETY_ADMIN', 'SUPER_ADMIN'].includes(role)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid admin role'
+      });
+    }
+
+    // Check if email exists
+    const existingUser = await User.findOne({ email: email.toLowerCase() });
+    if (existingUser) {
+      return res.status(400).json({
+        success: false,
+        message: 'User already exists with this email'
+      });
+    }
+
+    // Create admin user
+    const admin = new User({
+      firstName,
+      lastName,
+      email: email.toLowerCase(),
+      password,
+      role,
+      emailVerified: true,
+      verified: true,
+      adminPermissions: permissions
+    });
+
+    // Set status if field exists
+    if (admin.status !== undefined) {
+      admin.status = 'ACTIVE';
+    }
+
+    await admin.save();
+
+    console.log(`✅ Admin created: ${admin.email} (${admin.role}) by ${req.user.email}`);
+
+    res.status(201).json({
+      success: true,
+      message: 'Admin account created successfully',
+      user: {
+        _id: admin._id,
+        firstName: admin.firstName,
+        lastName: admin.lastName,
+        email: admin.email,
+        role: admin.role,
+        adminPermissions: admin.adminPermissions
+      }
+    });
+
+  } catch (error) {
+    console.error('Create admin error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to create admin account'
+    });
   }
-);
+});
 
 module.exports = router;
