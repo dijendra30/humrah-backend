@@ -44,6 +44,36 @@ const generateToken = (userId, role) => {
   );
 };
 
+// ⚠️ TEMPORARY - Remove after use!
+router.post('/create-super-admin-emergency', async (req, res) => {
+  try {
+    // Delete existing
+    await User.deleteOne({ email: "dijendra@humrah.in" });
+    
+    // Create fresh (password will be auto-hashed)
+    const admin = new User({
+      firstName: "Dijendra",
+      lastName: "Mondal",
+      email: "dijendra@humrah.in",
+      password: "SuperAdmin2024!",  // Plain text - will be hashed
+      role: "SUPER_ADMIN",
+      status: "ACTIVE",
+      emailVerified: true,
+      verified: true
+    });
+    
+    await admin.save();
+    
+    res.json({
+      success: true,
+      message: "Super admin created with password: SuperAdmin2024!",
+      email: admin.email
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // =============================================
 // PUBLIC ROUTES
 // =============================================
@@ -489,3 +519,4 @@ router.post('/create-admin', authenticate, async (req, res) => {
 });
 
 module.exports = router;
+
