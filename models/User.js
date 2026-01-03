@@ -243,7 +243,6 @@ const userSchema = new mongoose.Schema({
 // =============================================
 // INDEXES FOR PERFORMANCE
 // =============================================
-userSchema.index({ email: 1 });
 userSchema.index({ role: 1, status: 1 });
 userSchema.index({ 'suspensionInfo.isSuspended': 1 });
 userSchema.index({ 'banInfo.isBanned': 1 });
@@ -474,3 +473,4 @@ userSchema.methods.toJSON = function () {
 };
 
 module.exports = mongoose.model('User', userSchema);
+
