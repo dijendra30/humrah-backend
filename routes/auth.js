@@ -488,7 +488,68 @@ router.post('/create-admin', authenticate, async (req, res) => {
     });
   }
 });
+// Add this TEMPORARILY to your routes/auth.js file
+// Put it at the bottom, before module.exports
+
+/**
+ * ⚠️ EMERGENCY ENDPOINT - DELETE AFTER USE!
+ * @route   POST /api/auth/emergency-super-admin
+ * @desc    Create super admin with proper password hashing
+ * @access  Public (REMOVE AFTER USE!)
+ */
+router.post('/emergency-super-admin', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    
+    console.log('🚨 Emergency super admin creation');
+    console.log('Email:', email);
+    console.log('Password length:', password?.length);
+    
+    // Delete existing user if exists
+    const deleted = await User.deleteOne({ email: email || "dijendra@humrah.in" });
+    console.log('Deleted existing user:', deleted.deletedCount > 0);
+    
+    // Create new super admin (password will be auto-hashed by pre-save hook)
+    const admin = new User({
+      firstName: "Dijendra",
+      lastName: "Mondal",
+      email: email || "dijendra@humrah.in",
+      password: password || "Admin123!",  // Will be auto-hashed
+      role: "SUPER_ADMIN",
+      status: "ACTIVE",
+      emailVerified: true,
+      verified: true
+    });
+    
+    await admin.save();
+    
+    console.log('✅ Super admin created');
+    console.log('Password was hashed:', admin.password.startsWith('$2'));
+    
+    res.json({
+      success: true,
+      message: "Super admin created successfully",
+      email: admin.email,
+      role: admin.role,
+      passwordHashed: admin.password.startsWith('$2'),
+      loginWith: {
+        email: admin.email,
+        password: password || "Admin123!"
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+// ⚠️ REMEMBER TO DELETE THIS ENDPOINT AFTER USE!
 
 module.exports = router;
+
 
 
