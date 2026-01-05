@@ -46,7 +46,9 @@ app.use('/api/bookings', bookingRoutes);
 app.use('/api/messages', messageRoutes);
 app.use('/api/posts', postRoutes);
 app.use('/api/spotlight', spotlightRoutes);
-app.use('/api/safety', safetyReportRoutes);// ✅ ADD THIS
+app.use('/api/safety', safetyReportRoutes);
+// After other routes
+app.use('/api/admin', require('./routes/admin'));// ✅ ADD THIS
 
 // Health Check
 app.get('/api/health', (req, res) => {
