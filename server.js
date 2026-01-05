@@ -48,7 +48,9 @@ app.use('/api/posts', postRoutes);
 app.use('/api/spotlight', spotlightRoutes);
 app.use('/api/safety', safetyReportRoutes);
 // After other routes
-app.use('/api/admin', require('./routes/admin'));// ✅ ADD THIS
+app.use('/api/admin', require('./routes/admin'));
+app.use('/api/random-booking', require('./routes/randomBooking'));
+require('./cronJobs');// ✅ ADD THIS
 
 // Health Check
 app.get('/api/health', (req, res) => {
