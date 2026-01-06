@@ -2,6 +2,7 @@
 const express = require('express');
 const router = express.Router();
 const { auth } = require('../middleware/auth');
+const spotlightController = require('../controllers/spotlight.controller');
 const User = require('../models/User');
 
 // GET /api/spotlight - Get spotlight companions
