@@ -21,12 +21,13 @@ router.post('/create', auth, async (req, res) => {
     const {
       destination,
       city,
-      date,
-      timeRange,
+      date, // "yyyy-MM-dd" format from frontend
+      startTime, // "HH:MM" format
+      endTime, // "HH:MM" format
       preferredGender,
-      ageRange,
+      minAge,
+      maxAge,
       activityType,
-      languagePreference,
       note
     } = req.body;
 
@@ -39,20 +40,35 @@ router.post('/create', auth, async (req, res) => {
       });
     }
 
-    // Check weekly limit
-    const usage = await WeeklyUsage.canUserCreateBooking(req.userId);
-    if (!usage.allowed) {
+    // ✅ FIX 2: Calculate expiresAt (24 hours from now)
+    const expiresAt = new Date();
+    expiresAt.setHours(expiresAt.getHours() + 24);
+
+    // Check weekly usage
+    const weekStart = getWeekStart();
+    const weekEnd = getWeekEnd();
+    
+    const usage = await WeeklyUsage.findOne({
+      userId: req.userId,
+      weekStart,
+      weekEnd
+    });
+
+    if (usage && usage.bookingsCreated >= 1) {
       return res.status(403).json({
         success: false,
-        message: 'You have reached your weekly limit (1 random booking per week)',
-        remaining: 0,
-        resetAt: usage.resetAt
+        message: 'Weekly limit reached. You can create 1 random booking per week.'
       });
     }
 
-    // Validate date is not in past
+    // ✅ FIX 1: Parse date correctly
     const bookingDate = new Date(date);
-    if (bookingDate < new Date()) {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0); // Reset time to start of day
+    bookingDate.setHours(0, 0, 0, 0);
+
+    // Validate date is not in the past
+    if (bookingDate < today) {
       return res.status(400).json({
         success: false,
         message: 'Booking date cannot be in the past'
@@ -60,40 +76,48 @@ router.post('/create', auth, async (req, res) => {
     }
 
     // Create booking
-    const booking = await RandomBooking.create({
+    const booking = new RandomBooking({
       initiatorId: req.userId,
       destination,
-      city,
-      date: bookingDate,
-      timeRange,
+      city: city.toLowerCase().trim(),
+      date: bookingDate, // ✅ Use parsed date
+      timeRange: { start: startTime, end: endTime },
       preferredGender,
-      ageRange,
+      ageRange: { min: minAge, max: maxAge },
       activityType,
-      languagePreference,
-      note
+      note: note || null,
+      expiresAt, // ✅ Set expiresAt
+      status: 'PENDING'
     });
 
-    // Record usage
-    await WeeklyUsage.recordBooking(req.userId);
+    await booking.save();
 
-    // Find eligible users for broadcasting
-    const initiator = await User.findById(req.userId);
-    const eligibleUsers = await RandomBooking.findEligibleForUser(initiator);
+    // Update or create weekly usage
+    if (usage) {
+      usage.bookingsCreated += 1;
+      await usage.save();
+    } else {
+      await WeeklyUsage.create({
+        userId: req.userId,
+        weekStart,
+        weekEnd,
+        bookingsCreated: 1
+      });
+    }
 
-    console.log(`🎲 Random Booking Created: ${booking._id} by ${initiator.email}`);
+    // Populate initiator details
+    await booking.populate('initiatorId', 'firstName lastName profilePhoto bio');
 
     res.status(201).json({
       success: true,
       message: 'Random booking created successfully',
-      booking,
-      eligibleUsersCount: eligibleUsers.length
+      booking
     });
-
   } catch (error) {
     console.error('Create random booking error:', error);
     res.status(500).json({
       success: false,
-      message: error.message || 'Failed to create booking'
+      message: error.message || 'Failed to create random booking'
     });
   }
 });
