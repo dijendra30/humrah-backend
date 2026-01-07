@@ -27,27 +27,29 @@ exports.getSpotlightCompanions = async (req, res) => {
       const sharedHangouts = userHangouts.filter(h =>
         otherHangouts.includes(h)
       );
+return {
+  id: u._id.toString(),
+  name: `${u.firstName} ${u.lastName}`.trim(),
+  profilePhoto: u.profilePhoto || null,
 
-      return {
-        id: u._id.toString(),
-        name: `${u.firstName} ${u.lastName}`.trim(),
-        profilePhoto: u.profilePhoto || null,
-        sharedHangouts,
-        overlapCount: sharedHangouts.length,
+  sharedHangouts,
+  overlapCount: sharedHangouts.length,
 
-        bio: u.questionnaire?.bio || null,
-        availability: u.questionnaire?.availability || null,
-        availableTimes: u.questionnaire?.availableTimes || [],
-        city: u.questionnaire?.city || null,
-        state: u.questionnaire?.state || null,
-        languagePreference: u.questionnaire?.languagePreference || null,
-        comfortZones: u.questionnaire?.comfortZones || [],
-        vibeWords: u.questionnaire?.vibeWords || [],
-        becomeCompanion: u.questionnaire?.becomeCompanion || null,
-        price: u.questionnaire?.price || null,
-        tagline: u.questionnaire?.tagline || null,
-        photoVerificationStatus: u.photoVerificationStatus || 'pending'
-      };
+  bio: u.questionnaire?.bio || null,
+  availability: u.questionnaire?.availability || null,
+  availableTimes: u.questionnaire?.availableTimes || [],
+  city: u.questionnaire?.city || null,
+  state: u.questionnaire?.state || null,
+  languagePreference: u.questionnaire?.languagePreference || null,
+  comfortZones: u.questionnaire?.comfortZones || [],
+  vibeWords: u.questionnaire?.vibeWords || [],
+  becomeCompanion: u.questionnaire?.becomeCompanion || null,
+  price: u.questionnaire?.price || null,
+  tagline: u.questionnaire?.tagline || null,
+
+  photoVerificationStatus: u.photoVerificationStatus || "pending"
+};
+
     });
 
     mapped.sort((a, b) => b.overlapCount - a.overlapCount);
