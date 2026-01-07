@@ -2,17 +2,53 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const http = require('http');
+const socketIo = require('socket.io');
 const dotenv = require('dotenv');
 
 dotenv.config();
 
 const app = express();
+const server = http.createServer(app);
+
+// ✅ Socket.IO setup
+const io = socketIo(server, {
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST", "PUT", "DELETE"]
+  },
+  transports: ['websocket', 'polling']
+});
 
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
+// Make io available to routes
+app.set('io', io);
+
+// ✅ Socket.IO connection handler
+io.on('connection', (socket) => {
+  console.log('✅ User connected:', socket.id);
+  
+  // Join specific chat room
+  socket.on('join-chat', (chatId) => {
+    socket.join(chatId);
+    console.log(`📥 User ${socket.id} joined chat: ${chatId}`);
+  });
+  
+  // Leave chat room
+  socket.on('leave-chat', (chatId) => {
+    socket.leave(chatId);
+    console.log(`📤 User ${socket.id} left chat: ${chatId}`);
+  });
+  
+  // Handle disconnect
+  socket.on('disconnect', () => {
+    console.log('❌ User disconnected:', socket.id);
+  });
+});
 // Database Connection
 const connectDB = async () => {
   try {
@@ -70,6 +106,7 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 3000;
 const server = app.listen(PORT, () => {
   console.log(`🚀 Humrah Server running on port ${PORT}`);
+  console.log(`✅ Socket.IO enabled`);
 });
 
 // Graceful shutdown handlers - FIXED for Mongoose 7.x+
