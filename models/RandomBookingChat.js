@@ -103,7 +103,7 @@ const randomBookingChatSchema = new mongoose.Schema({
 // INDEXES
 // =============================================
 randomBookingChatSchema.index({ 'participants.userId': 1 });
-randomBookingChatSchema.index({ status: 1, expiresAt: 1 });
+//randomBookingChatSchema.index({ status: 1, expiresAt: 1 });
 randomBookingChatSchema.index({ hasReport: 1, status: 1 });
 
 // =============================================
