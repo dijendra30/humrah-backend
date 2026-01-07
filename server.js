@@ -1,4 +1,4 @@
-// server.js - Main Express Server for Humrah App
+// server.js - Main Express Server for Humrah App (FIXED - No duplicate 'server')
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -9,7 +9,7 @@ const dotenv = require('dotenv');
 dotenv.config();
 
 const app = express();
-const server = http.createServer(app);
+const server = http.createServer(app);  // ✅ DECLARED ONCE HERE
 
 // ✅ Socket.IO setup
 const io = socketIo(server, {
@@ -49,6 +49,7 @@ io.on('connection', (socket) => {
     console.log('❌ User disconnected:', socket.id);
   });
 });
+
 // Database Connection
 const connectDB = async () => {
   try {
@@ -71,7 +72,7 @@ const bookingRoutes = require('./routes/bookings');
 const messageRoutes = require('./routes/messages');
 const postRoutes = require('./routes/posts');
 const spotlightRoutes = require('./routes/spotlight.route');
-const safetyReportRoutes = require('./routes/safetyReports');// ✅ ADD THIS
+const safetyReportRoutes = require('./routes/safetyReports');
 
 // Use Routes
 app.use('/api/auth', authRoutes);
@@ -83,14 +84,21 @@ app.use('/api/messages', messageRoutes);
 app.use('/api/posts', postRoutes);
 app.use('/api/spotlight', spotlightRoutes);
 app.use('/api/safety', safetyReportRoutes);
+
 // After other routes
 app.use('/api/admin', require('./routes/admin'));
 app.use('/api/random-booking', require('./routes/randomBooking'));
-require('./cronJobs');// ✅ ADD THIS
+
+// Cron jobs
+require('./cronJobs');
 
 // Health Check
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'OK', message: 'Humrah API is running' });
+  res.json({ 
+    status: 'OK', 
+    message: 'Humrah API is running',
+    socketConnections: io.engine.clientsCount 
+  });
 });
 
 // Error Handler
@@ -104,12 +112,14 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 3000;
-const server = app.listen(PORT, () => {
+
+// ✅ START SERVER (using already declared 'server' variable)
+server.listen(PORT, () => {
   console.log(`🚀 Humrah Server running on port ${PORT}`);
   console.log(`✅ Socket.IO enabled`);
 });
 
-// Graceful shutdown handlers - FIXED for Mongoose 7.x+
+// Graceful shutdown handlers
 const gracefulShutdown = async (signal) => {
   console.log(`\n${signal} signal received: closing HTTP server`);
   
@@ -117,7 +127,6 @@ const gracefulShutdown = async (signal) => {
     console.log('HTTP server closed');
     
     try {
-      // Mongoose 7.x doesn't accept callbacks - use await instead
       await mongoose.connection.close();
       console.log('MongoDB connection closed');
       process.exit(0);
@@ -148,3 +157,5 @@ process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled Rejection at:', promise, 'reason:', reason);
   gracefulShutdown('UNHANDLED_REJECTION');
 });
+
+module.exports = { app, server, io };
