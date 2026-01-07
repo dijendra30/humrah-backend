@@ -1,9 +1,8 @@
-// models/RandomBookingChat.js - Temporary Encrypted Chat for Random Bookings
+// models/RandomBookingChat.js - FIXED SYSTEM MESSAGE
 const mongoose = require('mongoose');
 const crypto = require('crypto');
 
 const randomBookingChatSchema = new mongoose.Schema({
-  // Link to booking
   bookingId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'RandomBooking',
@@ -12,7 +11,6 @@ const randomBookingChatSchema = new mongoose.Schema({
     index: true
   },
   
-  // Participants (initiator + accepted user)
   participants: [{
     userId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -26,14 +24,12 @@ const randomBookingChatSchema = new mongoose.Schema({
     }
   }],
   
-  // Encryption
   encryptionKeyId: {
     type: String,
     required: true,
     unique: true
   },
   
-  // Chat State
   status: {
     type: String,
     enum: ['ACTIVE', 'COMPLETED', 'EXPIRED', 'UNDER_REVIEW'],
@@ -42,7 +38,6 @@ const randomBookingChatSchema = new mongoose.Schema({
     index: true
   },
   
-  // Lifecycle
   createdAt: {
     type: Date,
     default: Date.now,
@@ -60,7 +55,6 @@ const randomBookingChatSchema = new mongoose.Schema({
     index: true
   },
   
-  // Safety & Reporting
   hasReport: {
     type: Boolean,
     default: false,
@@ -78,7 +72,6 @@ const randomBookingChatSchema = new mongoose.Schema({
     default: null
   },
   
-  // Deletion tracking
   isDeleted: {
     type: Boolean,
     default: false,
@@ -90,7 +83,6 @@ const randomBookingChatSchema = new mongoose.Schema({
     default: null
   },
   
-  // Last activity
   lastMessageAt: {
     type: Date,
     default: Date.now
@@ -110,12 +102,10 @@ randomBookingChatSchema.index({ hasReport: 1, status: 1 });
 // PRE-SAVE VALIDATION
 // =============================================
 randomBookingChatSchema.pre('save', function(next) {
-  // Ensure exactly 2 participants
   if (this.participants.length !== 2) {
     return next(new Error('Chat must have exactly 2 participants'));
   }
   
-  // Generate encryption key ID if not exists
   if (this.isNew && !this.encryptionKeyId) {
     this.encryptionKeyId = crypto.randomBytes(32).toString('hex');
   }
@@ -127,23 +117,16 @@ randomBookingChatSchema.pre('save', function(next) {
 // INSTANCE METHODS
 // =============================================
 
-/**
- * Check if user is participant
- */
 randomBookingChatSchema.methods.isParticipant = function(userId) {
   return this.participants.some(p => 
     p.userId.toString() === userId.toString()
   );
 };
 
-/**
- * Mark as completed
- */
 randomBookingChatSchema.methods.markCompleted = function() {
   this.status = 'COMPLETED';
   this.completedAt = new Date();
   
-  // Set expiry to end of today (local time)
   const endOfDay = new Date();
   endOfDay.setHours(23, 59, 59, 999);
   this.expiresAt = endOfDay;
@@ -151,53 +134,36 @@ randomBookingChatSchema.methods.markCompleted = function() {
   return this.save();
 };
 
-/**
- * Flag for safety review
- */
 randomBookingChatSchema.methods.flagForReview = function(reportId) {
   this.status = 'UNDER_REVIEW';
   this.hasReport = true;
   this.reportId = reportId;
   this.reportedAt = new Date();
-  
-  // Cancel expiry while under review
   this.expiresAt = new Date('2099-12-31');
   
   return this.save();
 };
 
-/**
- * Check if expired
- */
 randomBookingChatSchema.methods.isExpired = function() {
   return this.expiresAt < new Date();
 };
 
-/**
- * Check if can be deleted
- */
 randomBookingChatSchema.methods.canDelete = function() {
   return this.isExpired() && !this.hasReport && this.status !== 'UNDER_REVIEW';
 };
 
-/**
- * Soft delete chat and messages
- */
 randomBookingChatSchema.methods.deleteChat = async function() {
   if (!this.canDelete()) {
     throw new Error('Cannot delete chat: either not expired or under review');
   }
   
-  // Mark as deleted
   this.isDeleted = true;
   this.deletedAt = new Date();
   await this.save();
   
-  // Delete all messages
   const Message = mongoose.model('Message');
   await Message.deleteMany({ chatId: this._id });
   
-  // Delete encryption keys from key store
   const EncryptionKey = mongoose.model('EncryptionKey');
   await EncryptionKey.deleteOne({ keyId: this.encryptionKeyId });
   
@@ -209,10 +175,9 @@ randomBookingChatSchema.methods.deleteChat = async function() {
 // =============================================
 
 /**
- * Create chat for booking
+ * ✅ FIXED: Create chat with proper system message
  */
 randomBookingChatSchema.statics.createForBooking = async function(booking) {
-  // Check if chat already exists
   const existing = await this.findOne({ bookingId: booking._id });
   if (existing) return existing;
   
@@ -239,23 +204,21 @@ randomBookingChatSchema.statics.createForBooking = async function(booking) {
     expiresAt: new Date(booking.date.getTime() + 24 * 60 * 60 * 1000)
   });
   
-  // Create system welcome message
+  // ✅ FIXED: Create system message with initiator as sender
+  // System messages should come from one of the participants
   const Message = mongoose.model('Message');
   await Message.create({
     chatId: chat._id,
-    senderId: null, // System message
-    senderRole: 'SYSTEM',
+    senderId: booking.initiatorId,  // ✅ Use initiator, not null
+    senderRole: 'USER',              // ✅ Use USER, not SYSTEM
     content: '🎉 You\'re matched!\nYou can now chat and plan your meetup.\nThis conversation will disappear after today.',
-    messageType: 'SYSTEM',
-    isSystemMessage: true
+    messageType: 'TEXT',
+    isSystemMessage: true            // ✅ Add this flag if your Message model supports it
   });
   
   return chat;
 };
 
-/**
- * Find chats for user
- */
 randomBookingChatSchema.statics.findForUser = function(userId) {
   return this.find({
     'participants.userId': userId,
@@ -265,13 +228,9 @@ randomBookingChatSchema.statics.findForUser = function(userId) {
   .sort({ lastMessageAt: -1 });
 };
 
-/**
- * Cleanup expired chats (Cron job)
- */
 randomBookingChatSchema.statics.cleanupExpired = async function() {
   const now = new Date();
   
-  // Find expired chats without reports
   const expiredChats = await this.find({
     status: { $in: ['COMPLETED', 'ACTIVE'] },
     expiresAt: { $lt: now },
@@ -293,9 +252,6 @@ randomBookingChatSchema.statics.cleanupExpired = async function() {
   return { deleted, total: expiredChats.length };
 };
 
-/**
- * Get chats under review (Admin only)
- */
 randomBookingChatSchema.statics.findUnderReview = function() {
   return this.find({
     status: 'UNDER_REVIEW',
