@@ -41,23 +41,18 @@ exports.getSpotlightCompanions = async (req, res) => {
     console.log('🔎 Query:', JSON.stringify(query, null, 2));
 
     // 4. Fetch companions
-const eligibleCompanions = await User.find({
+ const eligibleCompanions = await User.find({
   _id: { $ne: currentUserId },
   role: 'USER', // ✅ ONLY USER ROLE - EXCLUDES ADMINS
   verified: true
-})
-      .select('_id firstName lastName profilePhoto verified photoVerificationStatus questionnaire lastActive')
-      .limit(50);
-
-    console.log(`📊 Found ${eligibleCompanions.length} eligible companions`);
-
+   })
+    
     // 5. Log roles for debugging
-    console.log('👥 Final companions:', eligibleCompanions.map(c => ({
-      id: { $ne: currentUserId } ,
+     console.log('👥 Final companions:', eligibleCompanions.map(c => ({
+      id: c._id,
       name: `${c.firstName} ${c.lastName}`,
-      role: 'USER' // This should log to verify
+      role: c.role // This should log to verify
     })));
-
     // 6. Calculate shared hangouts
     const companionsWithOverlap = eligibleCompanions.map(companion => {
       const companionHangouts = companion.questionnaire?.hangoutPreferences || [];
