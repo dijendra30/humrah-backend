@@ -41,7 +41,11 @@ exports.getSpotlightCompanions = async (req, res) => {
     console.log('🔎 Query:', JSON.stringify(query, null, 2));
 
     // 4. Fetch companions
-    const eligibleCompanions = await User.find(query)
+const eligibleCompanions = await User.find({
+  _id: { $ne: currentUserId },
+  role: 'USER', // ✅ ONLY USER ROLE - EXCLUDES ADMINS
+  verified: true
+})
       .select('_id firstName lastName profilePhoto verified photoVerificationStatus questionnaire lastActive')
       .limit(50);
 
