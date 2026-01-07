@@ -45,7 +45,7 @@ exports.getSpotlightCompanions = async (req, res) => {
   _id: { $ne: currentUserId },
   role: 'USER', // ✅ ONLY USER ROLE - EXCLUDES ADMINS
   verified: true
-   })
+   });
     
     // 5. Log roles for debugging
      console.log('👥 Final companions:', eligibleCompanions.map(c => ({
