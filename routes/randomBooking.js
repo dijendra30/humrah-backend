@@ -1,4 +1,4 @@
-// routes/randomBooking.js - FINAL VERSION with WeeklyUsage fix
+// routes/randomBooking.js - WITH AUTO CITY DETECTION
 const express = require('express');
 const router = express.Router();
 const RandomBooking = require('../models/RandomBooking');
@@ -11,14 +11,14 @@ const { auth } = require('../middleware/auth');
 
 /**
  * @route   POST /api/random-booking/create
- * @desc    Create random booking
+ * @desc    Create random booking (city auto-detected from user profile)
  * @access  Private
  */
 router.post('/create', auth, async (req, res) => {
   try {
     const {
       destination,
-      city,
+      city,  // Can be empty - will use user's city
       date,
       timeRange,
       preferredGender,
@@ -29,7 +29,7 @@ router.post('/create', auth, async (req, res) => {
 
     console.log('📥 Create booking request:', {
       destination,
-      city,
+      cityFromRequest: city || '(empty)',
       date,
       timeRange,
       preferredGender,
@@ -38,8 +38,37 @@ router.post('/create', auth, async (req, res) => {
       hasNote: !!note
     });
 
-    // Validation
-    if (!destination || !city || !date || !timeRange || 
+    // ✅ CRITICAL: Get user and their city from questionnaire
+    const user = await User.findById(req.userId);
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Determine final city: use request city if provided, otherwise user's city
+    const finalCity = (city && city.trim()) 
+      ? city.toLowerCase().trim()
+      : user.questionnaire?.city?.toLowerCase().trim() || null;
+
+    console.log('📍 City detection:', {
+      fromRequest: city || '(empty)',
+      fromProfile: user.questionnaire?.city || '(not set)',
+      finalCity: finalCity || '(none)',
+      source: (city && city.trim()) ? 'request' : 'user profile'
+    });
+
+    if (!finalCity) {
+      return res.status(400).json({
+        success: false,
+        message: 'City is required. Please set your city in profile settings to create random bookings.'
+      });
+    }
+
+    // Validation of required fields
+    if (!destination || !date || !timeRange || 
         !timeRange.start || !timeRange.end ||
         !preferredGender || !ageRange || 
         !ageRange.min || !ageRange.max || !activityType) {
@@ -49,7 +78,7 @@ router.post('/create', auth, async (req, res) => {
       });
     }
 
-    // ✅ Check weekly usage using new method
+    // ✅ Check weekly usage
     const canCreate = await WeeklyUsage.canUserCreateBooking(req.userId);
     
     if (!canCreate.allowed) {
@@ -77,11 +106,11 @@ router.post('/create', auth, async (req, res) => {
     const expiresAt = new Date();
     expiresAt.setHours(expiresAt.getHours() + 24);
 
-    // Create booking
+    // ✅ Create booking with finalCity
     const booking = new RandomBooking({
       initiatorId: req.userId,
       destination,
-      city: city.toLowerCase().trim(),
+      city: finalCity,  // ✅ Uses finalCity (from profile if request is empty)
       date: bookingDate,
       timeRange: {
         start: timeRange.start,
@@ -99,9 +128,14 @@ router.post('/create', auth, async (req, res) => {
     });
 
     await booking.save();
-    console.log('✅ Booking created:', booking._id);
+    console.log('✅ Booking created:', {
+      id: booking._id,
+      city: booking.city,
+      destination: booking.destination,
+      date: booking.date
+    });
 
-    // ✅ Update weekly usage using new method
+    // ✅ Update weekly usage
     const usage = await WeeklyUsage.getOrCreateCurrentWeek(req.userId);
     usage.bookingsCreated += 1;
     await usage.save();
@@ -120,6 +154,7 @@ router.post('/create', auth, async (req, res) => {
       message: 'Random booking created successfully',
       booking
     });
+
   } catch (error) {
     console.error('❌ Create random booking error:', error);
     res.status(500).json({
@@ -146,6 +181,12 @@ router.get('/eligible', auth, async (req, res) => {
     }
 
     const eligibleBookings = await RandomBooking.findEligibleForUser(user);
+
+    console.log('🔍 Eligible bookings:', {
+      userId: req.userId,
+      userCity: user.questionnaire?.city,
+      count: eligibleBookings.length
+    });
 
     res.json({
       success: true,
@@ -200,7 +241,7 @@ router.post('/:bookingId/accept', auth, async (req, res) => {
     booking.chatId = chat._id;
     await booking.save();
 
-    console.log(`✅ Booking accepted: ${booking._id}`);
+    console.log(`✅ Booking accepted: ${booking._id} by ${req.userId}`);
 
     res.json({
       success: true,
@@ -322,7 +363,7 @@ router.get('/usage', auth, async (req, res) => {
   }
 });
 
-// ==================== CHAT ENDPOINTS (unchanged) ====================
+// ==================== CHAT ENDPOINTS ====================
 
 router.get('/chats', auth, async (req, res) => {
   try {
