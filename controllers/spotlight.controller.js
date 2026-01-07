@@ -1,17 +1,13 @@
-// controllers/spotlight.controller.js
 const User = require('../models/User');
 
-/**
- * @route   GET /api/spotlight
- * @desc    Get personalized companion recommendations based on shared hangout preferences
- * @access  Private (requires authentication)
- */
 exports.getSpotlightCompanions = async (req, res) => {
   try {
-    const currentUserId = req.userId; // ✅ Your auth middleware uses req.userId
+    const currentUserId = req.userId;
 
-    // 1. Fetch current user with their hangout preferences
-    const currentUser = await User.findById(currentUserId).select('questionnaire');
+    console.log('🔍 Spotlight request from user:', currentUserId);
+
+    // 1. Fetch current user
+    const currentUser = await User.findById(currentUserId).select('questionnaire role');
     
     if (!currentUser) {
       return res.status(404).json({
@@ -20,101 +16,87 @@ exports.getSpotlightCompanions = async (req, res) => {
       });
     }
 
-    // ✅ Get hangout preferences from questionnaire
+    console.log('✅ Current user:', {
+      id: currentUser._id,
+      name: `${currentUser.firstName} ${currentUser.lastName}`,
+      role: currentUser.role
+    });
+
+    // 2. Get user's hangout preferences
     const userHangouts = currentUser.questionnaire?.hangoutPreferences || [];
 
-    // 2. Define eligibility criteria
-    const now = new Date();
-    const seventyTwoHoursAgo = new Date(now.getTime() - 72 * 60 * 60 * 1000);
-
-    // 3. Fetch eligible companions
-    const eligibleCompanions = await User.find({
+    // 3. Build query - ✅ FIXED: Simpler admin filtering
+    const query = {
       _id: { $ne: currentUserId },
-      verified: true, // ✅ Only verified users
-      // Remove these filters for now if they don't exist in your User model
-      // profileCompletion: { $gte: 80 },
-      // lastActiveAt: { $gte: seventyTwoHoursAgo }
-    })
-    .select(`
-  _id
-  firstName
-  lastName
-  profilePhoto
-  verified
-  photoVerificationStatus
-  questionnaire
-  lastActive
-`)
+      // ✅ CRITICAL FIX: Only allow USER role explicitly
+      role: 'USER',
+      verified: true
+    };
 
+    console.log('🔎 Query:', JSON.stringify(query, null, 2));
 
-    .limit(50); // Get more to filter from
+    // 4. Fetch companions
+    const eligibleCompanions = await User.find(query)
+      .select(`
+        _id
+        firstName
+        lastName
+        profilePhoto
+        verified
+        photoVerificationStatus
+        questionnaire
+        lastActive
+      `)
+      .limit(50);
 
-    console.log(`Found ${eligibleCompanions.length} eligible companions`);
+    console.log(`📊 Found ${eligibleCompanions.length} eligible companions`);
 
-    // 4. Calculate shared hangouts and overlap count
+    // 5. Calculate shared hangouts
     const companionsWithOverlap = eligibleCompanions.map(companion => {
       const companionHangouts = companion.questionnaire?.hangoutPreferences || [];
-      
-      // Calculate intersection
       const sharedHangouts = userHangouts.filter(hangout => 
         companionHangouts.includes(hangout)
       );
-      
       const overlapCount = sharedHangouts.length;
 
-  return {
-  id: companion._id.toString(),
-  name: `${companion.firstName} ${companion.lastName}`.trim(),
-  profilePhoto: companion.profilePhoto || null,
-
-  sharedHangouts,
-  overlapCount,
-
-  bio: companion.questionnaire?.bio || null,
-  tagline: companion.questionnaire?.tagline || null,
-  vibeWords: companion.questionnaire?.vibeWords || [],
-
-  city: companion.questionnaire?.city || null,
-  state: companion.questionnaire?.state || null,
-  availableTimes: companion.questionnaire?.availableTimes || [],
-  languagePreference: companion.questionnaire?.languagePreference || null,
-
-  comfortZones: companion.questionnaire?.comfortZones || [],
-  becomeCompanion: companion.questionnaire?.becomeCompanion || null,
-  price: companion.questionnaire?.price || null,
-
-  // 🔥 THIS IS THE MISSING LINE 🔥
-  photoVerificationStatus: companion.photoVerificationStatus
-};
-
- 
+      return {
+        id: companion._id.toString(),
+        name: `${companion.firstName} ${companion.lastName}`.trim(),
+        profilePhoto: companion.profilePhoto || null,
+        sharedHangouts,
+        overlapCount,
+        bio: companion.questionnaire?.bio || null,
+        tagline: companion.questionnaire?.tagline || null,
+        vibeWords: companion.questionnaire?.vibeWords || [],
+        city: companion.questionnaire?.city || null,
+        state: companion.questionnaire?.state || null,
+        availableTimes: companion.questionnaire?.availableTimes || [],
+        languagePreference: companion.questionnaire?.languagePreference || null,
+        comfortZones: companion.questionnaire?.comfortZones || [],
+        becomeCompanion: companion.questionnaire?.becomeCompanion || null,
+        price: companion.questionnaire?.price || null,
+        photoVerificationStatus: companion.photoVerificationStatus
+      };
     });
 
-    // 5. Sort companions by overlap count (DESC), then by last active
-    companionsWithOverlap.sort((a, b) => {
-      if (b.overlapCount !== a.overlapCount) {
-        return b.overlapCount - a.overlapCount;
-      }
-      return new Date(b.lastActiveAt) - new Date(a.lastActiveAt);
-    });
+    // 6. Sort by overlap
+    companionsWithOverlap.sort((a, b) => b.overlapCount - a.overlapCount);
 
-    // 6. Limit to top 5
+    // 7. Top 5
     const topCompanions = companionsWithOverlap.slice(0, 5);
 
-    // 7. Clean up response
-    const cleanedCompanions = topCompanions.map(({ lastActiveAt, ...companion }) => companion);
+    console.log(`✅ Returning ${topCompanions.length} companions`);
+    console.log('👤 Companions:', topCompanions.map(c => ({ name: c.name, overlap: c.overlapCount })));
 
-    console.log(`Returning ${cleanedCompanions.length} spotlight companions`);
-
-    // 8. Return response
+    // 8. ✅ CRITICAL FIX: Return as 'companions' not 'data'
     res.status(200).json({
       success: true,
-      count: cleanedCompanions.length,
-      data: cleanedCompanions
+      count: topCompanions.length,
+      companions: topCompanions  // ✅ Changed from 'data' to 'companions'
     });
 
   } catch (error) {
-    console.error('Error fetching spotlight companions:', error);
+    console.error('❌ Spotlight error:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to fetch spotlight companions',
