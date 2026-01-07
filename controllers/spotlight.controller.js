@@ -65,24 +65,32 @@ exports.getSpotlightCompanions = async (req, res) => {
       );
       const overlapCount = sharedHangouts.length;
 
-      return {
-        id: companion._id.toString(),
-        name: `${companion.firstName} ${companion.lastName}`.trim(),
-        profilePhoto: companion.profilePhoto || null,
-        sharedHangouts,
-        overlapCount,
-        bio: companion.questionnaire?.bio || null,
-        tagline: companion.questionnaire?.tagline || null,
-        vibeWords: companion.questionnaire?.vibeWords || [],
-        city: companion.questionnaire?.city || null,
-        state: companion.questionnaire?.state || null,
-        availableTimes: companion.questionnaire?.availableTimes || [],
-        languagePreference: companion.questionnaire?.languagePreference || null,
-        comfortZones: companion.questionnaire?.comfortZones || [],
-        becomeCompanion: companion.questionnaire?.becomeCompanion || null,
-        price: companion.questionnaire?.price || null,
-        photoVerificationStatus: companion.photoVerificationStatus
-      };
+     return {
+  id: companion._id.toString(),
+  name: `${companion.firstName} ${companion.lastName}`.trim(),
+  profilePhoto: companion.profilePhoto ?? null,
+
+  sharedHangouts: sharedHangouts ?? [],
+  overlapCount: overlapCount ?? 0,
+
+  bio: companion.questionnaire?.bio ?? null,
+  availability: companion.questionnaire?.availability ?? null,
+  availableTimes: companion.questionnaire?.availableTimes ?? [],
+
+  city: companion.questionnaire?.city ?? null,
+  state: companion.questionnaire?.state ?? null,
+
+  languagePreference: companion.questionnaire?.languagePreference ?? null,
+  comfortZones: companion.questionnaire?.comfortZones ?? [],
+  vibeWords: companion.questionnaire?.vibeWords ?? [],
+
+  becomeCompanion: companion.questionnaire?.becomeCompanion ?? null,
+  price: companion.questionnaire?.price ?? null,
+  tagline: companion.questionnaire?.tagline ?? null,
+
+  photoVerificationStatus: companion.photoVerificationStatus ?? "pending"
+};
+
     });
 
     // 7. Sort by overlap
