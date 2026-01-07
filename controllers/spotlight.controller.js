@@ -1,9 +1,9 @@
-// controllers/spotlight.controller.js - FINAL WORKING VERSION
+// controllers/spotlight.controller.js - SAME CITY ONLY
 const User = require('../models/User');
 
 /**
  * @route   GET /api/spotlight
- * @desc    Get companions with real user data
+ * @desc    Get companions in SAME CITY ONLY with real user data
  * @access  Private
  */
 exports.getSpotlightCompanions = async (req, res) => {
@@ -39,32 +39,53 @@ exports.getSpotlightCompanions = async (req, res) => {
       city: userCity
     });
 
-    // 3. ✅ SIMPLE QUERY: Just exclude self and admins
+    // 3. ✅ CHECK: If user has no city, return empty
+    if (!userCity) {
+      console.log('⚠️ User has no city set, returning empty companions');
+      return res.status(200).json({
+        success: true,
+        count: 0,
+        companions: [],
+        message: 'Please set your city in profile to see companions'
+      });
+    }
+
+    // 4. Fetch ALL user companions (we'll filter by city in JS)
     const query = {
       _id: { $ne: currentUserId },
-      role: 'USER' // ✅ ONLY USER role
+      role: 'USER'
     };
 
     console.log('🔎 Query:', JSON.stringify(query, null, 2));
 
-    // 4. Fetch ALL user companions (we'll sort by city later)
-    const eligibleCompanions = await User.find(query)
+    const allCompanions = await User.find(query)
       .select('_id firstName lastName profilePhoto verified photoVerificationStatus questionnaire')
-      .limit(100); // Get more to filter from
+      .limit(100);
 
-    console.log(`📊 Found ${eligibleCompanions.length} eligible companions`);
+    console.log(`📊 Found ${allCompanions.length} total companions`);
 
-    if (eligibleCompanions.length === 0) {
-      console.log('⚠️ No companions found in database');
+    // 5. ✅ FILTER: Only companions in SAME CITY (case-insensitive)
+    const sameCityCompanions = allCompanions.filter(companion => {
+      const companionCity = companion.questionnaire?.city;
+      return companionCity && 
+             companionCity.toLowerCase().trim() === userCity.toLowerCase().trim();
+    });
+
+    console.log(`🏙️ Filtered to ${sameCityCompanions.length} companions in ${userCity}`);
+
+    // 6. ✅ CHECK: If no companions in same city, return empty
+    if (sameCityCompanions.length === 0) {
+      console.log(`⚠️ No companions found in ${userCity}`);
       return res.status(200).json({
         success: true,
         count: 0,
-        companions: []
+        companions: [],
+        message: `No companions available in ${userCity} yet. Check back soon!`
       });
     }
 
-    // 5. Calculate shared hangouts and prioritize by city match
-    const companionsWithData = eligibleCompanions.map(companion => {
+    // 7. Calculate shared hangouts and map data
+    const companionsWithData = sameCityCompanions.map(companion => {
       const q = companion.questionnaire || {};
       
       // Calculate shared hangouts
@@ -74,14 +95,9 @@ exports.getSpotlightCompanions = async (req, res) => {
       );
       const overlapCount = sharedHangouts.length;
 
-      // Check if same city
-      const isSameCity = userCity && q.city && 
-        q.city.toLowerCase() === userCity.toLowerCase();
-
       // ✅ LOG: Show what data exists
       console.log(`📦 ${companion.firstName}:`, {
-        city: q.city || 'not set',
-        sameCity: isSameCity,
+        city: q.city,
         hangoutsCount: companionHangouts.length,
         sharedCount: sharedHangouts.length,
         hasBio: !!q.bio
@@ -92,7 +108,7 @@ exports.getSpotlightCompanions = async (req, res) => {
         name: `${companion.firstName} ${companion.lastName}`.trim(),
         profilePhoto: companion.profilePhoto || null,
         
-        // ✅ REAL USER DATA (null if empty)
+        // ✅ REAL USER DATA
         bio: q.bio || null,
         tagline: q.tagline || null,
         sharedHangouts: sharedHangouts.length > 0 ? sharedHangouts : [],
@@ -105,21 +121,15 @@ exports.getSpotlightCompanions = async (req, res) => {
         comfortZones: q.comfortZones || [],
         becomeCompanion: q.becomeCompanion || null,
         price: q.price || null,
-        photoVerificationStatus: companion.photoVerificationStatus || 'not_submitted',
-        
-        // Internal: for sorting
-        _isSameCity: isSameCity,
-        _sortScore: (isSameCity ? 1000 : 0) + overlapCount
+        photoVerificationStatus: companion.photoVerificationStatus || 'not_submitted'
       };
     });
 
-    // 6. ✅ SORT: Same city first, then by shared interests
-    companionsWithData.sort((a, b) => b._sortScore - a._sortScore);
+    // 8. Sort by shared interests (highest overlap first)
+    companionsWithData.sort((a, b) => b.overlapCount - a.overlapCount);
 
-    // 7. Clean up internal fields and take top 10
-    const topCompanions = companionsWithData
-      .slice(0, 10)
-      .map(({ _isSameCity, _sortScore, ...companion }) => companion);
+    // 9. Take top 10
+    const topCompanions = companionsWithData.slice(0, 10);
 
     console.log(`✅ Returning ${topCompanions.length} companions`);
     console.log('👤 Top companions:', topCompanions.map(c => ({ 
@@ -128,7 +138,7 @@ exports.getSpotlightCompanions = async (req, res) => {
       shared: c.overlapCount
     })));
 
-    // 8. Return response
+    // 10. Return response
     res.status(200).json({
       success: true,
       count: topCompanions.length,
