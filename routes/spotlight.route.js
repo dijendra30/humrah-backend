@@ -16,7 +16,7 @@ router.get('/', auth, async (req, res) => {
     const currentUser = await User.findById(currentUserId);
     
     if (!currentUser) {
-      console.log('âŒ Current user not found');
+      console.log('Current user not found');
       return res.status(404).json({
         success: false,
         message: 'User not found'
@@ -112,47 +112,31 @@ router.get('/', auth, async (req, res) => {
           hangout => currentUserHangouts.includes(hangout)
         );
       } catch (error) {
-        console.log('âš ï¸ Error calculating shared hangouts:', error);
+        console.log('Error calculating shared hangouts:', error);
       }
 
-    return {
-        id: companion._id.toString(),
-        name: `${companion.firstName} ${companion.lastName}`.trim(),
-        profilePhoto: companion.profilePhoto || null,
-        
-        // ✅ FALLBACK DATA: Show something even if profile is incomplete
-        bio: companion.questionnaire?.bio || 
-             "New user exploring Humrah! Say hi and see what we have in common 👋",
-        
-        tagline: companion.questionnaire?.tagline || 
-                 "Ready to meet new people!",
-        
-        sharedHangouts: sharedHangouts.length > 0 
-          ? sharedHangouts 
-          : ["New User"],
-        
-        overlapCount,
-        
-        vibeWords: (companion.questionnaire?.vibeWords?.length || 0) > 0
-          ? companion.questionnaire.vibeWords
-          : ["Friendly", "Open-minded", "Curious"],
-        
-        city: companion.questionnaire?.city || "India",
-        state: companion.questionnaire?.state || null,
-        
-        availableTimes: companion.questionnaire?.availableTimes || 
-                       ["Weekends", "Evenings"],
-        
-        languagePreference: companion.questionnaire?.languagePreference || 
-                          "English",
-        
-        comfortZones: companion.questionnaire?.comfortZones || 
-                     ["Public places", "Cafes"],
-        
-        becomeCompanion: companion.questionnaire?.becomeCompanion || null,
-        price: companion.questionnaire?.price || null,
-        photoVerificationStatus: companion.photoVerificationStatus || 'not_submitted'
-      };
+   return {
+  id: user._id.toString(),
+  name: `${user.firstName} ${user.lastName}`,
+  profilePhoto: user.profilePhoto,
+  
+  // ✅ ADD ALL MISSING FIELDS
+  bio: user.questionnaire?.bio,
+  tagline: user.questionnaire?.tagline,
+  sharedHangouts: sharedHangouts.length > 0 ? sharedHangouts,
+  overlapCount: sharedHangouts.length,
+  vibeWords: user.questionnaire?.vibeWords?.length > 0 
+    ? user.questionnaire.vibeWords 
+    : ["Friendly", "Open-minded"],
+  city: user.questionnaire?.city,
+  state: user.questionnaire?.state,
+  availableTimes: user.questionnaire?.availableTimes,
+  languagePreference: user.questionnaire?.languagePreference,
+  comfortZones: user.questionnaire?.comfortZones,
+  becomeCompanion: user.questionnaire?.becomeCompanion,
+  price: user.questionnaire?.price,
+  photoVerificationStatus: user.photoVerificationStatus
+};
     });
 
     console.log('Returning', spotlightCompanions.length, 'companions');
