@@ -1,5 +1,11 @@
+// controllers/spotlight.controller.js - ABSOLUTELY FINAL FIX
 const User = require('../models/User');
 
+/**
+ * @route   GET /api/spotlight
+ * @desc    Get personalized companion recommendations based on shared hangout preferences
+ * @access  Private (requires authentication)
+ */
 exports.getSpotlightCompanions = async (req, res) => {
   try {
     const currentUserId = req.userId;
@@ -25,11 +31,10 @@ exports.getSpotlightCompanions = async (req, res) => {
     // 2. Get user's hangout preferences
     const userHangouts = currentUser.questionnaire?.hangoutPreferences || [];
 
-    // 3. Build query - ✅ FIXED: Simpler admin filtering
+    // 3. Build query - ✅ CRITICAL FIX: Only USER role
     const query = {
       _id: { $ne: currentUserId },
-      // ✅ CRITICAL FIX: Only allow USER role explicitly
-      role: 'USER',
+      role: 'USER', // ✅ ONLY match USER role (excludes SAFETY_ADMIN, SUPER_ADMIN)
       verified: true
     };
 
@@ -37,21 +42,19 @@ exports.getSpotlightCompanions = async (req, res) => {
 
     // 4. Fetch companions
     const eligibleCompanions = await User.find(query)
-      .select(`
-        _id
-        firstName
-        lastName
-        profilePhoto
-        verified
-        photoVerificationStatus
-        questionnaire
-        lastActive
-      `)
+      .select('_id firstName lastName profilePhoto verified photoVerificationStatus questionnaire lastActive')
       .limit(50);
 
     console.log(`📊 Found ${eligibleCompanions.length} eligible companions`);
 
-    // 5. Calculate shared hangouts
+    // 5. Log roles for debugging
+    console.log('👥 Final companions:', eligibleCompanions.map(c => ({
+      id: c._id,
+      name: `${c.firstName} ${c.lastName}`,
+      role: c.role // This should log to verify
+    })));
+
+    // 6. Calculate shared hangouts
     const companionsWithOverlap = eligibleCompanions.map(companion => {
       const companionHangouts = companion.questionnaire?.hangoutPreferences || [];
       const sharedHangouts = userHangouts.filter(hangout => 
@@ -79,20 +82,20 @@ exports.getSpotlightCompanions = async (req, res) => {
       };
     });
 
-    // 6. Sort by overlap
+    // 7. Sort by overlap
     companionsWithOverlap.sort((a, b) => b.overlapCount - a.overlapCount);
 
-    // 7. Top 5
+    // 8. Top 5
     const topCompanions = companionsWithOverlap.slice(0, 5);
 
     console.log(`✅ Returning ${topCompanions.length} companions`);
     console.log('👤 Companions:', topCompanions.map(c => ({ name: c.name, overlap: c.overlapCount })));
 
-    // 8. ✅ CRITICAL FIX: Return as 'companions' not 'data'
+    // 9. ✅ Return as 'companions' not 'data' (for Android compatibility)
     res.status(200).json({
       success: true,
       count: topCompanions.length,
-      companions: topCompanions  // ✅ Changed from 'data' to 'companions'
+      companions: topCompanions
     });
 
   } catch (error) {
