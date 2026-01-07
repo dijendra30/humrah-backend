@@ -167,8 +167,7 @@ const randomBookingSchema = new mongoose.Schema({
 // =============================================
 randomBookingSchema.index({ status: 1, city: 1, date: 1 });
 randomBookingSchema.index({ initiatorId: 1, createdAt: -1 });
-randomBookingSchema.index({ acceptedUserId: 1, matchedAt: -1 });
-//randomBookingSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 }); // TTL for cleanup
+randomBookingSchema.index({ acceptedUserId: 1, matchedAt: -1 })
 
 // =============================================
 // PRE-SAVE VALIDATION
