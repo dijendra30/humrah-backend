@@ -88,11 +88,11 @@ router.get('/', auth, async (req, res) => {
       .limit(10)
       .sort({ createdAt: -1 });
       
-      console.log(`ðŸ“Š Super fallback found ${companions.length} companions`);
+      console.log(`Super fallback found ${companions.length} companions`);
     }
 
     // ==================== Log what we found ====================
-    console.log('ðŸ‘¥ Final companions:', companions.map(u => ({
+    console.log('Final companions:', companions.map(u => ({
       id: u._id,
       name: `${u.firstName} ${u.lastName}`,
       role: u.role,
@@ -118,24 +118,24 @@ router.get('/', auth, async (req, res) => {
    return {
   id: user._id.toString(),
   name: `${user.firstName} ${user.lastName}`,
-  profilePhoto: user.profilePhoto,
+  profilePhoto: user.profilePhoto || null,
   
   // ✅ ADD ALL MISSING FIELDS
-  bio: user.questionnaire?.bio,
-  tagline: user.questionnaire?.tagline,
-  sharedHangouts: sharedHangouts.length > 0 ? sharedHangouts,
+  bio: user.questionnaire?.bio || "New user exploring Humrah! Say hi 👋",
+  tagline: user.questionnaire?.tagline || "Ready to meet new people!",
+  sharedHangouts: sharedHangouts.length > 0 ? sharedHangouts : ["New User"],
   overlapCount: sharedHangouts.length,
   vibeWords: user.questionnaire?.vibeWords?.length > 0 
     ? user.questionnaire.vibeWords 
     : ["Friendly", "Open-minded"],
-  city: user.questionnaire?.city,
-  state: user.questionnaire?.state,
-  availableTimes: user.questionnaire?.availableTimes,
-  languagePreference: user.questionnaire?.languagePreference,
-  comfortZones: user.questionnaire?.comfortZones,
-  becomeCompanion: user.questionnaire?.becomeCompanion,
-  price: user.questionnaire?.price,
-  photoVerificationStatus: user.photoVerificationStatus
+  city: user.questionnaire?.city || "India",
+  state: user.questionnaire?.state || null,
+  availableTimes: user.questionnaire?.availableTimes || ["Weekends", "Evenings"],
+  languagePreference: user.questionnaire?.languagePreference || "English",
+  comfortZones: user.questionnaire?.comfortZones || ["Public places", "Cafes"],
+  becomeCompanion: user.questionnaire?.becomeCompanion || null,
+  price: user.questionnaire?.price || null,
+  photoVerificationStatus: user.photoVerificationStatus || 'not_submitted'
 };
     });
 
