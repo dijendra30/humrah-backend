@@ -1,9 +1,9 @@
-// controllers/spotlight.controller.js - SHOW REAL USER DATA
+// controllers/spotlight.controller.js - FINAL WORKING VERSION
 const User = require('../models/User');
 
 /**
  * @route   GET /api/spotlight
- * @desc    Get real companion data based on shared hangout preferences
+ * @desc    Get companions with real user data
  * @access  Private
  */
 exports.getSpotlightCompanions = async (req, res) => {
@@ -30,7 +30,7 @@ exports.getSpotlightCompanions = async (req, res) => {
       role: currentUser.role
     });
 
-    // 2. Get user's hangout preferences
+    // 2. Get user's preferences
     const userHangouts = currentUser.questionnaire?.hangoutPreferences || [];
     const userCity = currentUser.questionnaire?.city;
 
@@ -39,44 +39,32 @@ exports.getSpotlightCompanions = async (req, res) => {
       city: userCity
     });
 
-    // 3. Build query - ✅ ONLY USER ROLE, prefer same city
+    // 3. ✅ SIMPLE QUERY: Just exclude self and admins
     const query = {
       _id: { $ne: currentUserId },
-      role: 'USER', // ✅ ONLY match USER role (excludes SAFETY_ADMIN, SUPER_ADMIN)
-      verified: true
+      role: 'USER' // ✅ ONLY USER role
     };
-
-    // Prefer users in same city (but don't make it mandatory)
-    if (userCity) {
-      query['questionnaire.city'] = userCity;
-    }
 
     console.log('🔎 Query:', JSON.stringify(query, null, 2));
 
-    // 4. Fetch companions
-    let eligibleCompanions = await User.find(query)
+    // 4. Fetch ALL user companions (we'll sort by city later)
+    const eligibleCompanions = await User.find(query)
       .select('_id firstName lastName profilePhoto verified photoVerificationStatus questionnaire')
-      .limit(50);
+      .limit(100); // Get more to filter from
 
-    console.log(`📊 Found ${eligibleCompanions.length} companions in same city`);
+    console.log(`📊 Found ${eligibleCompanions.length} eligible companions`);
 
-    // 5. Fallback: If no users in same city, get any users
     if (eligibleCompanions.length === 0) {
-      console.log('🔄 No companions in same city, fetching from all cities...');
-      
-      eligibleCompanions = await User.find({
-        _id: { $ne: currentUserId },
-        role: 'USER',
-        verified: true
-      })
-      .select('_id firstName lastName profilePhoto verified photoVerificationStatus questionnaire')
-      .limit(50);
-      
-      console.log(`📊 Found ${eligibleCompanions.length} companions total`);
+      console.log('⚠️ No companions found in database');
+      return res.status(200).json({
+        success: true,
+        count: 0,
+        companions: []
+      });
     }
 
-    // 6. Calculate shared hangouts and map data
-    const companionsWithOverlap = eligibleCompanions.map(companion => {
+    // 5. Calculate shared hangouts and prioritize by city match
+    const companionsWithData = eligibleCompanions.map(companion => {
       const q = companion.questionnaire || {};
       
       // Calculate shared hangouts
@@ -86,70 +74,61 @@ exports.getSpotlightCompanions = async (req, res) => {
       );
       const overlapCount = sharedHangouts.length;
 
-      // ✅ LOG: Show what data exists for this user
+      // Check if same city
+      const isSameCity = userCity && q.city && 
+        q.city.toLowerCase() === userCity.toLowerCase();
+
+      // ✅ LOG: Show what data exists
       console.log(`📦 ${companion.firstName}:`, {
-        hasName: !!q.name,
-        hasCity: !!q.city,
-        hasBio: !!q.bio,
-        hasTagline: !!q.tagline,
+        city: q.city || 'not set',
+        sameCity: isSameCity,
         hangoutsCount: companionHangouts.length,
         sharedCount: sharedHangouts.length,
-        hasVibeWords: (q.vibeWords?.length || 0) > 0
+        hasBio: !!q.bio
       });
 
-      // ✅ RETURN REAL USER DATA (exactly as stored)
       return {
         id: companion._id.toString(),
         name: `${companion.firstName} ${companion.lastName}`.trim(),
         profilePhoto: companion.profilePhoto || null,
         
-        // ✅ REAL DATA: Show what user actually filled (null if empty)
+        // ✅ REAL USER DATA (null if empty)
         bio: q.bio || null,
         tagline: q.tagline || null,
-        
-        // ✅ SHARED HANGOUTS: Only show if there are matches
         sharedHangouts: sharedHangouts.length > 0 ? sharedHangouts : [],
         overlapCount,
-        
-        // ✅ REAL DATA: Arrays (empty if not filled)
         vibeWords: q.vibeWords || [],
-        
-        // ✅ REAL DATA: Location
         city: q.city || null,
         state: q.state || null,
-        
-        // ✅ REAL DATA: Availability
         availableTimes: q.availableTimes || [],
         languagePreference: q.languagePreference || null,
-        
-        // ✅ REAL DATA: Comfort zones
         comfortZones: q.comfortZones || [],
-        
-        // ✅ COMPANION MODE: Real data
         becomeCompanion: q.becomeCompanion || null,
         price: q.price || null,
+        photoVerificationStatus: companion.photoVerificationStatus || 'not_submitted',
         
-        // ✅ VERIFICATION STATUS
-        photoVerificationStatus: companion.photoVerificationStatus || 'not_submitted'
+        // Internal: for sorting
+        _isSameCity: isSameCity,
+        _sortScore: (isSameCity ? 1000 : 0) + overlapCount
       };
     });
 
-    // 7. Sort by overlap count (users with shared interests first)
-    companionsWithOverlap.sort((a, b) => b.overlapCount - a.overlapCount);
+    // 6. ✅ SORT: Same city first, then by shared interests
+    companionsWithData.sort((a, b) => b._sortScore - a._sortScore);
 
-    // 8. Take top 10
-    const topCompanions = companionsWithOverlap.slice(0, 10);
+    // 7. Clean up internal fields and take top 10
+    const topCompanions = companionsWithData
+      .slice(0, 10)
+      .map(({ _isSameCity, _sortScore, ...companion }) => companion);
 
     console.log(`✅ Returning ${topCompanions.length} companions`);
-    console.log('👤 Companions:', topCompanions.map(c => ({ 
-      name: c.name, 
+    console.log('👤 Top companions:', topCompanions.map(c => ({ 
+      name: c.name,
       city: c.city,
-      overlap: c.overlapCount,
-      hasBio: !!c.bio,
-      hasVibeWords: c.vibeWords.length > 0
+      shared: c.overlapCount
     })));
 
-    // 9. ✅ Return as 'companions' (NOT 'data' - for Android compatibility)
+    // 8. Return response
     res.status(200).json({
       success: true,
       count: topCompanions.length,
