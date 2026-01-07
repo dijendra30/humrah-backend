@@ -1,4 +1,4 @@
-// models/RandomBooking.js - Random Booking Model
+// models/RandomBooking.js - Random Booking Model (MONGOOSE WARNING FIXED)
 const mongoose = require('mongoose');
 
 const randomBookingSchema = new mongoose.Schema({
@@ -116,7 +116,7 @@ const randomBookingSchema = new mongoose.Schema({
   expiresAt: {
     type: Date,
     required: true,
-    index: true
+    // ✅ REMOVED index: true FROM HERE (line 171 already creates TTL index)
   },
   
   cancelledAt: {
@@ -167,7 +167,8 @@ const randomBookingSchema = new mongoose.Schema({
 // =============================================
 randomBookingSchema.index({ status: 1, city: 1, date: 1 });
 randomBookingSchema.index({ initiatorId: 1, createdAt: -1 });
-randomBookingSchema.index({ acceptedUserId: 1, matchedAt: -1 })
+randomBookingSchema.index({ acceptedUserId: 1, matchedAt: -1 });
+randomBookingSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 }); // ✅ TTL index (only declared once)
 
 // =============================================
 // PRE-SAVE VALIDATION
