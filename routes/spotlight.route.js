@@ -6,7 +6,7 @@ const spotlightController = require('../controllers/spotlight.controller');
 const User = require('../models/User');
 
 // GET /api/spotlight - Get spotlight companions
-router.get('/', auth, spotlightController.getSpotlightCompanions);
+router.get('/', auth, async (req, res) => {
   try {
     const currentUserId = req.userId;
     
