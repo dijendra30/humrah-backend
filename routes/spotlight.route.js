@@ -40,7 +40,7 @@ router.get('/', auth, async (req, res) => {
       $or: [
         { role: { $exists: false } }, // Users without role field
         { role: 'user' }, // Explicit user role
-        { role: { $nin: ['admin', 'superadmin', 'moderator'] } } // Exclude admins
+        { role: { $nin: ['SAFETY_ADMIN', 'SUPER_ADMIN', 'moderator'] } } // Exclude admins
       ]
     };
 
@@ -251,7 +251,7 @@ router.get('/debug', auth, async (req, res) => {
       _id: { $ne: currentUserId }
     });
     const admins = await User.countDocuments({ 
-      role: { $in: ['admin', 'superadmin', 'moderator'] }
+      role: { $in: ['SAFETY_ADMIN', 'SUPER_ADMIN', 'moderator'] }
     });
     const regularUsers = await User.countDocuments({
       _id: { $ne: currentUserId },
