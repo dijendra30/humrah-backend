@@ -1,4 +1,4 @@
-// models/WeeklyUsage.js - Track Weekly Random Booking Usage
+// models/WeeklyUsage.js - Track weekly random booking usage
 const mongoose = require('mongoose');
 
 const weeklyUsageSchema = new mongoose.Schema({
@@ -9,22 +9,34 @@ const weeklyUsageSchema = new mongoose.Schema({
     index: true
   },
   
-  // Week identifier (e.g., "2026-W01")
+  // ✅ ADD: Week identifier for unique constraint
   weekIdentifier: {
     type: String,
     required: true,
     index: true
+    // Format: "YYYY-WW" (e.g., "2026-02" for week 2 of 2026)
   },
   
-  // Usage tracking
-  randomBookingsCreated: {
+  // Week boundaries
+  weekStart: {
+    type: Date,
+    required: true,
+    index: true
+  },
+  
+  weekEnd: {
+    type: Date,
+    required: true
+  },
+  
+  // Random Booking Tracking
+  bookingsCreated: {
     type: Number,
     default: 0,
-    min: 0,
-    max: 1 // Strict limit
+    required: true
   },
   
-  // Abuse prevention
+  // Additional tracking
   cancellationCount: {
     type: Number,
     default: 0
@@ -36,27 +48,6 @@ const weeklyUsageSchema = new mongoose.Schema({
   },
   
   // Timestamps
-  firstBookingAt: {
-    type: Date,
-    default: null
-  },
-  
-  lastBookingAt: {
-    type: Date,
-    default: null
-  },
-  
-  // Week range
-  weekStart: {
-    type: Date,
-    required: true
-  },
-  
-  weekEnd: {
-    type: Date,
-    required: true
-  },
-  
   createdAt: {
     type: Date,
     default: Date.now
@@ -71,165 +62,131 @@ const weeklyUsageSchema = new mongoose.Schema({
 });
 
 // =============================================
-// COMPOUND INDEX (Unique per user per week)
+// INDEXES
 // =============================================
+// ✅ Unique constraint: one record per user per week
 weeklyUsageSchema.index({ userId: 1, weekIdentifier: 1 }, { unique: true });
+weeklyUsageSchema.index({ weekStart: 1 });
+
+// =============================================
+// PRE-SAVE HOOK
+// =============================================
+weeklyUsageSchema.pre('save', function(next) {
+  // ✅ Auto-generate weekIdentifier if not set
+  if (!this.weekIdentifier && this.weekStart) {
+    this.weekIdentifier = generateWeekIdentifier(this.weekStart);
+  }
+  
+  this.updatedAt = new Date();
+  next();
+});
 
 // =============================================
 // STATIC METHODS
 // =============================================
 
 /**
- * Get current week identifier
+ * Get or create usage for current week
  */
-weeklyUsageSchema.statics.getCurrentWeekIdentifier = function() {
-  const now = new Date();
-  const year = now.getFullYear();
-  const week = getWeekNumber(now);
-  return `${year}-W${String(week).padStart(2, '0')}`;
-};
-
-/**
- * Get week start and end dates
- */
-weeklyUsageSchema.statics.getWeekRange = function(date = new Date()) {
-  const d = new Date(date);
-  const day = d.getDay();
-  const diff = d.getDate() - day + (day === 0 ? -6 : 1); // Monday
+weeklyUsageSchema.statics.getOrCreateCurrentWeek = async function(userId) {
+  const { weekStart, weekEnd, weekIdentifier } = getCurrentWeek();
   
-  const weekStart = new Date(d.setDate(diff));
-  weekStart.setHours(0, 0, 0, 0);
+  let usage = await this.findOne({ userId, weekIdentifier });
   
-  const weekEnd = new Date(weekStart);
-  weekEnd.setDate(weekEnd.getDate() + 6);
-  weekEnd.setHours(23, 59, 59, 999);
-  
-  return { weekStart, weekEnd };
-};
-
-/**
- * Check if user can create random booking this week
- */
-weeklyUsageSchema.statics.canUserCreateBooking = async function(userId) {
-  const weekIdentifier = this.getCurrentWeekIdentifier();
-  
-  const usage = await this.findOne({ userId, weekIdentifier });
-  
-  // No usage record = can create
-  if (!usage) return { allowed: true, remaining: 1 };
-  
-  // Check if limit reached
-  if (usage.randomBookingsCreated >= 1) {
-    return { 
-      allowed: false, 
-      remaining: 0,
-      resetAt: usage.weekEnd
-    };
+  if (!usage) {
+    usage = await this.create({
+      userId,
+      weekIdentifier,
+      weekStart,
+      weekEnd,
+      bookingsCreated: 0,
+      cancellationCount: 0,
+      noShowCount: 0
+    });
   }
-  
-  return { 
-    allowed: true, 
-    remaining: 1 - usage.randomBookingsCreated 
-  };
-};
-
-/**
- * Record booking creation
- */
-weeklyUsageSchema.statics.recordBooking = async function(userId) {
-  const weekIdentifier = this.getCurrentWeekIdentifier();
-  const { weekStart, weekEnd } = this.getWeekRange();
-  
-  const usage = await this.findOneAndUpdate(
-    { userId, weekIdentifier },
-    {
-      $inc: { randomBookingsCreated: 1 },
-      $set: { 
-        lastBookingAt: new Date(),
-        weekStart,
-        weekEnd
-      },
-      $setOnInsert: { 
-        firstBookingAt: new Date(),
-        weekStart,
-        weekEnd
-      }
-    },
-    {
-      upsert: true,
-      new: true
-    }
-  );
   
   return usage;
 };
 
 /**
- * Record cancellation
- */
-weeklyUsageSchema.statics.recordCancellation = async function(userId) {
-  const weekIdentifier = this.getCurrentWeekIdentifier();
-  const { weekStart, weekEnd } = this.getWeekRange();
-  
-  return this.findOneAndUpdate(
-    { userId, weekIdentifier },
-    {
-      $inc: { cancellationCount: 1 },
-      $setOnInsert: { weekStart, weekEnd }
-    },
-    {
-      upsert: true,
-      new: true
-    }
-  );
-};
-
-/**
- * Record no-show
- */
-weeklyUsageSchema.statics.recordNoShow = async function(userId) {
-  const weekIdentifier = this.getCurrentWeekIdentifier();
-  const { weekStart, weekEnd } = this.getWeekRange();
-  
-  return this.findOneAndUpdate(
-    { userId, weekIdentifier },
-    {
-      $inc: { noShowCount: 1 },
-      $setOnInsert: { weekStart, weekEnd }
-    },
-    {
-      upsert: true,
-      new: true
-    }
-  );
-};
-
-/**
  * Get user's usage for current week
  */
-weeklyUsageSchema.statics.getUserUsage = function(userId) {
-  const weekIdentifier = this.getCurrentWeekIdentifier();
+weeklyUsageSchema.statics.getUserUsage = async function(userId) {
+  const { weekIdentifier } = getCurrentWeek();
   return this.findOne({ userId, weekIdentifier });
 };
 
 /**
- * Get usage statistics
+ * Check if user can create booking this week
+ */
+weeklyUsageSchema.statics.canUserCreateBooking = async function(userId) {
+  const { weekStart, weekEnd, weekIdentifier } = getCurrentWeek();
+  
+  const usage = await this.findOne({ userId, weekIdentifier });
+  
+  if (!usage) {
+    return {
+      allowed: true,
+      remaining: 1,
+      resetAt: weekEnd
+    };
+  }
+  
+  const remaining = Math.max(0, 1 - usage.bookingsCreated);
+  
+  return {
+    allowed: remaining > 0,
+    remaining,
+    resetAt: weekEnd
+  };
+};
+
+/**
+ * Record a cancellation
+ */
+weeklyUsageSchema.statics.recordCancellation = async function(userId) {
+  const { weekIdentifier } = getCurrentWeek();
+  
+  return this.findOneAndUpdate(
+    { userId, weekIdentifier },
+    { $inc: { cancellationCount: 1 } },
+    { new: true, upsert: true }
+  );
+};
+
+/**
+ * Record a no-show
+ */
+weeklyUsageSchema.statics.recordNoShow = async function(userId) {
+  const { weekIdentifier } = getCurrentWeek();
+  
+  return this.findOneAndUpdate(
+    { userId, weekIdentifier },
+    { $inc: { noShowCount: 1 } },
+    { new: true, upsert: true }
+  );
+};
+
+/**
+ * Get statistics for admin dashboard
  */
 weeklyUsageSchema.statics.getStatistics = async function() {
-  const weekIdentifier = this.getCurrentWeekIdentifier();
+  const { weekStart, weekEnd } = getCurrentWeek();
   
   const stats = await this.aggregate([
-    { $match: { weekIdentifier } },
+    {
+      $match: {
+        weekStart: { $gte: weekStart, $lte: weekEnd }
+      }
+    },
     {
       $group: {
         _id: null,
         totalUsers: { $sum: 1 },
-        totalBookings: { $sum: '$randomBookingsCreated' },
+        totalBookings: { $sum: '$bookingsCreated' },
         totalCancellations: { $sum: '$cancellationCount' },
         totalNoShows: { $sum: '$noShowCount' },
-        usersAtLimit: {
-          $sum: { $cond: [{ $gte: ['$randomBookingsCreated', 1] }, 1, 0] }
-        }
+        avgBookingsPerUser: { $avg: '$bookingsCreated' }
       }
     }
   ]);
@@ -239,13 +196,62 @@ weeklyUsageSchema.statics.getStatistics = async function() {
     totalBookings: 0,
     totalCancellations: 0,
     totalNoShows: 0,
-    usersAtLimit: 0
+    avgBookingsPerUser: 0
   };
 };
 
+/**
+ * Cleanup old usage records (older than 4 weeks)
+ */
+weeklyUsageSchema.statics.cleanupOldRecords = async function() {
+  const fourWeeksAgo = new Date();
+  fourWeeksAgo.setDate(fourWeeksAgo.getDate() - 28);
+  
+  const result = await this.deleteMany({
+    weekStart: { $lt: fourWeeksAgo }
+  });
+  
+  return result.deletedCount;
+};
+
 // =============================================
-// HELPER FUNCTION
+// HELPER FUNCTIONS
 // =============================================
+
+/**
+ * Get current week boundaries and identifier
+ */
+function getCurrentWeek() {
+  const now = new Date();
+  const dayOfWeek = now.getDay(); // 0 = Sunday
+  const diff = dayOfWeek === 0 ? 6 : dayOfWeek - 1; // Monday = 0
+  
+  const weekStart = new Date(now);
+  weekStart.setDate(now.getDate() - diff);
+  weekStart.setHours(0, 0, 0, 0);
+  
+  const weekEnd = new Date(weekStart);
+  weekEnd.setDate(weekStart.getDate() + 6);
+  weekEnd.setHours(23, 59, 59, 999);
+  
+  const weekIdentifier = generateWeekIdentifier(weekStart);
+  
+  return { weekStart, weekEnd, weekIdentifier };
+}
+
+/**
+ * Generate week identifier from date
+ * Format: "YYYY-WW" where WW is ISO week number
+ */
+function generateWeekIdentifier(date) {
+  const year = date.getFullYear();
+  const weekNumber = getWeekNumber(date);
+  return `${year}-${String(weekNumber).padStart(2, '0')}`;
+}
+
+/**
+ * Get ISO week number for a date
+ */
 function getWeekNumber(date) {
   const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
   const dayNum = d.getUTCDay() || 7;
