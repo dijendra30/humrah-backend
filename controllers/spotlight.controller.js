@@ -32,11 +32,13 @@ exports.getSpotlightCompanions = async (req, res) => {
     const userHangouts = currentUser.questionnaire?.hangoutPreferences || [];
 
     // 3. Build query - ✅ CRITICAL FIX: Only USER role
-    const query = {
-      _id: { $ne: currentUserId },
-      role: 'USER', // ✅ ONLY match USER role (excludes SAFETY_ADMIN, SUPER_ADMIN)
-      verified: true
-    };
+    const baseQuery = {
+  _id: { $ne: currentUserId },
+  role: 'USER',          // ✅ explicit allow-list
+  status: 'ACTIVE',
+  verified: true
+};
+
 
     console.log('🔎 Query:', JSON.stringify(query, null, 2));
 
