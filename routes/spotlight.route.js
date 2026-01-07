@@ -115,28 +115,44 @@ router.get('/', auth, async (req, res) => {
         console.log('âš ï¸ Error calculating shared hangouts:', error);
       }
 
-     return {
-  id: user._id.toString(),
-  name: `${user.firstName} ${user.lastName}`,
-  profilePhoto: user.profilePhoto || null,
-  
-  // ✅ ADD ALL MISSING FIELDS
-  bio: user.questionnaire?.bio || "New user exploring Humrah! Say hi 👋",
-  tagline: user.questionnaire?.tagline || "Ready to meet new people!",
-  sharedHangouts: sharedHangouts.length > 0 ? sharedHangouts : ["New User"],
-  overlapCount: sharedHangouts.length,
-  vibeWords: user.questionnaire?.vibeWords?.length > 0 
-    ? user.questionnaire.vibeWords 
-    : ["Friendly", "Open-minded"],
-  city: user.questionnaire?.city || "India",
-  state: user.questionnaire?.state || null,
-  availableTimes: user.questionnaire?.availableTimes || ["Weekends", "Evenings"],
-  languagePreference: user.questionnaire?.languagePreference || "English",
-  comfortZones: user.questionnaire?.comfortZones || ["Public places", "Cafes"],
-  becomeCompanion: user.questionnaire?.becomeCompanion || null,
-  price: user.questionnaire?.price || null,
-  photoVerificationStatus: user.photoVerificationStatus || 'not_submitted'
-};
+    return {
+        id: companion._id.toString(),
+        name: `${companion.firstName} ${companion.lastName}`.trim(),
+        profilePhoto: companion.profilePhoto || null,
+        
+        // ✅ FALLBACK DATA: Show something even if profile is incomplete
+        bio: companion.questionnaire?.bio || 
+             "New user exploring Humrah! Say hi and see what we have in common 👋",
+        
+        tagline: companion.questionnaire?.tagline || 
+                 "Ready to meet new people!",
+        
+        sharedHangouts: sharedHangouts.length > 0 
+          ? sharedHangouts 
+          : ["New User"],
+        
+        overlapCount,
+        
+        vibeWords: (companion.questionnaire?.vibeWords?.length || 0) > 0
+          ? companion.questionnaire.vibeWords
+          : ["Friendly", "Open-minded", "Curious"],
+        
+        city: companion.questionnaire?.city || "India",
+        state: companion.questionnaire?.state || null,
+        
+        availableTimes: companion.questionnaire?.availableTimes || 
+                       ["Weekends", "Evenings"],
+        
+        languagePreference: companion.questionnaire?.languagePreference || 
+                          "English",
+        
+        comfortZones: companion.questionnaire?.comfortZones || 
+                     ["Public places", "Cafes"],
+        
+        becomeCompanion: companion.questionnaire?.becomeCompanion || null,
+        price: companion.questionnaire?.price || null,
+        photoVerificationStatus: companion.photoVerificationStatus || 'not_submitted'
+      };
     });
 
     console.log('Returning', spotlightCompanions.length, 'companions');
