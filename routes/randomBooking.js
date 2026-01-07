@@ -394,34 +394,73 @@ router.get('/usage', auth, async (req, res) => {
 // Chat endpoints
 router.get('/chats', auth, async (req, res) => {
   try {
-    const chats = await RandomBookingChat.findForUser(req.userId);
+    const chats = await RandomBookingChat.find({
+      'participants.userId': req.userId,
+      isDeleted: false
+    })
+    .populate({
+      path: 'participants.userId',
+      select: 'firstName lastName profilePhoto'
+    })
+    .populate({
+      path: 'bookingId',
+      select: 'destination city date activityType'
+    })
+    .sort({ lastMessageAt: -1 });
+
     res.json({ success: true, chats });
   } catch (error) {
+    console.error('Get chats error:', error);
     res.status(500).json({ success: false, message: 'Failed to load chats' });
   }
 });
 
+// ✅ GET /chats/:chatId/messages - WITH POPULATED SENDER
 router.get('/chats/:chatId/messages', auth, async (req, res) => {
   try {
     const chat = await RandomBookingChat.findById(req.params.chatId);
-    if (!chat) return res.status(404).json({ success: false, message: 'Chat not found' });
-    if (!chat.isParticipant(req.userId)) return res.status(403).json({ success: false, message: 'Access denied' });
-    if (chat.isExpired()) return res.status(410).json({ success: false, message: 'Chat expired', expired: true });
+    
+    if (!chat) {
+      return res.status(404).json({ success: false, message: 'Chat not found' });
+    }
+    
+    if (!chat.isParticipant(req.userId)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    
     const messages = await Message.find({ chatId: req.params.chatId })
       .populate('senderId', 'firstName lastName profilePhoto')
       .sort({ timestamp: 1 });
-    res.json({ success: true, messages, expiresAt: chat.expiresAt });
+    
+    res.json({ 
+      success: true, 
+      messages, 
+      expiresAt: chat.expiresAt 
+    });
   } catch (error) {
+    console.error('Get messages error:', error);
     res.status(500).json({ success: false, message: 'Failed to load messages' });
   }
 });
 
+// ✅ POST /chats/:chatId/messages - WITH SOCKET.IO EMIT
 router.post('/chats/:chatId/messages', auth, async (req, res) => {
   try {
     const chat = await RandomBookingChat.findById(req.params.chatId);
-    if (!chat) return res.status(404).json({ success: false, message: 'Chat not found' });
-    if (!chat.isParticipant(req.userId)) return res.status(403).json({ success: false, message: 'Access denied' });
-    if (chat.isExpired()) return res.status(410).json({ success: false, message: 'Chat expired' });
+    
+    if (!chat) {
+      return res.status(404).json({ success: false, message: 'Chat not found' });
+    }
+    
+    if (!chat.isParticipant(req.userId)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    
+    if (chat.isExpired()) {
+      return res.status(410).json({ success: false, message: 'Chat expired' });
+    }
+    
+    // Create message
     const message = await Message.create({
       chatId: req.params.chatId,
       senderId: req.userId,
@@ -429,10 +468,40 @@ router.post('/chats/:chatId/messages', auth, async (req, res) => {
       content: req.body.content,
       messageType: 'TEXT'
     });
+    
+    // Populate sender details
+    await message.populate('senderId', 'firstName lastName profilePhoto');
+    
+    // Update chat lastMessageAt
     chat.lastMessageAt = new Date();
     await chat.save();
+    
+    // ✅ Emit Socket.IO event for real-time update
+    const io = req.app.get('io');
+    if (io) {
+      io.to(req.params.chatId).emit('new-message', {
+        _id: message._id,
+        chatId: message.chatId,
+        senderId: message.senderId._id,
+        senderIdRaw: {
+          _id: message.senderId._id,
+          firstName: message.senderId.firstName,
+          lastName: message.senderId.lastName,
+          profilePhoto: message.senderId.profilePhoto
+        },
+        senderRole: message.senderRole,
+        content: message.content,
+        messageType: message.messageType,
+        timestamp: message.timestamp,
+        isSystemMessage: message.isSystemMessage
+      });
+      
+      console.log(`📤 Emitted new message to chat ${req.params.chatId}`);
+    }
+    
     res.status(201).json({ success: true, message });
   } catch (error) {
+    console.error('Send message error:', error);
     res.status(500).json({ success: false, message: 'Failed to send message' });
   }
 });
