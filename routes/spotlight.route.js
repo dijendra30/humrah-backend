@@ -53,7 +53,7 @@ router.get('/', auth, async (req, res) => {
 
     // Try to find companions with base query
     companions = await User.find(baseQuery)
-      .select('firstName lastName profilePhoto bio preferences role')
+     .select('firstName lastName profilePhoto questionnaire photoVerificationStatus')
       .limit(10)
       .sort({ createdAt: -1 }); // Most recent users first
 
@@ -66,7 +66,7 @@ router.get('/', auth, async (req, res) => {
       delete baseQuery.city;
       
       companions = await User.find(baseQuery)
-        .select('firstName lastName profilePhoto bio preferences role')
+        .select('firstName lastName profilePhoto questionnaire photoVerificationStatus')
         .limit(10)
         .sort({ createdAt: -1 });
       
@@ -84,7 +84,7 @@ router.get('/', auth, async (req, res) => {
           { role: { $ne: 'admin' } }
         ]
       })
-      .select('firstName lastName profilePhoto bio preferences role')
+     .select('firstName lastName profilePhoto questionnaire photoVerificationStatus')
       .limit(10)
       .sort({ createdAt: -1 });
       
