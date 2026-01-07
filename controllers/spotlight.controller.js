@@ -43,9 +43,11 @@ exports.getSpotlightCompanions = async (req, res) => {
     // 4. Fetch companions
  const eligibleCompanions = await User.find({
   _id: { $ne: currentUserId },
-  role: 'USER', // ✅ ONLY USER ROLE - EXCLUDES ADMINS
-  verified: true
-   });
+  role: 'USER',            // 🚫 excludes SAFETY_ADMIN & SUPER_ADMIN
+  verified: true,          // optional but recommended
+  status: 'ACTIVE'
+});
+
     
     // 5. Log roles for debugging
      console.log('👥 Final companions:', eligibleCompanions.map(c => ({
