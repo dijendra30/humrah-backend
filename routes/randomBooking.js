@@ -1,4 +1,4 @@
-// routes/randomBooking.js - FIXED VERSION
+// routes/randomBooking.js - FINAL VERSION with WeeklyUsage fix
 const express = require('express');
 const router = express.Router();
 const RandomBooking = require('../models/RandomBooking');
@@ -19,10 +19,10 @@ router.post('/create', auth, async (req, res) => {
     const {
       destination,
       city,
-      date, // "yyyy-MM-dd" format from frontend
-      timeRange, // ✅ ACCEPT timeRange object { start, end }
+      date,
+      timeRange,
       preferredGender,
-      ageRange, // ✅ ACCEPT ageRange object { min, max }
+      ageRange,
       activityType,
       note
     } = req.body;
@@ -38,7 +38,7 @@ router.post('/create', auth, async (req, res) => {
       hasNote: !!note
     });
 
-    // ✅ FIXED VALIDATION: Check for nested objects
+    // Validation
     if (!destination || !city || !date || !timeRange || 
         !timeRange.start || !timeRange.end ||
         !preferredGender || !ageRange || 
@@ -49,20 +49,14 @@ router.post('/create', auth, async (req, res) => {
       });
     }
 
-    // Check weekly usage
-    const weekStart = getWeekStart();
-    const weekEnd = getWeekEnd();
+    // ✅ Check weekly usage using new method
+    const canCreate = await WeeklyUsage.canUserCreateBooking(req.userId);
     
-    const usage = await WeeklyUsage.findOne({
-      userId: req.userId,
-      weekStart,
-      weekEnd
-    });
-
-    if (usage && usage.bookingsCreated >= 1) {
+    if (!canCreate.allowed) {
       return res.status(403).json({
         success: false,
-        message: 'Weekly limit reached. You can create 1 random booking per week.'
+        message: 'Weekly limit reached. You can create 1 random booking per week.',
+        resetAt: canCreate.resetAt
       });
     }
 
@@ -89,14 +83,14 @@ router.post('/create', auth, async (req, res) => {
       destination,
       city: city.toLowerCase().trim(),
       date: bookingDate,
-      timeRange: { // ✅ Use nested object
-        start: timeRange.start, 
-        end: timeRange.end 
+      timeRange: {
+        start: timeRange.start,
+        end: timeRange.end
       },
       preferredGender,
-      ageRange: { // ✅ Use nested object
-        min: ageRange.min, 
-        max: ageRange.max 
+      ageRange: {
+        min: ageRange.min,
+        max: ageRange.max
       },
       activityType,
       note: note || null,
@@ -105,21 +99,18 @@ router.post('/create', auth, async (req, res) => {
     });
 
     await booking.save();
-
     console.log('✅ Booking created:', booking._id);
 
-    // Update or create weekly usage
-    if (usage) {
-      usage.bookingsCreated += 1;
-      await usage.save();
-    } else {
-      await WeeklyUsage.create({
-        userId: req.userId,
-        weekStart,
-        weekEnd,
-        bookingsCreated: 1
-      });
-    }
+    // ✅ Update weekly usage using new method
+    const usage = await WeeklyUsage.getOrCreateCurrentWeek(req.userId);
+    usage.bookingsCreated += 1;
+    await usage.save();
+
+    console.log('✅ Weekly usage updated:', {
+      userId: req.userId,
+      bookingsCreated: usage.bookingsCreated,
+      weekIdentifier: usage.weekIdentifier
+    });
 
     // Populate initiator details
     await booking.populate('initiatorId', 'firstName lastName profilePhoto bio');
@@ -137,28 +128,6 @@ router.post('/create', auth, async (req, res) => {
     });
   }
 });
-
-// ==================== HELPER FUNCTIONS ====================
-
-function getWeekStart() {
-  const now = new Date();
-  const dayOfWeek = now.getDay(); // 0 = Sunday
-  const diff = dayOfWeek === 0 ? 6 : dayOfWeek - 1; // Monday = 0
-  const weekStart = new Date(now);
-  weekStart.setDate(now.getDate() - diff);
-  weekStart.setHours(0, 0, 0, 0);
-  return weekStart;
-}
-
-function getWeekEnd() {
-  const weekStart = getWeekStart();
-  const weekEnd = new Date(weekStart);
-  weekEnd.setDate(weekStart.getDate() + 6);
-  weekEnd.setHours(23, 59, 59, 999);
-  return weekEnd;
-}
-
-// ==================== OTHER ROUTES (UNCHANGED) ====================
 
 /**
  * @route   GET /api/random-booking/eligible
@@ -194,7 +163,7 @@ router.get('/eligible', auth, async (req, res) => {
 
 /**
  * @route   POST /api/random-booking/:bookingId/accept
- * @desc    Accept random booking (first-come-first-served)
+ * @desc    Accept random booking
  * @access  Private
  */
 router.post('/:bookingId/accept', auth, async (req, res) => {
@@ -231,7 +200,7 @@ router.post('/:bookingId/accept', auth, async (req, res) => {
     booking.chatId = chat._id;
     await booking.save();
 
-    console.log(`✅ Booking Accepted: ${booking._id}`);
+    console.log(`✅ Booking accepted: ${booking._id}`);
 
     res.json({
       success: true,
@@ -274,7 +243,7 @@ router.get('/my-bookings', auth, async (req, res) => {
 
 /**
  * @route   POST /api/random-booking/:bookingId/cancel
- * @desc    Cancel random booking (initiator only)
+ * @desc    Cancel random booking
  * @access  Private
  */
 router.post('/:bookingId/cancel', auth, async (req, res) => {
@@ -339,12 +308,12 @@ router.get('/usage', auth, async (req, res) => {
     res.json({
       success: true,
       usage: usage || {
-        randomBookingsCreated: 0,
+        bookingsCreated: 0,
         cancellationCount: 0,
         noShowCount: 0
       },
       canCreateBooking: canCreate.allowed,
-      remaining: canCreate.remaining || 0,
+      remaining: canCreate.remaining,
       resetAt: canCreate.resetAt
     });
   } catch (error) {
@@ -353,14 +322,13 @@ router.get('/usage', auth, async (req, res) => {
   }
 });
 
-// ==================== CHAT ENDPOINTS ====================
+// ==================== CHAT ENDPOINTS (unchanged) ====================
 
 router.get('/chats', auth, async (req, res) => {
   try {
     const chats = await RandomBookingChat.findForUser(req.userId);
     res.json({ success: true, chats });
   } catch (error) {
-    console.error('Get chats error:', error);
     res.status(500).json({ success: false, message: 'Failed to load chats' });
   }
 });
@@ -370,15 +338,14 @@ router.get('/chats/:chatId/messages', auth, async (req, res) => {
     const chat = await RandomBookingChat.findById(req.params.chatId);
     if (!chat) return res.status(404).json({ success: false, message: 'Chat not found' });
     if (!chat.isParticipant(req.userId)) return res.status(403).json({ success: false, message: 'Access denied' });
-    if (chat.isExpired()) return res.status(410).json({ success: false, message: 'This chat has expired', expired: true });
+    if (chat.isExpired()) return res.status(410).json({ success: false, message: 'Chat expired', expired: true });
 
     const messages = await Message.find({ chatId: req.params.chatId })
       .populate('senderId', 'firstName lastName profilePhoto')
       .sort({ timestamp: 1 });
 
-    res.json({ success: true, messages, expiresAt: chat.expiresAt, isExpired: chat.isExpired() });
+    res.json({ success: true, messages, expiresAt: chat.expiresAt });
   } catch (error) {
-    console.error('Get messages error:', error);
     res.status(500).json({ success: false, message: 'Failed to load messages' });
   }
 });
@@ -388,7 +355,7 @@ router.post('/chats/:chatId/messages', auth, async (req, res) => {
     const chat = await RandomBookingChat.findById(req.params.chatId);
     if (!chat) return res.status(404).json({ success: false, message: 'Chat not found' });
     if (!chat.isParticipant(req.userId)) return res.status(403).json({ success: false, message: 'Access denied' });
-    if (chat.isExpired()) return res.status(410).json({ success: false, message: 'Cannot send message: chat has expired' });
+    if (chat.isExpired()) return res.status(410).json({ success: false, message: 'Chat expired' });
 
     const message = await Message.create({
       chatId: req.params.chatId,
@@ -403,7 +370,6 @@ router.post('/chats/:chatId/messages', auth, async (req, res) => {
 
     res.status(201).json({ success: true, message });
   } catch (error) {
-    console.error('Send message error:', error);
     res.status(500).json({ success: false, message: 'Failed to send message' });
   }
 });
@@ -412,7 +378,7 @@ router.post('/chats/:chatId/report', auth, async (req, res) => {
   try {
     const chat = await RandomBookingChat.findById(req.params.chatId).populate('bookingId');
     if (!chat) return res.status(404).json({ success: false, message: 'Chat not found' });
-    if (chat.isExpired()) return res.status(410).json({ success: false, message: 'Cannot report: chat has expired' });
+    if (chat.isExpired()) return res.status(410).json({ success: false, message: 'Cannot report expired chat' });
 
     const otherUser = chat.participants.find(p => p.userId.toString() !== req.userId.toString());
 
@@ -429,11 +395,10 @@ router.post('/chats/:chatId/report', auth, async (req, res) => {
 
     res.status(201).json({
       success: true,
-      message: 'Report submitted successfully. Chat will be preserved for review.',
+      message: 'Report submitted. Chat preserved for review.',
       reportId: report._id
     });
   } catch (error) {
-    console.error('Report error:', error);
     res.status(500).json({ success: false, message: 'Failed to submit report' });
   }
 });
