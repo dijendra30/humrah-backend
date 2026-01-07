@@ -49,9 +49,9 @@ exports.getSpotlightCompanions = async (req, res) => {
 
     // 5. Log roles for debugging
     console.log('👥 Final companions:', eligibleCompanions.map(c => ({
-      id: c._id,
+      id: { $ne: currentUserId } ,
       name: `${c.firstName} ${c.lastName}`,
-      role: c.role // This should log to verify
+      role: 'USER' // This should log to verify
     })));
 
     // 6. Calculate shared hangouts
