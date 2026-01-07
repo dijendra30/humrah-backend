@@ -1,4 +1,4 @@
-// routes/randomBooking.js - CORRECT CITY LOGIC (3 places only)
+// routes/randomBooking.js - WITH BROADCAST NOTIFICATION
 const express = require('express');
 const router = express.Router();
 const RandomBooking = require('../models/RandomBooking');
@@ -8,10 +8,12 @@ const User = require('../models/User');
 const Message = require('../models/Message');
 const SafetyReport = require('../models/SafetyReport');
 const { auth } = require('../middleware/auth');
+const { broadcastNewBooking, notifyBookingAccepted } = require('../utils/broadcastNotification');
 
 /**
- * ✅ A. CREATING random booking
- * Take city from req.user.questionnaire.city (SINGLE SOURCE OF TRUTH)
+ * @route   POST /api/random-booking/create
+ * @desc    Create random booking and broadcast to same city users
+ * @access  Private
  */
 router.post('/create', auth, async (req, res) => {
   try {
@@ -27,7 +29,7 @@ router.post('/create', auth, async (req, res) => {
 
     console.log('📥 Create booking request from user:', req.userId);
 
-    // ✅ Get user's city from profile (SINGLE SOURCE OF TRUTH)
+    // Get user and normalize city
     const user = await User.findById(req.userId);
     
     if (!user) {
@@ -37,11 +39,9 @@ router.post('/create', auth, async (req, res) => {
       });
     }
 
-    // ✅ Normalize city (lowercase, trimmed)
     const city = user.questionnaire?.city?.trim().toLowerCase();
     const area = user.questionnaire?.area?.trim().toLowerCase();
 
-    // ✅ If city missing → reject booking
     if (!city) {
       return res.status(400).json({
         success: false,
@@ -49,11 +49,7 @@ router.post('/create', auth, async (req, res) => {
       });
     }
 
-    console.log('📍 User location:', {
-      city,
-      area: area || '(not set)',
-      source: 'user.questionnaire'
-    });
+    console.log('📍 User location:', { city, area: area || '(not set)' });
 
     // Validation
     if (!destination || !date || !timeRange || 
@@ -66,7 +62,7 @@ router.post('/create', auth, async (req, res) => {
       });
     }
 
-    // ✅ Check weekly usage
+    // Check weekly usage
     const canCreate = await WeeklyUsage.canUserCreateBooking(req.userId);
     
     if (!canCreate.allowed) {
@@ -77,7 +73,7 @@ router.post('/create', auth, async (req, res) => {
       });
     }
 
-    // Parse and validate date
+    // Parse date
     const bookingDate = new Date(date);
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -94,12 +90,12 @@ router.post('/create', auth, async (req, res) => {
     const expiresAt = new Date();
     expiresAt.setHours(expiresAt.getHours() + 24);
 
-    // ✅ Create booking with city from user profile (NO user input)
+    // Create booking
     const booking = new RandomBooking({
       initiatorId: req.userId,
       destination,
-      city,  // ✅ From user.questionnaire.city (normalized)
-      area,  // ✅ From user.questionnaire.area (normalized)
+      city,
+      area,
       date: bookingDate,
       timeRange: {
         start: timeRange.start,
@@ -121,14 +117,23 @@ router.post('/create', auth, async (req, res) => {
     console.log('✅ Booking created:', {
       id: booking._id,
       city: booking.city,
-      area: booking.area,
-      destination: booking.destination
+      area: booking.area
     });
 
     // Update weekly usage
     const usage = await WeeklyUsage.getOrCreateCurrentWeek(req.userId);
     usage.bookingsCreated += 1;
     await usage.save();
+
+    // ✅ BROADCAST: Send notification to all users in same city
+    // Uses EXACT same logic as Spotlight controller
+    try {
+      const broadcastResult = await broadcastNewBooking(booking);
+      console.log('📢 Broadcast result:', broadcastResult);
+    } catch (broadcastError) {
+      // Don't fail booking creation if broadcast fails
+      console.error('⚠️ Broadcast error (non-fatal):', broadcastError);
+    }
 
     // Populate initiator details
     await booking.populate('initiatorId', 'firstName lastName profilePhoto bio');
@@ -149,9 +154,9 @@ router.post('/create', auth, async (req, res) => {
 });
 
 /**
- * ✅ B. BROADCASTING the booking (most important)
- * Send to ALL users in SAME CITY (not area)
- * No regex. No fuzzy match. Exact city match.
+ * @route   GET /api/random-booking/eligible
+ * @desc    Get eligible bookings for current user (SAME CITY ONLY)
+ * @access  Private
  */
 router.get('/eligible', auth, async (req, res) => {
   try {
@@ -164,7 +169,6 @@ router.get('/eligible', auth, async (req, res) => {
       });
     }
 
-    // ✅ Normalize user's city
     const userCity = user.questionnaire?.city?.trim().toLowerCase();
 
     if (!userCity) {
@@ -175,15 +179,11 @@ router.get('/eligible', auth, async (req, res) => {
       });
     }
 
-    console.log('🔍 Finding bookings for user:', {
-      userId: req.userId,
-      city: userCity,
-      area: user.questionnaire?.area || '(not set)'
-    });
+    console.log('🔍 Finding bookings for user:', { userId: req.userId, city: userCity });
 
-    // ✅ Simple query: SAME CITY only (not area)
+    // ✅ Simple query: SAME CITY only (exact match, normalized)
     const bookings = await RandomBooking.find({
-      city: userCity,  // ✅ Exact match, normalized
+      city: userCity,
       status: 'PENDING',
       expiresAt: { $gt: new Date() },
       date: { $gt: new Date() },
@@ -194,22 +194,16 @@ router.get('/eligible', auth, async (req, res) => {
 
     console.log(`📡 Found ${bookings.length} bookings in city: ${userCity}`);
 
-    // Filter by preferences (gender, age)
+    // Filter by preferences
     const eligibleBookings = bookings.filter(booking => {
-      // Gender check
       if (booking.preferredGender !== 'ANY') {
         const userGender = user.questionnaire?.gender?.toUpperCase();
-        if (userGender !== booking.preferredGender) {
-          return false;
-        }
+        if (userGender !== booking.preferredGender) return false;
       }
 
-      // Age check
       if (user.questionnaire?.dateOfBirth) {
         const age = calculateAge(user.questionnaire.dateOfBirth);
-        if (age < booking.ageRange.min || age > booking.ageRange.max) {
-          return false;
-        }
+        if (age < booking.ageRange.min || age > booking.ageRange.max) return false;
       }
 
       return true;
@@ -232,8 +226,9 @@ router.get('/eligible', auth, async (req, res) => {
 });
 
 /**
- * ✅ C. ACCEPTING booking
- * Validate city match (not area)
+ * @route   POST /api/random-booking/:bookingId/accept
+ * @desc    Accept booking and notify initiator
+ * @access  Private
  */
 router.post('/:bookingId/accept', auth, async (req, res) => {
   try {
@@ -257,17 +252,12 @@ router.post('/:bookingId/accept', auth, async (req, res) => {
 
     const user = await User.findById(req.userId);
     
-    // ✅ Validate city match (CRITICAL)
+    // Validate city match
     const userCity = user.questionnaire?.city?.trim().toLowerCase();
     const bookingCity = booking.city;
 
     if (userCity !== bookingCity) {
-      console.log('❌ City mismatch:', {
-        userCity,
-        bookingCity,
-        userId: req.userId
-      });
-      
+      console.log('❌ City mismatch:', { userCity, bookingCity });
       return res.status(403).json({
         success: false,
         message: 'You are not eligible for this booking'
@@ -302,11 +292,15 @@ router.post('/:bookingId/accept', auth, async (req, res) => {
     booking.chatId = chat._id;
     await booking.save();
 
-    console.log('✅ Booking accepted:', {
-      bookingId: booking._id,
-      acceptedBy: req.userId,
-      city: booking.city
-    });
+    console.log('✅ Booking accepted:', { bookingId: booking._id, acceptedBy: req.userId });
+
+    // ✅ NOTIFY: Send notification to booking initiator
+    try {
+      const notifyResult = await notifyBookingAccepted(booking, user);
+      console.log('📤 Notify result:', notifyResult);
+    } catch (notifyError) {
+      console.error('⚠️ Notify error (non-fatal):', notifyError);
+    }
 
     res.json({
       success: true,
@@ -332,9 +326,8 @@ router.post('/:bookingId/accept', auth, async (req, res) => {
   }
 });
 
-/**
- * Get user's booking history
- */
+// ==================== OTHER ENDPOINTS (unchanged) ====================
+
 router.get('/my-bookings', auth, async (req, res) => {
   try {
     const bookings = await RandomBooking.getUserHistory(req.userId);
@@ -345,24 +338,15 @@ router.get('/my-bookings', auth, async (req, res) => {
   }
 });
 
-/**
- * Cancel booking
- */
 router.post('/:bookingId/cancel', auth, async (req, res) => {
   try {
     const booking = await RandomBooking.findById(req.params.bookingId);
-
-    if (!booking) {
-      return res.status(404).json({ success: false, message: 'Booking not found' });
-    }
-
+    if (!booking) return res.status(404).json({ success: false, message: 'Booking not found' });
     if (booking.initiatorId.toString() !== req.userId.toString()) {
       return res.status(403).json({ success: false, message: 'Only initiator can cancel booking' });
     }
-
     await booking.cancel(req.body.reason || 'User cancelled');
     await WeeklyUsage.recordCancellation(req.userId);
-
     res.json({ success: true, message: 'Booking cancelled successfully' });
   } catch (error) {
     console.error('Cancel booking error:', error);
@@ -370,24 +354,15 @@ router.post('/:bookingId/cancel', auth, async (req, res) => {
   }
 });
 
-/**
- * Mark meetup completed
- */
 router.post('/:bookingId/complete', auth, async (req, res) => {
   try {
     const booking = await RandomBooking.findById(req.params.bookingId);
-
-    if (!booking) {
-      return res.status(404).json({ success: false, message: 'Booking not found' });
-    }
-
+    if (!booking) return res.status(404).json({ success: false, message: 'Booking not found' });
     await booking.completeMeetup(req.userId);
-
     if (booking.chatId) {
       const chat = await RandomBookingChat.findById(booking.chatId);
       if (chat) await chat.markCompleted();
     }
-
     res.json({ success: true, message: 'Meetup marked as completed. Chat will expire tonight.' });
   } catch (error) {
     console.error('Complete booking error:', error);
@@ -395,14 +370,10 @@ router.post('/:bookingId/complete', auth, async (req, res) => {
   }
 });
 
-/**
- * Check weekly usage
- */
 router.get('/usage', auth, async (req, res) => {
   try {
     const usage = await WeeklyUsage.getUserUsage(req.userId);
     const canCreate = await WeeklyUsage.canUserCreateBooking(req.userId);
-
     res.json({
       success: true,
       usage: usage || {
@@ -420,8 +391,7 @@ router.get('/usage', auth, async (req, res) => {
   }
 });
 
-// ==================== CHAT ENDPOINTS ====================
-
+// Chat endpoints
 router.get('/chats', auth, async (req, res) => {
   try {
     const chats = await RandomBookingChat.findForUser(req.userId);
@@ -437,11 +407,9 @@ router.get('/chats/:chatId/messages', auth, async (req, res) => {
     if (!chat) return res.status(404).json({ success: false, message: 'Chat not found' });
     if (!chat.isParticipant(req.userId)) return res.status(403).json({ success: false, message: 'Access denied' });
     if (chat.isExpired()) return res.status(410).json({ success: false, message: 'Chat expired', expired: true });
-
     const messages = await Message.find({ chatId: req.params.chatId })
       .populate('senderId', 'firstName lastName profilePhoto')
       .sort({ timestamp: 1 });
-
     res.json({ success: true, messages, expiresAt: chat.expiresAt });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Failed to load messages' });
@@ -454,7 +422,6 @@ router.post('/chats/:chatId/messages', auth, async (req, res) => {
     if (!chat) return res.status(404).json({ success: false, message: 'Chat not found' });
     if (!chat.isParticipant(req.userId)) return res.status(403).json({ success: false, message: 'Access denied' });
     if (chat.isExpired()) return res.status(410).json({ success: false, message: 'Chat expired' });
-
     const message = await Message.create({
       chatId: req.params.chatId,
       senderId: req.userId,
@@ -462,10 +429,8 @@ router.post('/chats/:chatId/messages', auth, async (req, res) => {
       content: req.body.content,
       messageType: 'TEXT'
     });
-
     chat.lastMessageAt = new Date();
     await chat.save();
-
     res.status(201).json({ success: true, message });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Failed to send message' });
@@ -477,9 +442,7 @@ router.post('/chats/:chatId/report', auth, async (req, res) => {
     const chat = await RandomBookingChat.findById(req.params.chatId).populate('bookingId');
     if (!chat) return res.status(404).json({ success: false, message: 'Chat not found' });
     if (chat.isExpired()) return res.status(410).json({ success: false, message: 'Cannot report expired chat' });
-
     const otherUser = chat.participants.find(p => p.userId.toString() !== req.userId.toString());
-
     const report = await SafetyReport.create({
       reporterId: req.userId,
       reportedUserId: otherUser.userId,
@@ -488,9 +451,7 @@ router.post('/chats/:chatId/report', auth, async (req, res) => {
       chatId: chat._id,
       bookingId: chat.bookingId._id
     });
-
     await chat.flagForReview(report._id);
-
     res.status(201).json({
       success: true,
       message: 'Report submitted. Chat preserved for review.',
@@ -501,19 +462,14 @@ router.post('/chats/:chatId/report', auth, async (req, res) => {
   }
 });
 
-// =============================================
-// HELPER FUNCTION
-// =============================================
 function calculateAge(dateOfBirth) {
   const dob = new Date(dateOfBirth);
   const today = new Date();
   let age = today.getFullYear() - dob.getFullYear();
   const monthDiff = today.getMonth() - dob.getMonth();
-  
   if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < dob.getDate())) {
     age--;
   }
-  
   return age;
 }
 
