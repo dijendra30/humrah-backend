@@ -341,6 +341,8 @@ const messageRoutes = require('./routes/messages');
 const postRoutes = require('./routes/posts');
 const spotlightRoutes = require('./routes/spotlight.route');
 const safetyReportRoutes = require('./routes/safetyReports');
+const { socketAuthMiddleware } = require('./utils/socketAuth');
+io.use(socketAuthMiddleware);
 
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
