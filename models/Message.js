@@ -1,5 +1,4 @@
-// models/Message.js - FIXED for RandomBookingChat compatibility
-
+// models/Message.js - WITH DELIVERY STATES (SENT → DELIVERED → READ)
 const mongoose = require('mongoose');
 
 const messageSchema = new mongoose.Schema({
@@ -41,20 +40,30 @@ const messageSchema = new mongoose.Schema({
     index: true
   },
   
-  isSystemMessage: {
-    type: Boolean,
-    default: false
-  },
-  
-  isRead: {
-    type: Boolean,
-    default: false,
+  // ✅ DELIVERY STATE (STRICT)
+  deliveryStatus: {
+    type: String,
+    enum: ['SENT', 'DELIVERED', 'READ'],
+    default: 'SENT',
+    required: true,
     index: true
   },
   
+  // ✅ Delivered timestamp
+  deliveredAt: {
+    type: Date,
+    default: null
+  },
+  
+  // ✅ Read timestamp
   readAt: {
     type: Date,
     default: null
+  },
+  
+  isSystemMessage: {
+    type: Boolean,
+    default: false
   },
   
   isDeleted: {
@@ -86,15 +95,15 @@ const messageSchema = new mongoose.Schema({
 // =============================================
 messageSchema.index({ chatId: 1, timestamp: -1 });
 messageSchema.index({ senderId: 1, timestamp: -1 });
-messageSchema.index({ chatId: 1, isRead: 1 });
+messageSchema.index({ chatId: 1, deliveryStatus: 1 });
 
 // =============================================
-// POST-SAVE HOOKS (FIXED)
+// POST-SAVE HOOKS
 // =============================================
 
+// Update chat lastMessageAt
 messageSchema.post('save', async function(doc) {
   try {
-    // ✅ Try to find RandomBookingChat first
     const RandomBookingChat = mongoose.models.RandomBookingChat;
     
     if (RandomBookingChat) {
@@ -103,11 +112,10 @@ messageSchema.post('save', async function(doc) {
       if (randomChat) {
         randomChat.lastMessageAt = new Date();
         await randomChat.save();
-        return; // Exit early if found
+        return;
       }
     }
     
-    // ✅ If not RandomBookingChat, try regular Chat
     const Chat = mongoose.models.Chat;
     
     if (Chat) {
@@ -119,48 +127,7 @@ messageSchema.post('save', async function(doc) {
       }
     }
   } catch (error) {
-    // ✅ Don't throw error - just log it
     console.warn('Warning: Could not update chat lastMessageAt:', error.message);
-  }
-});
-
-// Increment unread count hook
-messageSchema.post('save', async function(doc) {
-  try {
-    // ✅ Skip for system messages
-    if (doc.isSystemMessage) return;
-    
-    // ✅ Try RandomBookingChat first
-    const RandomBookingChat = mongoose.models.RandomBookingChat;
-    
-    if (RandomBookingChat) {
-      const randomChat = await RandomBookingChat.findById(doc.chatId);
-      
-      if (randomChat) {
-        // RandomBookingChat doesn't have unread counts, skip
-        return;
-      }
-    }
-    
-    // ✅ Try regular Chat
-    const Chat = mongoose.models.Chat;
-    
-    if (Chat) {
-      const chat = await Chat.findById(doc.chatId);
-      
-      if (chat && chat.participants) {
-        // Increment unread count for participants who aren't the sender
-        for (const participant of chat.participants) {
-          if (participant.userId.toString() !== doc.senderId.toString()) {
-            participant.unreadCount = (participant.unreadCount || 0) + 1;
-          }
-        }
-        await chat.save();
-      }
-    }
-  } catch (error) {
-    // ✅ Don't throw error - just log it
-    console.warn('Warning: Could not increment unread counts:', error.message);
   }
 });
 
@@ -168,10 +135,25 @@ messageSchema.post('save', async function(doc) {
 // INSTANCE METHODS
 // =============================================
 
-messageSchema.methods.markAsRead = function() {
-  this.isRead = true;
-  this.readAt = new Date();
-  return this.save();
+messageSchema.methods.markDelivered = function() {
+  if (this.deliveryStatus === 'SENT') {
+    this.deliveryStatus = 'DELIVERED';
+    this.deliveredAt = new Date();
+    return this.save();
+  }
+  return Promise.resolve(this);
+};
+
+messageSchema.methods.markRead = function() {
+  if (this.deliveryStatus === 'DELIVERED' || this.deliveryStatus === 'SENT') {
+    this.deliveryStatus = 'READ';
+    this.readAt = new Date();
+    if (!this.deliveredAt) {
+      this.deliveredAt = new Date();
+    }
+    return this.save();
+  }
+  return Promise.resolve(this);
 };
 
 messageSchema.methods.softDelete = function() {
@@ -188,26 +170,40 @@ messageSchema.statics.getUnreadCount = function(chatId, userId) {
   return this.countDocuments({
     chatId,
     senderId: { $ne: userId },
-    isRead: false,
+    deliveryStatus: { $in: ['SENT', 'DELIVERED'] },
     isDeleted: false
   });
 };
 
-messageSchema.statics.markChatAsRead = async function(chatId, userId) {
-  await this.updateMany(
+messageSchema.statics.getPendingMessages = function(chatId, userId) {
+  return this.find({
+    chatId,
+    senderId: { $ne: userId },
+    deliveryStatus: 'SENT',
+    isDeleted: false
+  })
+  .populate('senderId', 'firstName lastName profilePhoto')
+  .sort({ timestamp: 1 });
+};
+
+messageSchema.statics.markChatRead = async function(chatId, userId) {
+  const result = await this.updateMany(
     {
       chatId,
       senderId: { $ne: userId },
-      isRead: false,
+      deliveryStatus: { $in: ['SENT', 'DELIVERED'] },
       isDeleted: false
     },
     {
       $set: {
-        isRead: true,
-        readAt: new Date()
+        deliveryStatus: 'READ',
+        readAt: new Date(),
+        deliveredAt: new Date()
       }
     }
   );
+  
+  return result.modifiedCount;
 };
 
 messageSchema.statics.getRecentMessages = function(chatId, limit = 50) {
@@ -215,19 +211,9 @@ messageSchema.statics.getRecentMessages = function(chatId, limit = 50) {
     chatId,
     isDeleted: false
   })
+  .populate('senderId', 'firstName lastName profilePhoto')
   .sort({ timestamp: -1 })
-  .limit(limit)
-  .populate('senderId', 'firstName lastName profilePhoto');
-};
-
-messageSchema.statics.deleteOldMessages = function(daysOld = 90) {
-  const cutoffDate = new Date();
-  cutoffDate.setDate(cutoffDate.getDate() - daysOld);
-  
-  return this.deleteMany({
-    timestamp: { $lt: cutoffDate },
-    isSystemMessage: false
-  });
+  .limit(limit);
 };
 
 module.exports = mongoose.model('Message', messageSchema);
