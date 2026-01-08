@@ -1,397 +1,180 @@
-// routes/randomBooking.js - WITH BROADCAST NOTIFICATION
+// routes/randomBooking.js - COMPLETE WITH SOCKET.IO + DELIVERY RECEIPTS
 const express = require('express');
 const router = express.Router();
-const RandomBooking = require('../models/RandomBooking');
-const WeeklyUsage = require('../models/WeeklyUsage');
-const RandomBookingChat = require('../models/RandomBookingChat');
-const User = require('../models/User');
-const Message = require('../models/Message');
-const SafetyReport = require('../models/SafetyReport');
 const { auth } = require('../middleware/auth');
-const { broadcastNewBooking, notifyBookingAccepted } = require('../utils/broadcastNotification');
+const RandomBooking = require('../models/RandomBooking');
+const RandomBookingChat = require('../models/RandomBookingChat');
+const Message = require('../models/Message');
+const User = require('../models/User');
+const WeeklyUsage = require('../models/WeeklyUsage');
 
-/**
- * @route   POST /api/random-booking/create
- * @desc    Create random booking and broadcast to same city users
- * @access  Private
- */
+// ==================== CREATE RANDOM BOOKING ====================
 router.post('/create', auth, async (req, res) => {
   try {
     const {
       destination,
+      city,
       date,
       timeRange,
       preferredGender,
       ageRange,
       activityType,
+      languagePreference,
       note
     } = req.body;
 
-    console.log('📥 Create booking request from user:', req.userId);
-
-    // Get user and normalize city
-    const user = await User.findById(req.userId);
-    
-    if (!user) {
-      return res.status(404).json({
+    // Check weekly limit
+    const usage = await WeeklyUsage.getOrCreateCurrentWeek(req.userId);
+    if (usage.bookingsCreated >= 1) {
+      return res.status(429).json({
         success: false,
-        message: 'User not found'
+        message: 'You can only create 1 booking per week',
+        resetAt: usage.weekEnd
       });
     }
 
-    const city = user.questionnaire?.city?.trim().toLowerCase();
-    const area = user.questionnaire?.area?.trim().toLowerCase();
-
-    if (!city) {
-      return res.status(400).json({
-        success: false,
-        message: 'Please set your city in profile settings to create random bookings.'
-      });
-    }
-
-    console.log('📍 User location:', { city, area: area || '(not set)' });
-
-    // Validation
-    if (!destination || !date || !timeRange || 
-        !timeRange.start || !timeRange.end ||
-        !preferredGender || !ageRange || 
-        !ageRange.min || !ageRange.max || !activityType) {
-      return res.status(400).json({
-        success: false,
-        message: 'All required fields must be provided'
-      });
-    }
-
-    // Check weekly usage
-    const canCreate = await WeeklyUsage.canUserCreateBooking(req.userId);
-    
-    if (!canCreate.allowed) {
-      return res.status(403).json({
-        success: false,
-        message: 'Weekly limit reached. You can create 1 random booking per week.',
-        resetAt: canCreate.resetAt
-      });
-    }
-
-    // Parse date
-    const bookingDate = new Date(date);
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    bookingDate.setHours(0, 0, 0, 0);
-
-    if (bookingDate < today) {
-      return res.status(400).json({
-        success: false,
-        message: 'Booking date cannot be in the past'
-      });
-    }
-
-    // Calculate expiresAt (24 hours from now)
-    const expiresAt = new Date();
-    expiresAt.setHours(expiresAt.getHours() + 24);
+    // Get user's city and area from profile
+    const user = await User.findById(req.userId).select('questionnaire');
+    const userCity = user.questionnaire?.city;
+    const userArea = user.questionnaire?.area;
 
     // Create booking
-    const booking = new RandomBooking({
+    const booking = await RandomBooking.create({
       initiatorId: req.userId,
       destination,
-      city,
-      area,
-      date: bookingDate,
-      timeRange: {
-        start: timeRange.start,
-        end: timeRange.end
-      },
+      city: userCity || city,
+      area: userArea,
+      date,
+      timeRange,
       preferredGender,
-      ageRange: {
-        min: ageRange.min,
-        max: ageRange.max
-      },
+      ageRange,
       activityType,
-      note: note || null,
-      expiresAt,
+      languagePreference,
+      note,
       status: 'PENDING'
     });
 
-    await booking.save();
-    
-    console.log('✅ Booking created:', {
-      id: booking._id,
-      city: booking.city,
-      area: booking.area
-    });
-
-    // Update weekly usage
-    const usage = await WeeklyUsage.getOrCreateCurrentWeek(req.userId);
-    usage.bookingsCreated += 1;
+    // Increment usage
+    usage.bookingsCreated++;
     await usage.save();
 
-    // ✅ BROADCAST: Send notification to all users in same city
-    // Uses EXACT same logic as Spotlight controller
-    try {
-      const broadcastResult = await broadcastNewBooking(booking);
-      console.log('📢 Broadcast result:', broadcastResult);
-    } catch (broadcastError) {
-      // Don't fail booking creation if broadcast fails
-      console.error('⚠️ Broadcast error (non-fatal):', broadcastError);
-    }
-
-    // Populate initiator details
-    await booking.populate('initiatorId', 'firstName lastName profilePhoto bio');
+    // Broadcast notification to eligible users
+    const { broadcastNewBooking } = require('../utils/broadcastNotification');
+    await broadcastNewBooking(booking);
 
     res.status(201).json({
       success: true,
-      message: 'Random booking created successfully',
+      message: 'Booking created successfully',
       booking
     });
-
   } catch (error) {
-    console.error('❌ Create booking error:', error);
+    console.error('Create booking error:', error);
     res.status(500).json({
       success: false,
-      message: error.message || 'Failed to create random booking'
+      message: error.message || 'Failed to create booking'
     });
   }
 });
 
-/**
- * @route   GET /api/random-booking/eligible
- * @desc    Get eligible bookings for current user (SAME CITY ONLY)
- * @access  Private
- */
+// ==================== GET ELIGIBLE BOOKINGS ====================
 router.get('/eligible', auth, async (req, res) => {
   try {
-    const user = await User.findById(req.userId);
-    
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
-    }
-
-    const userCity = user.questionnaire?.city?.trim().toLowerCase();
+    const user = await User.findById(req.userId).select('questionnaire');
+    const userCity = user.questionnaire?.city;
+    const userGender = user.questionnaire?.gender;
+    const userAge = calculateAge(user.questionnaire?.dateOfBirth);
 
     if (!userCity) {
-      return res.json({
-        success: true,
-        bookings: [],
-        message: 'Please set your city in profile to see bookings'
-      });
+      return res.json({ success: true, bookings: [] });
     }
 
-    console.log('🔍 Finding bookings for user:', { userId: req.userId, city: userCity });
-
-    // ✅ Simple query: SAME CITY only (exact match, normalized)
     const bookings = await RandomBooking.find({
-      city: userCity,
+      initiatorId: { $ne: req.userId },
       status: 'PENDING',
-      expiresAt: { $gt: new Date() },
-      date: { $gt: new Date() },
-      initiatorId: { $ne: user._id }
+      city: userCity.toLowerCase(),
+      date: { $gte: new Date() },
+      expiresAt: { $gt: new Date() }
     })
     .populate('initiatorId', 'firstName lastName profilePhoto questionnaire')
-    .sort({ createdAt: -1 });
+    .sort({ createdAt: -1 })
+    .limit(20);
 
-    console.log(`📡 Found ${bookings.length} bookings in city: ${userCity}`);
-
-    // Filter by preferences
-    const eligibleBookings = bookings.filter(booking => {
-      if (booking.preferredGender !== 'ANY') {
-        const userGender = user.questionnaire?.gender?.toUpperCase();
-        if (userGender !== booking.preferredGender) return false;
-      }
-
-      if (user.questionnaire?.dateOfBirth) {
-        const age = calculateAge(user.questionnaire.dateOfBirth);
-        if (age < booking.ageRange.min || age > booking.ageRange.max) return false;
-      }
-
-      return true;
+    // Filter by gender and age preferences
+    const eligible = bookings.filter(booking => {
+      const genderMatch = booking.preferredGender === 'ANY' || 
+                          booking.preferredGender === userGender;
+      const ageMatch = userAge >= booking.ageRange.min && 
+                       userAge <= booking.ageRange.max;
+      return genderMatch && ageMatch;
     });
 
-    console.log(`✅ ${eligibleBookings.length} bookings match user preferences`);
-
-    res.json({
-      success: true,
-      bookings: eligibleBookings
-    });
-
+    res.json({ success: true, bookings: eligible });
   } catch (error) {
-    console.error('❌ Get eligible bookings error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to load eligible bookings'
-    });
+    console.error('Get eligible bookings error:', error);
+    res.status(500).json({ success: false, message: 'Failed to load bookings' });
   }
 });
 
-/**
- * @route   POST /api/random-booking/:bookingId/accept
- * @desc    Accept booking and notify initiator
- * @access  Private
- */
+// ==================== ACCEPT BOOKING ====================
 router.post('/:bookingId/accept', auth, async (req, res) => {
   try {
     const booking = await RandomBooking.findById(req.params.bookingId)
-      .populate('initiatorId', 'firstName lastName profilePhoto email questionnaire');
+      .populate('initiatorId', 'firstName lastName profilePhoto');
 
     if (!booking) {
-      return res.status(404).json({
-        success: false,
-        message: 'Booking not found'
-      });
+      return res.status(404).json({ success: false, message: 'Booking not found' });
     }
 
-    if (!booking.isValid()) {
-      return res.status(400).json({
-        success: false,
-        message: 'This booking is no longer available',
-        status: booking.status
-      });
+    if (booking.status !== 'PENDING') {
+      return res.status(400).json({ success: false, message: 'Booking no longer available' });
     }
 
-    const user = await User.findById(req.userId);
-    
-    // Validate city match
-    const userCity = user.questionnaire?.city?.trim().toLowerCase();
-    const bookingCity = booking.city;
-
-    if (userCity !== bookingCity) {
-      console.log('❌ City mismatch:', { userCity, bookingCity });
-      return res.status(403).json({
-        success: false,
-        message: 'You are not eligible for this booking'
-      });
+    if (booking.initiatorId._id.toString() === req.userId) {
+      return res.status(400).json({ success: false, message: 'Cannot accept your own booking' });
     }
 
-    // Additional preference checks
-    if (booking.preferredGender !== 'ANY') {
-      const userGender = user.questionnaire?.gender?.toUpperCase();
-      if (userGender !== booking.preferredGender) {
-        return res.status(403).json({
-          success: false,
-          message: 'You do not match the booking preferences'
-        });
-      }
-    }
+    // Update booking
+    booking.status = 'MATCHED';
+    booking.acceptedUserId = req.userId;
+    booking.matchedAt = new Date();
+    await booking.save();
 
-    if (user.questionnaire?.dateOfBirth) {
-      const age = calculateAge(user.questionnaire.dateOfBirth);
-      if (age < booking.ageRange.min || age > booking.ageRange.max) {
-        return res.status(403).json({
-          success: false,
-          message: 'You do not match the booking age range'
-        });
-      }
-    }
-
-    // Accept booking
-    await booking.acceptBooking(req.userId);
+    // Create chat
     const chat = await RandomBookingChat.createForBooking(booking);
 
+    // Update booking with chatId
     booking.chatId = chat._id;
     await booking.save();
 
-    console.log('✅ Booking accepted:', { bookingId: booking._id, acceptedBy: req.userId });
-
-    // ✅ NOTIFY: Send notification to booking initiator
-    try {
-      const notifyResult = await notifyBookingAccepted(booking, user);
-      console.log('📤 Notify result:', notifyResult);
-    } catch (notifyError) {
-      console.error('⚠️ Notify error (non-fatal):', notifyError);
-    }
+    // Notify initiator
+    const { notifyBookingAccepted } = require('../utils/broadcastNotification');
+    const acceptedUser = await User.findById(req.userId).select('firstName lastName profilePhoto');
+    await notifyBookingAccepted(booking, acceptedUser);
 
     res.json({
       success: true,
-      message: 'Booking accepted successfully! Chat created.',
-      booking,
-      chatId: chat._id
+      message: 'Booking accepted successfully',
+      chatId: chat._id.toString(),
+      booking
     });
-
   } catch (error) {
-    console.error('❌ Accept booking error:', error);
-    
-    if (error.message === 'Booking is no longer available') {
-      return res.status(409).json({
-        success: false,
-        message: 'Someone else accepted this booking first'
-      });
-    }
-    
-    res.status(500).json({
-      success: false,
-      message: error.message || 'Failed to accept booking'
-    });
+    console.error('Accept booking error:', error);
+    res.status(500).json({ success: false, message: 'Failed to accept booking' });
   }
 });
 
-// ==================== OTHER ENDPOINTS (unchanged) ====================
-
+// ==================== GET MY BOOKINGS ====================
 router.get('/my-bookings', auth, async (req, res) => {
   try {
     const bookings = await RandomBooking.getUserHistory(req.userId);
     res.json({ success: true, bookings });
   } catch (error) {
-    console.error('Get bookings error:', error);
+    console.error('Get my bookings error:', error);
     res.status(500).json({ success: false, message: 'Failed to load bookings' });
   }
 });
 
-router.post('/:bookingId/cancel', auth, async (req, res) => {
-  try {
-    const booking = await RandomBooking.findById(req.params.bookingId);
-    if (!booking) return res.status(404).json({ success: false, message: 'Booking not found' });
-    if (booking.initiatorId.toString() !== req.userId.toString()) {
-      return res.status(403).json({ success: false, message: 'Only initiator can cancel booking' });
-    }
-    await booking.cancel(req.body.reason || 'User cancelled');
-    await WeeklyUsage.recordCancellation(req.userId);
-    res.json({ success: true, message: 'Booking cancelled successfully' });
-  } catch (error) {
-    console.error('Cancel booking error:', error);
-    res.status(500).json({ success: false, message: error.message || 'Failed to cancel booking' });
-  }
-});
-
-router.post('/:bookingId/complete', auth, async (req, res) => {
-  try {
-    const booking = await RandomBooking.findById(req.params.bookingId);
-    if (!booking) return res.status(404).json({ success: false, message: 'Booking not found' });
-    await booking.completeMeetup(req.userId);
-    if (booking.chatId) {
-      const chat = await RandomBookingChat.findById(booking.chatId);
-      if (chat) await chat.markCompleted();
-    }
-    res.json({ success: true, message: 'Meetup marked as completed. Chat will expire tonight.' });
-  } catch (error) {
-    console.error('Complete booking error:', error);
-    res.status(500).json({ success: false, message: error.message || 'Failed to complete booking' });
-  }
-});
-
-router.get('/usage', auth, async (req, res) => {
-  try {
-    const usage = await WeeklyUsage.getUserUsage(req.userId);
-    const canCreate = await WeeklyUsage.canUserCreateBooking(req.userId);
-    res.json({
-      success: true,
-      usage: usage || {
-        bookingsCreated: 0,
-        cancellationCount: 0,
-        noShowCount: 0
-      },
-      canCreateBooking: canCreate.allowed,
-      remaining: canCreate.remaining,
-      resetAt: canCreate.resetAt
-    });
-  } catch (error) {
-    console.error('Get usage error:', error);
-    res.status(500).json({ success: false, message: 'Failed to load usage' });
-  }
-});
-
-// Chat endpoints
+// ==================== GET CHATS ====================
 router.get('/chats', auth, async (req, res) => {
   try {
     const chats = await RandomBookingChat.find({
@@ -415,7 +198,7 @@ router.get('/chats', auth, async (req, res) => {
   }
 });
 
-// ✅ GET /chats/:chatId/messages - WITH POPULATED SENDER
+// ==================== GET MESSAGES (WITH DELIVERY STATUS) ====================
 router.get('/chats/:chatId/messages', auth, async (req, res) => {
   try {
     const chat = await RandomBookingChat.findById(req.params.chatId);
@@ -428,14 +211,37 @@ router.get('/chats/:chatId/messages', auth, async (req, res) => {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
     
+    // ✅ Populate sender with profile photo
     const messages = await Message.find({ chatId: req.params.chatId })
       .populate('senderId', 'firstName lastName profilePhoto')
       .sort({ timestamp: 1 });
     
+    // ✅ Transform messages to include delivery status
+    const transformedMessages = messages.map(msg => ({
+      _id: msg._id.toString(),
+      chatId: msg.chatId.toString(),
+      senderId: msg.senderId._id.toString(),
+      senderIdRaw: {
+        _id: msg.senderId._id.toString(),
+        firstName: msg.senderId.firstName,
+        lastName: msg.senderId.lastName,
+        profilePhoto: msg.senderId.profilePhoto
+      },
+      senderRole: msg.senderRole,
+      content: msg.content,
+      messageType: msg.messageType,
+      timestamp: msg.timestamp.toISOString(),
+      isSystemMessage: msg.isSystemMessage || false,
+      deliveryStatus: msg.deliveryStatus || 'SENT',
+      deliveredAt: msg.deliveredAt?.toISOString() || null,
+      readAt: msg.readAt?.toISOString() || null
+    }));
+    
     res.json({ 
       success: true, 
-      messages, 
-      expiresAt: chat.expiresAt 
+      messages: transformedMessages, 
+      expiresAt: chat.expiresAt,
+      isExpired: chat.isExpired()
     });
   } catch (error) {
     console.error('Get messages error:', error);
@@ -443,7 +249,7 @@ router.get('/chats/:chatId/messages', auth, async (req, res) => {
   }
 });
 
-// ✅ POST /chats/:chatId/messages - WITH SOCKET.IO EMIT
+// ==================== SEND MESSAGE (WITH SOCKET.IO EMIT) ====================
 router.post('/chats/:chatId/messages', auth, async (req, res) => {
   try {
     const chat = await RandomBookingChat.findById(req.params.chatId);
@@ -460,31 +266,32 @@ router.post('/chats/:chatId/messages', auth, async (req, res) => {
       return res.status(410).json({ success: false, message: 'Chat expired' });
     }
     
-    // Create message
+    // Create message with SENT status
     const message = await Message.create({
       chatId: req.params.chatId,
       senderId: req.userId,
       senderRole: 'USER',
       content: req.body.content,
-      messageType: 'TEXT'
+      messageType: 'TEXT',
+      deliveryStatus: 'SENT' // ✅ Initial status
     });
     
-    // Populate sender details
+    // ✅ Populate sender details
     await message.populate('senderId', 'firstName lastName profilePhoto');
     
     // Update chat lastMessageAt
     chat.lastMessageAt = new Date();
     await chat.save();
     
-    // ✅ Emit Socket.IO event for real-time update
+    // ✅ Emit Socket.IO event for real-time delivery
     const io = req.app.get('io');
     if (io) {
-      io.to(req.params.chatId).emit('new-message', {
-        _id: message._id,
-        chatId: message.chatId,
-        senderId: message.senderId._id,
+      const messageData = {
+        _id: message._id.toString(),
+        chatId: message.chatId.toString(),
+        senderId: message.senderId._id.toString(),
         senderIdRaw: {
-          _id: message.senderId._id,
+          _id: message.senderId._id.toString(),
           firstName: message.senderId.firstName,
           lastName: message.senderId.lastName,
           profilePhoto: message.senderId.profilePhoto
@@ -492,51 +299,165 @@ router.post('/chats/:chatId/messages', auth, async (req, res) => {
         senderRole: message.senderRole,
         content: message.content,
         messageType: message.messageType,
-        timestamp: message.timestamp,
-        isSystemMessage: message.isSystemMessage
-      });
+        timestamp: message.timestamp.toISOString(),
+        isSystemMessage: message.isSystemMessage || false,
+        deliveryStatus: 'SENT'
+      };
+      
+      // Emit to chat room
+      io.to(req.params.chatId).emit('new-message', messageData);
       
       console.log(`📤 Emitted new message to chat ${req.params.chatId}`);
     }
     
-    res.status(201).json({ success: true, message });
+    // Return response
+    res.status(201).json({ 
+      success: true, 
+      message: {
+        _id: message._id.toString(),
+        chatId: message.chatId.toString(),
+        senderId: message.senderId._id.toString(),
+        senderIdRaw: {
+          _id: message.senderId._id.toString(),
+          firstName: message.senderId.firstName,
+          lastName: message.senderId.lastName,
+          profilePhoto: message.senderId.profilePhoto
+        },
+        content: message.content,
+        messageType: message.messageType,
+        timestamp: message.timestamp.toISOString(),
+        deliveryStatus: 'SENT'
+      }
+    });
   } catch (error) {
     console.error('Send message error:', error);
     res.status(500).json({ success: false, message: 'Failed to send message' });
   }
 });
 
+// ==================== REPORT USER ====================
 router.post('/chats/:chatId/report', auth, async (req, res) => {
   try {
-    const chat = await RandomBookingChat.findById(req.params.chatId).populate('bookingId');
-    if (!chat) return res.status(404).json({ success: false, message: 'Chat not found' });
-    if (chat.isExpired()) return res.status(410).json({ success: false, message: 'Cannot report expired chat' });
-    const otherUser = chat.participants.find(p => p.userId.toString() !== req.userId.toString());
+    const chat = await RandomBookingChat.findById(req.params.chatId);
+    
+    if (!chat) {
+      return res.status(404).json({ success: false, message: 'Chat not found' });
+    }
+    
+    if (!chat.isParticipant(req.userId)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    
+    if (chat.isDeleted) {
+      return res.status(410).json({
+        success: false,
+        message: 'This conversation has already expired and cannot be reported'
+      });
+    }
+
+    const { category, description } = req.body;
+
+    // Get the other user
+    const otherParticipant = chat.participants.find(p => 
+      p.userId.toString() !== req.userId
+    );
+
+    if (!otherParticipant) {
+      return res.status(400).json({ success: false, message: 'Other user not found' });
+    }
+
+    // Create safety report
+    const SafetyReport = require('../models/SafetyReport');
     const report = await SafetyReport.create({
       reporterId: req.userId,
-      reportedUserId: otherUser.userId,
-      category: req.body.category,
-      description: req.body.description,
-      chatId: chat._id,
-      bookingId: chat.bookingId._id
+      reportedUserId: otherParticipant.userId,
+      category,
+      description,
+      relatedBookingId: chat.bookingId,
+      priority: 'HIGH'
     });
+
+    // Flag chat for review
     await chat.flagForReview(report._id);
-    res.status(201).json({
+
+    res.json({
       success: true,
-      message: 'Report submitted. Chat preserved for review.',
+      message: 'Report submitted successfully',
       reportId: report._id
     });
   } catch (error) {
+    console.error('Report user error:', error);
     res.status(500).json({ success: false, message: 'Failed to submit report' });
   }
 });
 
+// ==================== CANCEL BOOKING ====================
+router.post('/:bookingId/cancel', auth, async (req, res) => {
+  try {
+    const booking = await RandomBooking.findById(req.params.bookingId);
+    
+    if (!booking) {
+      return res.status(404).json({ success: false, message: 'Booking not found' });
+    }
+    
+    if (booking.initiatorId.toString() !== req.userId) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    
+    await booking.cancel(req.body.reason || 'User cancelled');
+    
+    res.json({ success: true, message: 'Booking cancelled successfully' });
+  } catch (error) {
+    console.error('Cancel booking error:', error);
+    res.status(500).json({ success: false, message: 'Failed to cancel booking' });
+  }
+});
+
+// ==================== COMPLETE BOOKING ====================
+router.post('/:bookingId/complete', auth, async (req, res) => {
+  try {
+    const booking = await RandomBooking.findById(req.params.bookingId);
+    
+    if (!booking) {
+      return res.status(404).json({ success: false, message: 'Booking not found' });
+    }
+    
+    await booking.completeMeetup(req.userId);
+    
+    res.json({ success: true, message: 'Booking completed successfully' });
+  } catch (error) {
+    console.error('Complete booking error:', error);
+    res.status(500).json({ success: false, message: 'Failed to complete booking' });
+  }
+});
+
+// ==================== GET WEEKLY USAGE ====================
+router.get('/usage', auth, async (req, res) => {
+  try {
+    const result = await WeeklyUsage.canUserCreateBooking(req.userId);
+    const usage = await WeeklyUsage.getUserUsage(req.userId);
+    
+    res.json({
+      success: true,
+      usage: usage || { bookingsCreated: 0, cancellationCount: 0, noShowCount: 0 },
+      canCreateBooking: result.allowed,
+      remaining: result.remaining,
+      resetAt: result.resetAt.toISOString()
+    });
+  } catch (error) {
+    console.error('Get usage error:', error);
+    res.status(500).json({ success: false, message: 'Failed to load usage' });
+  }
+});
+
+// ==================== HELPER FUNCTIONS ====================
 function calculateAge(dateOfBirth) {
-  const dob = new Date(dateOfBirth);
+  if (!dateOfBirth) return 25; // Default
   const today = new Date();
-  let age = today.getFullYear() - dob.getFullYear();
-  const monthDiff = today.getMonth() - dob.getMonth();
-  if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < dob.getDate())) {
+  const birthDate = new Date(dateOfBirth);
+  let age = today.getFullYear() - birthDate.getFullYear();
+  const monthDiff = today.getMonth() - birthDate.getMonth();
+  if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
     age--;
   }
   return age;
