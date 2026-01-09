@@ -1,4 +1,4 @@
-// server.js - PRODUCTION-READY SOCKET.IO WITH DELIVERY RECEIPTS + PRESENCE + TYPING
+// server.js - FIXED SOCKET AUTHENTICATION (handles both query and auth methods)
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -35,32 +35,56 @@ app.set('io', io);
 // IN-MEMORY PRESENCE TRACKING
 // =============================================
 const userPresence = new Map();
-// userId -> { socketId, status: 'ONLINE'|'OFFLINE', lastSeen: Date }
-
 const chatUsers = new Map();
-// chatId -> Set of socketIds
 
 // =============================================
-// SOCKET AUTHENTICATION MIDDLEWARE
+// SOCKET AUTHENTICATION MIDDLEWARE (FIXED)
 // =============================================
 io.use((socket, next) => {
-  const token = socket.handshake.auth.token;
-  
-  if (!token) {
-    console.log('❌ Socket auth failed: No token');
-    return next(new Error('Authentication error: No token provided'));
-  }
-  
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'fallback_secret_change_in_production');
-    socket.userId = decoded.userId;
-    socket.userName = decoded.firstName + ' ' + (decoded.lastName || '');
+    // ✅ Try to get token from multiple sources
+    // 1. From auth object (socket.io-client 3.x+)
+    let token = socket.handshake.auth?.token;
     
-    console.log(`✅ Socket authenticated: ${socket.userId}`);
+    // 2. From query params (socket.io-client 2.x)
+    if (!token) {
+      token = socket.handshake.query?.token;
+    }
+    
+    // 3. From headers (fallback)
+    if (!token) {
+      token = socket.handshake.headers?.authorization?.replace('Bearer ', '');
+    }
+    
+    if (!token) {
+      console.log('❌ Socket auth failed: No token provided');
+      console.log('Handshake auth:', socket.handshake.auth);
+      console.log('Handshake query:', socket.handshake.query);
+      return next(new Error('Authentication error: No token provided'));
+    }
+    
+    const JWT_SECRET = process.env.JWT_SECRET || 'fallback_secret_change_in_production';
+    const decoded = jwt.verify(token, JWT_SECRET);
+    
+    socket.userId = decoded.userId;
+    socket.userName = `${decoded.firstName} ${decoded.lastName || ''}`.trim();
+    socket.userRole = decoded.role || 'USER';
+    
+    console.log(`✅ Socket authenticated: ${socket.userName} (${socket.userId})`);
     next();
+    
   } catch (err) {
-    console.log('❌ Socket auth failed: Invalid token');
-    return next(new Error('Authentication error: Invalid token'));
+    console.log('❌ Socket auth failed:', err.message);
+    
+    if (err.name === 'TokenExpiredError') {
+      return next(new Error('Authentication error: Token expired'));
+    }
+    
+    if (err.name === 'JsonWebTokenError') {
+      return next(new Error('Authentication error: Invalid token'));
+    }
+    
+    return next(new Error('Authentication error: ' + err.message));
   }
 });
 
@@ -128,7 +152,7 @@ io.on('connection', (socket) => {
         if (pending.length > 0) {
           console.log(`📬 Delivering ${pending.length} pending messages to ${userName}`);
           
-          pending.forEach(async (msg) => {
+          for (const msg of pending) {
             // Emit to user
             socket.emit('new-message', {
               _id: msg._id.toString(),
@@ -157,7 +181,7 @@ io.on('connection', (socket) => {
               deliveredTo: userId,
               deliveredAt: msg.deliveredAt.toISOString()
             });
-          });
+          }
         }
       }
       
@@ -310,7 +334,6 @@ function getUserLastSeen(userId) {
   return presence?.lastSeen || null;
 }
 
-// Make available globally
 global.isUserOnline = isUserOnline;
 global.getUserLastSeen = getUserLastSeen;
 
@@ -341,8 +364,6 @@ const messageRoutes = require('./routes/messages');
 const postRoutes = require('./routes/posts');
 const spotlightRoutes = require('./routes/spotlight.route');
 const safetyReportRoutes = require('./routes/safetyReports');
-const { socketAuthMiddleware } = require('./utils/socketAuth');
-io.use(socketAuthMiddleware);
 
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
@@ -388,7 +409,7 @@ server.listen(PORT, () => {
   console.log(`   - Delivery receipts (SENT → DELIVERED → READ)`);
   console.log(`   - Typing indicators`);
   console.log(`   - Presence tracking (online/offline)`);
-  console.log(`   - JWT authentication`);
+  console.log(`   - JWT authentication (query + auth)`);
 });
 
 // Graceful shutdown
