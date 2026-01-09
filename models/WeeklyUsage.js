@@ -1,27 +1,21 @@
-// models/WeeklyUsage.js - Track weekly random booking usage
+// models/WeeklyUsage.js - FIXED (No duplicate indexes)
 const mongoose = require('mongoose');
 
 const weeklyUsageSchema = new mongoose.Schema({
   userId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
-    required: true,
-    index: true
+    required: true
   },
   
-  // ✅ ADD: Week identifier for unique constraint
   weekIdentifier: {
     type: String,
-    required: true,
-    index: true
-    // Format: "YYYY-WW" (e.g., "2026-02" for week 2 of 2026)
+    required: true
   },
   
-  // Week boundaries
   weekStart: {
     type: Date,
-    required: true,
-    index: true
+    required: true
   },
   
   weekEnd: {
@@ -29,14 +23,12 @@ const weeklyUsageSchema = new mongoose.Schema({
     required: true
   },
   
-  // Random Booking Tracking
   bookingsCreated: {
     type: Number,
     default: 0,
     required: true
   },
   
-  // Additional tracking
   cancellationCount: {
     type: Number,
     default: 0
@@ -47,7 +39,6 @@ const weeklyUsageSchema = new mongoose.Schema({
     default: 0
   },
   
-  // Timestamps
   createdAt: {
     type: Date,
     default: Date.now
@@ -62,17 +53,15 @@ const weeklyUsageSchema = new mongoose.Schema({
 });
 
 // =============================================
-// INDEXES
+// INDEXES (NO DUPLICATES)
 // =============================================
-// ✅ Unique constraint: one record per user per week
 weeklyUsageSchema.index({ userId: 1, weekIdentifier: 1 }, { unique: true });
-weeklyUsageSchema.index({ weekStart: 1 });
+// ✅ Removed duplicate weekStart index (already in compound index above)
 
 // =============================================
 // PRE-SAVE HOOK
 // =============================================
 weeklyUsageSchema.pre('save', function(next) {
-  // ✅ Auto-generate weekIdentifier if not set
   if (!this.weekIdentifier && this.weekStart) {
     this.weekIdentifier = generateWeekIdentifier(this.weekStart);
   }
@@ -85,9 +74,6 @@ weeklyUsageSchema.pre('save', function(next) {
 // STATIC METHODS
 // =============================================
 
-/**
- * Get or create usage for current week
- */
 weeklyUsageSchema.statics.getOrCreateCurrentWeek = async function(userId) {
   const { weekStart, weekEnd, weekIdentifier } = getCurrentWeek();
   
@@ -108,17 +94,11 @@ weeklyUsageSchema.statics.getOrCreateCurrentWeek = async function(userId) {
   return usage;
 };
 
-/**
- * Get user's usage for current week
- */
 weeklyUsageSchema.statics.getUserUsage = async function(userId) {
   const { weekIdentifier } = getCurrentWeek();
   return this.findOne({ userId, weekIdentifier });
 };
 
-/**
- * Check if user can create booking this week
- */
 weeklyUsageSchema.statics.canUserCreateBooking = async function(userId) {
   const { weekStart, weekEnd, weekIdentifier } = getCurrentWeek();
   
@@ -141,9 +121,6 @@ weeklyUsageSchema.statics.canUserCreateBooking = async function(userId) {
   };
 };
 
-/**
- * Record a cancellation
- */
 weeklyUsageSchema.statics.recordCancellation = async function(userId) {
   const { weekIdentifier } = getCurrentWeek();
   
@@ -154,9 +131,6 @@ weeklyUsageSchema.statics.recordCancellation = async function(userId) {
   );
 };
 
-/**
- * Record a no-show
- */
 weeklyUsageSchema.statics.recordNoShow = async function(userId) {
   const { weekIdentifier } = getCurrentWeek();
   
@@ -167,9 +141,6 @@ weeklyUsageSchema.statics.recordNoShow = async function(userId) {
   );
 };
 
-/**
- * Get statistics for admin dashboard
- */
 weeklyUsageSchema.statics.getStatistics = async function() {
   const { weekStart, weekEnd } = getCurrentWeek();
   
@@ -200,9 +171,6 @@ weeklyUsageSchema.statics.getStatistics = async function() {
   };
 };
 
-/**
- * Cleanup old usage records (older than 4 weeks)
- */
 weeklyUsageSchema.statics.cleanupOldRecords = async function() {
   const fourWeeksAgo = new Date();
   fourWeeksAgo.setDate(fourWeeksAgo.getDate() - 28);
@@ -218,13 +186,10 @@ weeklyUsageSchema.statics.cleanupOldRecords = async function() {
 // HELPER FUNCTIONS
 // =============================================
 
-/**
- * Get current week boundaries and identifier
- */
 function getCurrentWeek() {
   const now = new Date();
-  const dayOfWeek = now.getDay(); // 0 = Sunday
-  const diff = dayOfWeek === 0 ? 6 : dayOfWeek - 1; // Monday = 0
+  const dayOfWeek = now.getDay();
+  const diff = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
   
   const weekStart = new Date(now);
   weekStart.setDate(now.getDate() - diff);
@@ -239,19 +204,12 @@ function getCurrentWeek() {
   return { weekStart, weekEnd, weekIdentifier };
 }
 
-/**
- * Generate week identifier from date
- * Format: "YYYY-WW" where WW is ISO week number
- */
 function generateWeekIdentifier(date) {
   const year = date.getFullYear();
   const weekNumber = getWeekNumber(date);
   return `${year}-${String(weekNumber).padStart(2, '0')}`;
 }
 
-/**
- * Get ISO week number for a date
- */
 function getWeekNumber(date) {
   const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
   const dayNum = d.getUTCDay() || 7;
