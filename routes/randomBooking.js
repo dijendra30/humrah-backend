@@ -1,4 +1,4 @@
-// routes/randomBooking.js - COMPLETE WITH SOCKET.IO + DELIVERY RECEIPTS
+// routes/randomBooking.js - FIXED WITH expiresAt
 const express = require('express');
 const router = express.Router();
 const { auth } = require('../middleware/auth');
@@ -38,20 +38,27 @@ router.post('/create', auth, async (req, res) => {
     const userCity = user.questionnaire?.city;
     const userArea = user.questionnaire?.area;
 
+    // ✅ Calculate expiresAt (24 hours after booking date)
+    const bookingDate = new Date(date);
+    const expiresAt = new Date(bookingDate);
+    expiresAt.setDate(bookingDate.getDate() + 1); // +24 hours
+    expiresAt.setHours(23, 59, 59, 999); // End of day
+
     // Create booking
     const booking = await RandomBooking.create({
       initiatorId: req.userId,
       destination,
       city: userCity || city,
       area: userArea,
-      date,
+      date: bookingDate,
       timeRange,
       preferredGender,
       ageRange,
       activityType,
       languagePreference,
       note,
-      status: 'PENDING'
+      status: 'PENDING',
+      expiresAt // ✅ FIXED: Add expiresAt
     });
 
     // Increment usage
