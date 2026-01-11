@@ -54,6 +54,55 @@ router.put('/me', authenticate, async (req, res) => {
     });
   }
 });
+// @route   POST /api/users/fcm-token
+// @desc    Register FCM token for push notifications
+// @access  Private
+router.post('/fcm-token', authenticate, async (req, res) => {
+  try {
+    const { fcmToken } = req.body;
+
+    if (!fcmToken) {
+      return res.status(400).json({
+        success: false,
+        message: 'FCM token is required'
+      });
+    }
+
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // ✅ Initialize fcmTokens array if it doesn't exist
+    if (!user.fcmTokens) {
+      user.fcmTokens = [];
+    }
+
+    // ✅ Add token if not already present (avoid duplicates)
+    if (!user.fcmTokens.includes(fcmToken)) {
+      user.fcmTokens.push(fcmToken);
+      await user.save();
+      console.log(`✅ FCM token saved for user: ${user._id}`);
+    } else {
+      console.log(`ℹ️ FCM token already exists for user: ${user._id}`);
+    }
+
+    res.json({
+      success: true,
+      message: 'FCM token registered successfully'
+    });
+
+  } catch (error) {
+    console.error('FCM token error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
 
 // @route   POST /api/users/upload-profile-photo
 // @desc    Upload profile photo from gallery/camera (multipart/form-data)
@@ -424,3 +473,4 @@ router.get('/admin/pending-verifications', authenticate, adminOnly, async (req, 
 });
 
 module.exports = router;
+
