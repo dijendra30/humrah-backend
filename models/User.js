@@ -184,6 +184,10 @@ const userSchema = new mongoose.Schema({
     bannedUntil: Date
   },
   
+  fcmTokens: {
+  type: [String],
+  default: []
+  },
   // Profile & Verification
   profilePhoto: { type: String, default: null },
   profilePhotoPublicId: { type: String, default: null },
@@ -473,4 +477,5 @@ userSchema.methods.toJSON = function () {
 };
 
 module.exports = mongoose.model('User', userSchema);
+
 
