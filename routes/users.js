@@ -1,15 +1,14 @@
-// routes/users.js - Fixed User Profile Routes with Correct Middleware
+// routes/users.js - Complete User Routes with FCM Support
 const express = require('express');
 const router = express.Router();
 
-// ✅ FIXED: Import with correct names from enhanced middleware
+// ✅ Import middleware
 const { authenticate, authorize, adminOnly, superAdminOnly, auditLog } = require('../middleware/auth');
 
 const User = require('../models/User');
 const { upload, uploadBuffer, uploadBase64, deleteImage } = require('../config/cloudinary');
 
-// For email notifications (if you have this function)
-// const { sendProfileVerificationEmail } = require('../config/email');
+// ==================== USER PROFILE ROUTES ====================
 
 // @route   PUT /api/users/me
 // @desc    Update user profile
@@ -54,6 +53,77 @@ router.put('/me', authenticate, async (req, res) => {
     });
   }
 });
+
+// @route   GET /api/users/:id
+// @desc    Get user by ID
+// @access  Private
+router.get('/:id', authenticate, async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id).select('-password');
+    
+    if (!user) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'User not found' 
+      });
+    }
+
+    res.json({
+      success: true,
+      user
+    });
+
+  } catch (error) {
+    console.error('Get user error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error' 
+    });
+  }
+});
+
+// @route   DELETE /api/users/me
+// @desc    Delete user account
+// @access  Private
+router.delete('/me', authenticate, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Delete profile photo if exists
+    if (user.profilePhotoPublicId) {
+      await deleteImage(user.profilePhotoPublicId);
+    }
+
+    // Delete verification photo if exists
+    if (user.verificationPhotoPublicId) {
+      await deleteImage(user.verificationPhotoPublicId);
+    }
+
+    await User.findByIdAndDelete(req.userId);
+
+    res.json({
+      success: true,
+      message: 'Account deleted successfully'
+    });
+
+  } catch (error) {
+    console.error('Delete account error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// ==================== FCM TOKEN MANAGEMENT ====================
+
 // @route   POST /api/users/fcm-token
 // @desc    Register FCM token for push notifications
 // @access  Private
@@ -81,13 +151,22 @@ router.post('/fcm-token', authenticate, async (req, res) => {
       user.fcmTokens = [];
     }
 
-    // ✅ Add token if not already present (avoid duplicates)
-    if (!user.fcmTokens.includes(fcmToken)) {
+    // ✅ Check if token already exists
+    const tokenExists = user.fcmTokens.includes(fcmToken);
+
+    if (!tokenExists) {
+      // Add token (keep max 5 tokens per user - for multiple devices)
       user.fcmTokens.push(fcmToken);
+
+      // Keep only last 5 tokens
+      if (user.fcmTokens.length > 5) {
+        user.fcmTokens = user.fcmTokens.slice(-5);
+      }
+
       await user.save();
-      console.log(`✅ FCM token saved for user: ${user._id}`);
+      console.log(`✅ FCM token registered for user ${user._id}`);
     } else {
-      console.log(`ℹ️ FCM token already exists for user: ${user._id}`);
+      console.log(`ℹ️ FCM token already registered for user ${user._id}`);
     }
 
     res.json({
@@ -96,13 +175,58 @@ router.post('/fcm-token', authenticate, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('FCM token error:', error);
+    console.error('❌ FCM token registration error:', error);
     res.status(500).json({
       success: false,
-      message: 'Server error'
+      message: 'Failed to register FCM token'
     });
   }
 });
+
+// @route   DELETE /api/users/fcm-token
+// @desc    Remove FCM token (for logout)
+// @access  Private
+router.delete('/fcm-token', authenticate, async (req, res) => {
+  try {
+    const { fcmToken } = req.body;
+
+    if (!fcmToken) {
+      return res.status(400).json({
+        success: false,
+        message: 'FCM token is required'
+      });
+    }
+
+    const user = await User.findById(req.userId);
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    if (user.fcmTokens) {
+      user.fcmTokens = user.fcmTokens.filter(token => token !== fcmToken);
+      await user.save();
+      console.log(`✅ FCM token removed for user ${user._id}`);
+    }
+
+    res.json({
+      success: true,
+      message: 'FCM token removed successfully'
+    });
+
+  } catch (error) {
+    console.error('❌ FCM token removal error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to remove FCM token'
+    });
+  }
+});
+
+// ==================== PHOTO UPLOAD ROUTES ====================
 
 // @route   POST /api/users/upload-profile-photo
 // @desc    Upload profile photo from gallery/camera (multipart/form-data)
@@ -306,6 +430,8 @@ router.post('/submit-verification-photo-base64', authenticate, async (req, res) 
   }
 });
 
+// ==================== QUESTIONNAIRE ROUTES ====================
+
 // @route   PUT /api/users/me/questionnaire
 // @desc    Merge & update questionnaire safely (multi-step onboarding)
 // @access  Private
@@ -351,34 +477,6 @@ router.put('/me/questionnaire', authenticate, async (req, res) => {
   }
 });
 
-// @route   GET /api/users/:id
-// @desc    Get user by ID
-// @access  Private
-router.get('/:id', authenticate, async (req, res) => {
-  try {
-    const user = await User.findById(req.params.id).select('-password');
-    
-    if (!user) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'User not found' 
-      });
-    }
-
-    res.json({
-      success: true,
-      user
-    });
-
-  } catch (error) {
-    console.error('Get user error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error' 
-    });
-  }
-});
-
 // ==================== ADMIN ROUTES ====================
 
 // @route   PUT /api/users/:userId/verify-photo
@@ -415,14 +513,6 @@ router.put(
       user.photoVerifiedBy = req.userId;
       user.verified = user.isFullyVerified();
       await user.save();
-
-      // Send notification email (if you have this function)
-      try {
-        // await sendProfileVerificationEmail(user.email, user.firstName, approved);
-        console.log(`Verification email would be sent to ${user.email}`);
-      } catch (emailError) {
-        console.error('Error sending verification email:', emailError);
-      }
 
       res.json({
         success: true,
@@ -473,4 +563,3 @@ router.get('/admin/pending-verifications', authenticate, adminOnly, async (req, 
 });
 
 module.exports = router;
-
