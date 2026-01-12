@@ -1,212 +1,312 @@
-// utils/broadcastNotification.js - SAME LOGIC AS SPOTLIGHT
+// backend/utils/broadcastNotification.js - Complete FCM Notification System
+
 const User = require('../models/User');
+const admin = require('../config/firebase'); // ✅ Import Firebase Admin
 
 /**
- * Broadcast notification to eligible users
- * Uses EXACT same logic as Spotlight (city filtering)
+ * Broadcast new random booking notification to eligible users in same city
  * 
- * @param {String} bookingCity - The city from booking.city
- * @param {String} initiatorId - The user who created booking (exclude them)
- * @param {Object} notificationData - Data to send in notification
+ * @param {Object} booking - The newly created booking
+ * @param {Object} creator - The user who created the booking
+ * @returns {Object} - Notification result with count sent
  */
-async function broadcastBookingNotification(bookingCity, initiatorId, notificationData) {
+async function broadcastNewBooking(booking, creator) {
   try {
-    console.log('📢 Broadcasting booking notification:', {
-      city: bookingCity,
-      initiatorId,
-      notification: notificationData.title
-    });
+    console.log(`📢 Broadcasting new booking notification...`);
+    console.log(`   Booking ID: ${booking._id}`);
+    console.log(`   City: ${booking.city}`);
+    console.log(`   Creator: ${creator.fullName}`);
 
-    // 1. ✅ CHECK: If no city, can't broadcast
-    if (!bookingCity) {
-      console.log('⚠️ No city provided, skipping broadcast');
-      return {
-        success: false,
-        notified: 0,
-        message: 'No city provided'
-      };
-    }
+    // ==================== STEP 1: FIND ELIGIBLE USERS ====================
+    
+    // Find users in the same city (exclude creator)
+    const eligibleUsers = await User.find({
+      _id: { $ne: creator._id }, // Exclude creator
+      'questionnaire.city': booking.city, // Same city
+      status: 'ACTIVE', // Active accounts only
+      fcmTokens: { $exists: true, $ne: [] } // Has FCM tokens
+    }).select('_id firstName lastName fcmTokens');
 
-    // 2. Fetch ALL users (we'll filter by city in JS - same as Spotlight)
-    const query = {
-      _id: { $ne: initiatorId },  // Exclude booking creator
-      role: 'USER'                 // Only users
-    };
-
-    console.log('🔎 Query:', JSON.stringify(query, null, 2));
-
-    const allUsers = await User.find(query)
-      .select('_id firstName lastName questionnaire fcmTokens')
-      .limit(500);  // Reasonable limit
-
-    console.log(`📊 Found ${allUsers.length} total users`);
-
-    // 3. ✅ FILTER: Only users in SAME CITY (case-insensitive)
-    // EXACT SAME LOGIC AS SPOTLIGHT
-    const sameCityUsers = allUsers.filter(user => {
-      const userCity = user.questionnaire?.city;
-      return userCity && 
-             userCity.toLowerCase().trim() === bookingCity.toLowerCase().trim();
-    });
-
-    console.log(`🏙️ Filtered to ${sameCityUsers.length} users in ${bookingCity}`);
-
-    // 4. ✅ CHECK: If no users in same city, nothing to broadcast
-    if (sameCityUsers.length === 0) {
-      console.log(`⚠️ No users found in ${bookingCity}`);
+    if (!eligibleUsers || eligibleUsers.length === 0) {
+      console.log(`⚠️  No eligible users found in ${booking.city}`);
       return {
         success: true,
-        notified: 0,
-        message: `No users in ${bookingCity} to notify`
+        sentCount: 0,
+        message: 'No eligible users in this city'
       };
     }
 
-    // 5. Collect FCM tokens (users who have the app installed)
-    const fcmTokens = [];
-    const notifiedUsers = [];
+    console.log(`✅ Found ${eligibleUsers.length} eligible users in ${booking.city}`);
 
-    sameCityUsers.forEach(user => {
-      if (user.fcmTokens && user.fcmTokens.length > 0) {
+    // ==================== STEP 2: COLLECT FCM TOKENS ====================
+    
+    const fcmTokens = [];
+    eligibleUsers.forEach(user => {
+      if (user.fcmTokens && Array.isArray(user.fcmTokens)) {
         fcmTokens.push(...user.fcmTokens);
-        notifiedUsers.push({
-          id: user._id,
-          name: `${user.firstName} ${user.lastName}`,
-          city: user.questionnaire?.city
-        });
       }
     });
 
-    console.log(`📱 Collected ${fcmTokens.length} FCM tokens from ${notifiedUsers.length} users`);
-
-    // 6. Send push notifications (if FCM is configured)
-    let sentCount = 0;
-    
-    if (fcmTokens.length > 0) {
-      try {
-        // TODO: Replace with your actual FCM implementation
-        // const admin = require('firebase-admin');
-        // const message = {
-        //   notification: {
-        //     title: notificationData.title,
-        //     body: notificationData.body,
-        //     imageUrl: notificationData.image
-        //   },
-        //   data: notificationData.data || {},
-        //   tokens: fcmTokens
-        // };
-        // const response = await admin.messaging().sendMulticast(message);
-        // sentCount = response.successCount;
-
-        // For now, just log (implement FCM later)
-        console.log('📤 Would send notifications to:', notifiedUsers.length, 'users');
-        console.log('📋 Notification data:', notificationData);
-        sentCount = notifiedUsers.length;
-
-      } catch (fcmError) {
-        console.error('❌ FCM send error:', fcmError);
-      }
+    if (fcmTokens.length === 0) {
+      console.log(`⚠️  No FCM tokens found for eligible users`);
+      return {
+        success: true,
+        sentCount: 0,
+        message: 'No FCM tokens available'
+      };
     }
 
-    // 7. Log results
-    console.log('✅ Broadcast complete:', {
-      totalUsers: allUsers.length,
-      sameCityUsers: sameCityUsers.length,
-      withFCM: notifiedUsers.length,
-      sentCount
-    });
+    console.log(`📱 Collected ${fcmTokens.length} FCM tokens`);
 
-    console.log('👥 Notified users:', notifiedUsers.map(u => ({ 
-      name: u.name,
-      city: u.city
-    })));
+    // ==================== STEP 3: PREPARE NOTIFICATION DATA ====================
+    
+    const notificationData = {
+      title: '🎲 New Random Hangout!',
+      body: `${creator.firstName} wants to hangout at ${booking.destination} in ${booking.city}`,
+      data: {
+        type: 'NEW_RANDOM_BOOKING',
+        bookingId: booking._id.toString(),
+        creatorId: creator._id.toString(),
+        city: booking.city,
+        destination: booking.destination,
+        activityType: booking.activityType,
+        date: booking.date,
+        timeRange: booking.timeRange
+      }
+    };
 
+    console.log(`📦 Notification data prepared:`);
+    console.log(`   Title: ${notificationData.title}`);
+    console.log(`   Body: ${notificationData.body}`);
+
+    // ==================== STEP 4: SEND FCM NOTIFICATION ====================
+    
+    let sentCount = 0;
+    
+    try {
+      // ✅ SEND MULTICAST MESSAGE TO ALL TOKENS
+      const message = {
+        notification: {
+          title: notificationData.title,
+          body: notificationData.body
+        },
+        data: notificationData.data,
+        tokens: fcmTokens,
+        // Optional: Configure Android/iOS specific settings
+        android: {
+          priority: 'high',
+          notification: {
+            channelId: 'humrah_notifications',
+            sound: 'default',
+            clickAction: 'OPEN_RANDOM_BOOKING'
+          }
+        },
+        apns: {
+          payload: {
+            aps: {
+              sound: 'default',
+              badge: 1
+            }
+          }
+        }
+      };
+
+      const response = await admin.messaging().sendEachForMulticast(message);
+      
+      sentCount = response.successCount;
+      
+      console.log(`✅ FCM Notification sent successfully`);
+      console.log(`   Success: ${response.successCount}/${fcmTokens.length}`);
+      console.log(`   Failed: ${response.failureCount}`);
+
+      // ✅ HANDLE FAILED TOKENS (remove invalid tokens from database)
+      if (response.failureCount > 0) {
+        console.log(`⚠️  Some notifications failed. Cleaning up invalid tokens...`);
+        
+        const failedTokens = [];
+        response.responses.forEach((resp, idx) => {
+          if (!resp.success) {
+            failedTokens.push(fcmTokens[idx]);
+            console.log(`   Failed: ${resp.error?.message || 'Unknown error'}`);
+          }
+        });
+
+        // Remove invalid tokens from users
+        if (failedTokens.length > 0) {
+          await User.updateMany(
+            { fcmTokens: { $in: failedTokens } },
+            { $pull: { fcmTokens: { $in: failedTokens } } }
+          );
+          console.log(`🧹 Cleaned up ${failedTokens.length} invalid tokens`);
+        }
+      }
+
+    } catch (fcmError) {
+      console.error('❌ FCM send error:', fcmError);
+      return {
+        success: false,
+        sentCount: 0,
+        error: fcmError.message
+      };
+    }
+
+    // ==================== STEP 5: RETURN RESULT ====================
+    
     return {
       success: true,
-      notified: sentCount,
-      eligibleUsers: sameCityUsers.length,
-      message: `Notified ${sentCount} users in ${bookingCity}`
+      sentCount,
+      totalUsers: eligibleUsers.length,
+      totalTokens: fcmTokens.length,
+      city: booking.city,
+      message: `Notification sent to ${sentCount} devices`
     };
 
   } catch (error) {
-    console.error('❌ Broadcast error:', error);
+    console.error('❌ Broadcast notification error:', error);
     return {
       success: false,
-      notified: 0,
       error: error.message
     };
   }
 }
 
 /**
- * Broadcast when new random booking is created
+ * Send booking accepted notification to creator
+ * 
+ * @param {Object} booking - The accepted booking
+ * @param {Object} acceptor - The user who accepted
+ * @param {String} chatId - The created chat ID
  */
-async function broadcastNewBooking(booking) {
-  const notificationData = {
-    title: '🎲 New Random Hangout!',
-    body: `Someone wants to hangout in ${booking.city}. Check it out!`,
-    image: null,
-    data: {
-      type: 'NEW_RANDOM_BOOKING',
-      bookingId: booking._id.toString(),
-      city: booking.city,
-      area: booking.area,
-      destination: booking.destination,
-      activityType: booking.activityType
-    }
-  };
-
-  return broadcastBookingNotification(
-    booking.city,
-    booking.initiatorId.toString(),
-    notificationData
-  );
-}
-
-/**
- * Broadcast when booking is accepted (notify initiator)
- */
-async function notifyBookingAccepted(booking, acceptedUser) {
+async function notifyBookingAccepted(booking, acceptor, chatId) {
   try {
-    const initiator = await User.findById(booking.initiatorId)
-      .select('fcmTokens firstName lastName');
+    console.log(`📢 Sending booking accepted notification...`);
 
-    if (!initiator || !initiator.fcmTokens || initiator.fcmTokens.length === 0) {
-      console.log('⚠️ Initiator has no FCM tokens');
-      return { success: false, notified: 0 };
+    // Get creator's FCM tokens
+    const creator = await User.findById(booking.createdBy).select('fcmTokens firstName');
+    
+    if (!creator || !creator.fcmTokens || creator.fcmTokens.length === 0) {
+      console.log(`⚠️  Creator has no FCM tokens`);
+      return { success: false, message: 'No FCM tokens' };
     }
 
     const notificationData = {
       title: '🎉 Booking Accepted!',
-      body: `${acceptedUser.firstName} accepted your booking! Start chatting now.`,
-      image: acceptedUser.profilePhoto || null,
+      body: `${acceptor.firstName} accepted your booking! Start chatting now.`,
       data: {
         type: 'BOOKING_ACCEPTED',
         bookingId: booking._id.toString(),
-        chatId: booking.chatId?.toString(),
-        acceptedUserId: acceptedUser._id.toString()
+        acceptedUserId: acceptor._id.toString(),
+        chatId: chatId
       }
     };
 
-    // TODO: Send FCM to initiator
-    console.log('📤 Would notify initiator:', {
-      initiatorId: initiator._id,
-      notification: notificationData
-    });
+    const message = {
+      notification: {
+        title: notificationData.title,
+        body: notificationData.body
+      },
+      data: notificationData.data,
+      tokens: creator.fcmTokens,
+      android: {
+        priority: 'high',
+        notification: {
+          channelId: 'humrah_notifications',
+          sound: 'default'
+        }
+      }
+    };
+
+    const response = await admin.messaging().sendEachForMulticast(message);
+
+    console.log(`✅ Booking accepted notification sent: ${response.successCount}/${creator.fcmTokens.length}`);
 
     return {
       success: true,
-      notified: 1,
-      message: 'Initiator notified'
+      sentCount: response.successCount
     };
 
   } catch (error) {
-    console.error('❌ Notify accepted error:', error);
-    return { success: false, notified: 0 };
+    console.error('❌ Notify booking accepted error:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+/**
+ * Send new chat message notification
+ * 
+ * @param {Object} chat - The chat
+ * @param {Object} message - The new message
+ * @param {Object} sender - The message sender
+ */
+async function notifyNewChatMessage(chat, message, sender) {
+  try {
+    console.log(`📢 Sending new message notification...`);
+
+    // Get recipient (the other participant)
+    const recipientId = chat.participants.find(p => p.toString() !== sender._id.toString());
+    
+    if (!recipientId) {
+      console.log(`⚠️  No recipient found`);
+      return { success: false };
+    }
+
+    const recipient = await User.findById(recipientId).select('fcmTokens firstName');
+    
+    if (!recipient || !recipient.fcmTokens || recipient.fcmTokens.length === 0) {
+      console.log(`⚠️  Recipient has no FCM tokens`);
+      return { success: false };
+    }
+
+    const notificationData = {
+      title: `💬 ${sender.firstName}`,
+      body: message.content.substring(0, 100), // Truncate long messages
+      data: {
+        type: 'NEW_MESSAGE',
+        chatId: chat._id.toString(),
+        senderId: sender._id.toString(),
+        messageId: message._id.toString()
+      }
+    };
+
+    const fcmMessage = {
+      notification: {
+        title: notificationData.title,
+        body: notificationData.body
+      },
+      data: notificationData.data,
+      tokens: recipient.fcmTokens,
+      android: {
+        priority: 'high',
+        notification: {
+          channelId: 'humrah_notifications',
+          sound: 'default'
+        }
+      }
+    };
+
+    const response = await admin.messaging().sendEachForMulticast(fcmMessage);
+
+    console.log(`✅ Message notification sent: ${response.successCount}/${recipient.fcmTokens.length}`);
+
+    return {
+      success: true,
+      sentCount: response.successCount
+    };
+
+  } catch (error) {
+    console.error('❌ Notify new message error:', error);
+    return {
+      success: false,
+      error: error.message
+    };
   }
 }
 
 module.exports = {
-  broadcastBookingNotification,
   broadcastNewBooking,
-  notifyBookingAccepted
+  notifyBookingAccepted,
+  notifyNewChatMessage
 };
