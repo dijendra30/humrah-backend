@@ -1,4 +1,4 @@
-// backend/utils/broadcastNotification.js - FIXED VERSION
+// backend/utils/broadcastNotification.js - FINAL FIX
 
 const User = require('../models/User');
 const admin = require('../config/firebase');
@@ -6,7 +6,7 @@ const admin = require('../config/firebase');
 /**
  * Broadcast new random booking notification to eligible users in same city
  * 
- * @param {Object} booking - The newly created booking (must be populated with createdBy)
+ * @param {Object} booking - The newly created booking
  * @returns {Object} - Notification result with count sent
  */
 async function broadcastNewBooking(booking) {
@@ -15,21 +15,27 @@ async function broadcastNewBooking(booking) {
     console.log(`   Booking ID: ${booking._id}`);
     console.log(`   City: ${booking.city}`);
 
-    // ✅ FIX: Fetch creator if not populated
+    // ✅ FIX: Use 'initiatorId' (not 'createdBy')
     let creator;
-    if (booking.createdBy && typeof booking.createdBy === 'object' && booking.createdBy.firstName) {
+    if (booking.initiatorId && typeof booking.initiatorId === 'object' && booking.initiatorId.firstName) {
       // Already populated
-      creator = booking.createdBy;
-    } else {
+      creator = booking.initiatorId;
+    } else if (booking.initiatorId) {
       // Need to fetch
-      creator = await User.findById(booking.createdBy).select('firstName lastName _id');
+      creator = await User.findById(booking.initiatorId).select('firstName lastName _id');
       if (!creator) {
-        console.log(`❌ Creator not found: ${booking.createdBy}`);
+        console.log(`❌ Creator not found: ${booking.initiatorId}`);
         return {
           success: false,
           message: 'Creator not found'
         };
       }
+    } else {
+      console.log(`❌ No initiatorId in booking`);
+      return {
+        success: false,
+        message: 'No initiatorId in booking'
+      };
     }
 
     console.log(`   Creator: ${creator.firstName} ${creator.lastName}`);
@@ -39,12 +45,16 @@ async function broadcastNewBooking(booking) {
     // Normalize city for comparison (lowercase, trim)
     const normalizedCity = booking.city.toLowerCase().trim();
     
+    console.log(`   Looking for users in city: "${normalizedCity}"`);
+    
     // Find users in the same city (exclude creator)
     const eligibleUsers = await User.find({
       _id: { $ne: creator._id }, // Exclude creator
       status: 'ACTIVE', // Active accounts only
       fcmTokens: { $exists: true, $ne: [] } // Has FCM tokens
     }).select('_id firstName lastName fcmTokens questionnaire.city');
+
+    console.log(`   Found ${eligibleUsers.length} total active users with FCM tokens`);
 
     // Filter by city (case-insensitive)
     const usersInCity = eligibleUsers.filter(user => {
@@ -54,6 +64,7 @@ async function broadcastNewBooking(booking) {
 
     if (!usersInCity || usersInCity.length === 0) {
       console.log(`⚠️  No eligible users found in ${booking.city}`);
+      console.log(`   Checked ${eligibleUsers.length} users, none matched city "${normalizedCity}"`);
       return {
         success: true,
         sentCount: 0,
@@ -81,7 +92,7 @@ async function broadcastNewBooking(booking) {
       };
     }
 
-    console.log(`📱 Collected ${fcmTokens.length} FCM tokens`);
+    console.log(`📱 Collected ${fcmTokens.length} FCM tokens from ${usersInCity.length} users`);
 
     // ==================== STEP 3: PREPARE NOTIFICATION DATA ====================
     
@@ -94,9 +105,9 @@ async function broadcastNewBooking(booking) {
         creatorId: creator._id.toString(),
         city: booking.city,
         destination: booking.destination,
-        activityType: booking.activityType || 'HANGOUT',
-        date: booking.date,
-        timeRange: booking.timeRange || 'ANYTIME'
+        activityType: booking.activityType || 'CASUAL',
+        date: booking.date.toISOString(),
+        timeRange: JSON.stringify(booking.timeRange)
       }
     };
 
@@ -145,13 +156,13 @@ async function broadcastNewBooking(booking) {
 
       // ✅ HANDLE FAILED TOKENS (remove invalid tokens from database)
       if (response.failureCount > 0) {
-        console.log(`⚠️  Some notifications failed. Cleaning up invalid tokens...`);
+        console.log(`⚠️  Some notifications failed. Details:`);
         
         const failedTokens = [];
         response.responses.forEach((resp, idx) => {
           if (!resp.success) {
             failedTokens.push(fcmTokens[idx]);
-            console.log(`   Failed: ${resp.error?.message || 'Unknown error'}`);
+            console.log(`   ❌ Token ${idx + 1}: ${resp.error?.code || 'Unknown'} - ${resp.error?.message || 'No message'}`);
           }
         });
 
@@ -167,6 +178,8 @@ async function broadcastNewBooking(booking) {
 
     } catch (fcmError) {
       console.error('❌ FCM send error:', fcmError);
+      console.error('   Error code:', fcmError.code);
+      console.error('   Error message:', fcmError.message);
       return {
         success: false,
         sentCount: 0,
@@ -175,6 +188,8 @@ async function broadcastNewBooking(booking) {
     }
 
     // ==================== STEP 5: RETURN RESULT ====================
+    
+    console.log(`✅ Broadcast completed: ${sentCount} notifications sent`);
     
     return {
       success: true,
@@ -187,6 +202,7 @@ async function broadcastNewBooking(booking) {
 
   } catch (error) {
     console.error('❌ Broadcast notification error:', error);
+    console.error('   Stack:', error.stack);
     return {
       success: false,
       error: error.message
@@ -197,20 +213,19 @@ async function broadcastNewBooking(booking) {
 /**
  * Send booking accepted notification to creator
  * 
- * @param {Object} booking - The accepted booking (must have createdBy populated or ID)
+ * @param {Object} booking - The accepted booking
  * @param {Object} acceptor - The user who accepted
- * @param {String} chatId - The created chat ID
  */
-async function notifyBookingAccepted(booking, acceptor, chatId) {
+async function notifyBookingAccepted(booking, acceptor) {
   try {
     console.log(`📢 Sending booking accepted notification...`);
 
-    // ✅ FIX: Handle both populated and non-populated booking.createdBy
+    // ✅ FIX: Use 'initiatorId' (not 'createdBy')
     let creatorId;
-    if (typeof booking.createdBy === 'object' && booking.createdBy._id) {
-      creatorId = booking.createdBy._id;
+    if (typeof booking.initiatorId === 'object' && booking.initiatorId._id) {
+      creatorId = booking.initiatorId._id;
     } else {
-      creatorId = booking.createdBy;
+      creatorId = booking.initiatorId;
     }
 
     // Get creator's FCM tokens
@@ -228,7 +243,7 @@ async function notifyBookingAccepted(booking, acceptor, chatId) {
         type: 'BOOKING_ACCEPTED',
         bookingId: booking._id.toString(),
         acceptedUserId: acceptor._id.toString(),
-        chatId: chatId.toString()
+        chatId: booking.chatId ? booking.chatId.toString() : ''
       }
     };
 
