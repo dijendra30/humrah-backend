@@ -1,66 +1,55 @@
-// backend/config/firebase.js - Firebase Admin SDK Configuration
+// backend/config/firebase.js - Environment Variables ONLY
 
 const admin = require('firebase-admin');
-const path = require('path');
 
 /**
- * Initialize Firebase Admin SDK (only once)
+ * Initialize Firebase Admin SDK using ENVIRONMENT VARIABLES ONLY
  * 
- * SETUP INSTRUCTIONS:
- * 1. Go to Firebase Console: https://console.firebase.google.com/
- * 2. Select project: "humrah-d926d"
- * 3. Click Settings (⚙️) > Project Settings
- * 4. Go to "Service Accounts" tab
- * 5. Click "Generate new private key"
- * 6. Download the JSON file
- * 7. Save as: backend/config/firebase-service-account.json
- * 8. Add to .gitignore: config/firebase-service-account.json
+ * REQUIRED ENVIRONMENT VARIABLES:
+ * - FIREBASE_PROJECT_ID
+ * - FIREBASE_CLIENT_EMAIL
+ * - FIREBASE_PRIVATE_KEY
  * 
- * IMPORTANT: Never commit service account keys to Git!
+ * Add these to your .env file or deployment platform (Render, Vercel, etc.)
  */
 
 if (!admin.apps.length) {
   try {
-    // ✅ OPTION 1: Using service account JSON file (RECOMMENDED for development)
-    const serviceAccount = require(path.join(__dirname, 'firebase-service-account.json'));
-    
+    // ✅ Validate environment variables exist
+    if (!process.env.FIREBASE_PROJECT_ID || 
+        !process.env.FIREBASE_CLIENT_EMAIL || 
+        !process.env.FIREBASE_PRIVATE_KEY) {
+      throw new Error('Missing required Firebase environment variables');
+    }
+
+    // ✅ Initialize with environment variables
     admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
-      projectId: 'humrah-d926d' // Your Firebase project ID
+      credential: admin.credential.cert({
+        projectId: process.env.FIREBASE_PROJECT_ID,
+        clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+        // ✅ IMPORTANT: Replace literal \n with actual newlines
+        privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n')
+      }),
+      projectId: process.env.FIREBASE_PROJECT_ID
     });
     
     console.log('✅ Firebase Admin SDK initialized successfully');
+    console.log(`   Project: ${process.env.FIREBASE_PROJECT_ID}`);
     
   } catch (error) {
     console.error('❌ Firebase Admin initialization error:', error.message);
-    console.log('⚠️  Attempting to initialize with environment variables...');
+    console.log('');
+    console.log('📋 REQUIRED ENVIRONMENT VARIABLES:');
+    console.log('');
+    console.log('FIREBASE_PROJECT_ID=your-project-id');
+    console.log('FIREBASE_CLIENT_EMAIL=firebase-adminsdk-xxxxx@your-project.iam.gserviceaccount.com');
+    console.log('FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\\nYOUR_KEY_HERE\\n-----END PRIVATE KEY-----\\n"');
+    console.log('');
+    console.log('⚠️  Make sure to wrap FIREBASE_PRIVATE_KEY in quotes and use \\n for newlines!');
+    console.log('');
     
-    try {
-      // ✅ OPTION 2: Using environment variables (RECOMMENDED for production)
-      admin.initializeApp({
-        credential: admin.credential.cert({
-          projectId: process.env.FIREBASE_PROJECT_ID,
-          clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-          privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n')
-        }),
-        projectId: process.env.FIREBASE_PROJECT_ID
-      });
-      
-      console.log('✅ Firebase Admin SDK initialized with environment variables');
-      
-    } catch (envError) {
-      console.error('❌ Firebase Admin initialization with env vars failed:', envError.message);
-      console.log('');
-      console.log('📋 SETUP REQUIRED:');
-      console.log('1. Download service account key from Firebase Console');
-      console.log('2. Save as: backend/config/firebase-service-account.json');
-      console.log('OR');
-      console.log('3. Set environment variables:');
-      console.log('   - FIREBASE_PROJECT_ID');
-      console.log('   - FIREBASE_CLIENT_EMAIL');
-      console.log('   - FIREBASE_PRIVATE_KEY');
-      console.log('');
-    }
+    // Don't crash the server, but notifications won't work
+    console.log('⚠️  Server will continue, but FCM notifications are DISABLED');
   }
 }
 
