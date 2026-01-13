@@ -1,33 +1,58 @@
-// backend/utils/broadcastNotification.js - Complete FCM Notification System
+// backend/utils/broadcastNotification.js - FIXED VERSION
 
 const User = require('../models/User');
-const admin = require('../config/firebase'); // ✅ Import Firebase Admin
+const admin = require('../config/firebase');
 
 /**
  * Broadcast new random booking notification to eligible users in same city
  * 
- * @param {Object} booking - The newly created booking
- * @param {Object} creator - The user who created the booking
+ * @param {Object} booking - The newly created booking (must be populated with createdBy)
  * @returns {Object} - Notification result with count sent
  */
-async function broadcastNewBooking(booking, creator) {
+async function broadcastNewBooking(booking) {
   try {
     console.log(`📢 Broadcasting new booking notification...`);
     console.log(`   Booking ID: ${booking._id}`);
     console.log(`   City: ${booking.city}`);
-    console.log(`   Creator: ${creator.fullName}`);
+
+    // ✅ FIX: Fetch creator if not populated
+    let creator;
+    if (booking.createdBy && typeof booking.createdBy === 'object' && booking.createdBy.firstName) {
+      // Already populated
+      creator = booking.createdBy;
+    } else {
+      // Need to fetch
+      creator = await User.findById(booking.createdBy).select('firstName lastName _id');
+      if (!creator) {
+        console.log(`❌ Creator not found: ${booking.createdBy}`);
+        return {
+          success: false,
+          message: 'Creator not found'
+        };
+      }
+    }
+
+    console.log(`   Creator: ${creator.firstName} ${creator.lastName}`);
 
     // ==================== STEP 1: FIND ELIGIBLE USERS ====================
+    
+    // Normalize city for comparison (lowercase, trim)
+    const normalizedCity = booking.city.toLowerCase().trim();
     
     // Find users in the same city (exclude creator)
     const eligibleUsers = await User.find({
       _id: { $ne: creator._id }, // Exclude creator
-      'questionnaire.city': booking.city, // Same city
       status: 'ACTIVE', // Active accounts only
       fcmTokens: { $exists: true, $ne: [] } // Has FCM tokens
-    }).select('_id firstName lastName fcmTokens');
+    }).select('_id firstName lastName fcmTokens questionnaire.city');
 
-    if (!eligibleUsers || eligibleUsers.length === 0) {
+    // Filter by city (case-insensitive)
+    const usersInCity = eligibleUsers.filter(user => {
+      const userCity = user.questionnaire?.city?.toLowerCase().trim();
+      return userCity === normalizedCity;
+    });
+
+    if (!usersInCity || usersInCity.length === 0) {
       console.log(`⚠️  No eligible users found in ${booking.city}`);
       return {
         success: true,
@@ -36,12 +61,12 @@ async function broadcastNewBooking(booking, creator) {
       };
     }
 
-    console.log(`✅ Found ${eligibleUsers.length} eligible users in ${booking.city}`);
+    console.log(`✅ Found ${usersInCity.length} eligible users in ${booking.city}`);
 
     // ==================== STEP 2: COLLECT FCM TOKENS ====================
     
     const fcmTokens = [];
-    eligibleUsers.forEach(user => {
+    usersInCity.forEach(user => {
       if (user.fcmTokens && Array.isArray(user.fcmTokens)) {
         fcmTokens.push(...user.fcmTokens);
       }
@@ -69,9 +94,9 @@ async function broadcastNewBooking(booking, creator) {
         creatorId: creator._id.toString(),
         city: booking.city,
         destination: booking.destination,
-        activityType: booking.activityType,
+        activityType: booking.activityType || 'HANGOUT',
         date: booking.date,
-        timeRange: booking.timeRange
+        timeRange: booking.timeRange || 'ANYTIME'
       }
     };
 
@@ -92,7 +117,6 @@ async function broadcastNewBooking(booking, creator) {
         },
         data: notificationData.data,
         tokens: fcmTokens,
-        // Optional: Configure Android/iOS specific settings
         android: {
           priority: 'high',
           notification: {
@@ -155,7 +179,7 @@ async function broadcastNewBooking(booking, creator) {
     return {
       success: true,
       sentCount,
-      totalUsers: eligibleUsers.length,
+      totalUsers: usersInCity.length,
       totalTokens: fcmTokens.length,
       city: booking.city,
       message: `Notification sent to ${sentCount} devices`
@@ -173,7 +197,7 @@ async function broadcastNewBooking(booking, creator) {
 /**
  * Send booking accepted notification to creator
  * 
- * @param {Object} booking - The accepted booking
+ * @param {Object} booking - The accepted booking (must have createdBy populated or ID)
  * @param {Object} acceptor - The user who accepted
  * @param {String} chatId - The created chat ID
  */
@@ -181,8 +205,16 @@ async function notifyBookingAccepted(booking, acceptor, chatId) {
   try {
     console.log(`📢 Sending booking accepted notification...`);
 
+    // ✅ FIX: Handle both populated and non-populated booking.createdBy
+    let creatorId;
+    if (typeof booking.createdBy === 'object' && booking.createdBy._id) {
+      creatorId = booking.createdBy._id;
+    } else {
+      creatorId = booking.createdBy;
+    }
+
     // Get creator's FCM tokens
-    const creator = await User.findById(booking.createdBy).select('fcmTokens firstName');
+    const creator = await User.findById(creatorId).select('fcmTokens firstName');
     
     if (!creator || !creator.fcmTokens || creator.fcmTokens.length === 0) {
       console.log(`⚠️  Creator has no FCM tokens`);
@@ -196,7 +228,7 @@ async function notifyBookingAccepted(booking, acceptor, chatId) {
         type: 'BOOKING_ACCEPTED',
         bookingId: booking._id.toString(),
         acceptedUserId: acceptor._id.toString(),
-        chatId: chatId
+        chatId: chatId.toString()
       }
     };
 
