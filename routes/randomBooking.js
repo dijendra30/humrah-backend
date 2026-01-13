@@ -8,9 +8,33 @@ const Message = require('../models/Message');
 const User = require('../models/User');
 const WeeklyUsage = require('../models/WeeklyUsage');
 
+console.log('🔍 DEBUG: Checking auth middleware...');
+console.log('🔍 auth type:', typeof auth);
+console.log('🔍 auth function:', auth.toString().substring(0, 100));
 // ==================== CREATE RANDOM BOOKING ====================
 router.post('/create', auth, async (req, res) => {
   try {
+    // ✅ ADD THESE DEBUG LOGS AT THE VERY TOP
+    console.log('');
+    console.log('='.repeat(60));
+    console.log('🔍 CREATE BOOKING - DEBUG INFO');
+    console.log('='.repeat(60));
+    console.log('req.userId:', req.userId);
+    console.log('req.user:', req.user ? `${req.user.firstName} ${req.user.lastName}` : 'undefined');
+    console.log('req.user._id:', req.user?._id);
+    console.log('Authorization header:', req.header('Authorization')?.substring(0, 20) + '...');
+    console.log('='.repeat(60));
+    console.log('');
+
+    // ✅ SAFETY CHECK: If userId is still undefined, stop and return error
+    if (!req.userId) {
+      console.error('❌ CRITICAL: req.userId is undefined after auth middleware!');
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication failed: userId not set'
+      });
+    }
+
     const {
       destination,
       city,
@@ -41,12 +65,18 @@ router.post('/create', auth, async (req, res) => {
     // ✅ Calculate expiresAt (24 hours after booking date)
     const bookingDate = new Date(date);
     const expiresAt = new Date(bookingDate);
-    expiresAt.setDate(bookingDate.getDate() + 1); // +24 hours
-    expiresAt.setHours(23, 59, 59, 999); // End of day
+    expiresAt.setDate(bookingDate.getDate() + 1);
+    expiresAt.setHours(23, 59, 59, 999);
+
+    // ✅ DEBUG: Log what we're about to create
+    console.log('📝 Creating booking with:');
+    console.log('   initiatorId:', req.userId);
+    console.log('   destination:', destination);
+    console.log('   city:', userCity || city);
 
     // Create booking
     const booking = await RandomBooking.create({
-      initiatorId: req.userId,
+      initiatorId: req.userId,  // ✅ This should now have a value
       destination,
       city: userCity || city,
       area: userArea,
@@ -58,8 +88,14 @@ router.post('/create', auth, async (req, res) => {
       languagePreference,
       note,
       status: 'PENDING',
-      expiresAt // ✅ FIXED: Add expiresAt
+      expiresAt
     });
+
+    // ✅ DEBUG: Verify booking was created correctly
+    console.log('✅ Booking created:');
+    console.log('   _id:', booking._id);
+    console.log('   initiatorId:', booking.initiatorId);
+    console.log('');
 
     // Increment usage
     usage.bookingsCreated++;
@@ -75,14 +111,14 @@ router.post('/create', auth, async (req, res) => {
       booking
     });
   } catch (error) {
-    console.error('Create booking error:', error);
+    console.error('❌ Create booking error:', error);
+    console.error('   Stack:', error.stack);
     res.status(500).json({
       success: false,
       message: error.message || 'Failed to create booking'
     });
   }
 });
-
 // ==================== GET ELIGIBLE BOOKINGS ====================
 router.get('/eligible', auth, async (req, res) => {
   try {
