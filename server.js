@@ -376,6 +376,8 @@ app.use('/api/spotlight', spotlightRoutes);
 app.use('/api/safety', safetyReportRoutes);
 app.use('/api/admin', require('./routes/admin'));
 app.use('/api/random-booking', require('./routes/randomBooking'));
+// Add this after other routes
+app.use('/api/agora', require('./routes/agora'));
 
 // Cron jobs
 require('./cronJobs');
