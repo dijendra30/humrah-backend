@@ -287,6 +287,73 @@ io.on('connection', (socket) => {
     
     console.log(`⌨️ ${userName} stopped typing in ${chatId}`);
   });
+
+  // ==================== ✅ CALL SIGNALING ====================
+  socket.on('initiate-call', async (data) => {
+    try {
+      const { chatId, callerId, calleeId, isAudioOnly } = data;
+      
+      console.log(`📞 Call initiated: ${callerId} → ${calleeId} (audio: ${isAudioOnly})`);
+      
+      // Send call to the other user
+      socket.to(chatId).emit('incoming-call', {
+        chatId,
+        callerId,
+        callerName: socket.userName,
+        isAudioOnly,
+        timestamp: new Date().toISOString()
+      });
+      
+      // ✅ Check if user is offline → send FCM notification
+      const calleePresence = userPresence.get(calleeId);
+      if (!calleePresence || calleePresence.status === 'OFFLINE') {
+        console.log(`📱 User offline - sending push notification`);
+        
+        // TODO: Send FCM push notification here
+        // Example:
+        // await sendCallNotification(calleeId, {
+        //   title: `${socket.userName} is calling...`,
+        //   body: isAudioOnly ? 'Voice call' : 'Video call',
+        //   chatId,
+        //   callerId
+        // });
+      }
+    } catch (error) {
+      console.error('Call initiation error:', error);
+    }
+  });
+
+  socket.on('accept-call', (data) => {
+    const { chatId, calleeId } = data;
+    
+    console.log(`✅ Call accepted by: ${calleeId}`);
+    
+    socket.to(chatId).emit('call-accepted', {
+      calleeId,
+      timestamp: new Date().toISOString()
+    });
+  });
+
+  socket.on('reject-call', (data) => {
+    const { chatId, calleeId } = data;
+    
+    console.log(`❌ Call rejected by: ${calleeId}`);
+    
+    socket.to(chatId).emit('call-rejected', {
+      calleeId,
+      timestamp: new Date().toISOString()
+    });
+  });
+
+  socket.on('end-call', (data) => {
+    const { chatId } = data;
+    
+    console.log(`📵 Call ended in chat: ${chatId}`);
+    
+    socket.to(chatId).emit('call-ended', {
+      timestamp: new Date().toISOString()
+    });
+  });
   
   // ==================== DISCONNECT ====================
   socket.on('disconnect', () => {
