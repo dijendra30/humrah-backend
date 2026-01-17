@@ -215,6 +215,99 @@ io.on('connection', (socket) => {
       userName
     });
   });
+
+  // 4. Add FCM send function
+async function sendCallNotification(userId, callData) {
+  try {
+    // Get user's FCM token from database
+    const User = mongoose.model('User');
+    const user = await User.findById(userId);
+    
+    if (!user || !user.fcmToken) {
+      console.log(`⚠️ No FCM token for user: ${userId}`);
+      return;
+    }
+    
+    const message = {
+      token: user.fcmToken,
+      data: {
+        type: 'incoming_call',
+        chatId: callData.chatId,
+        callerId: callData.callerId,
+        callerName: callData.callerName,
+        isAudioOnly: String(callData.isAudioOnly)
+      },
+      android: {
+        priority: 'high',
+        notification: {
+          title: '📞 Incoming Call',
+          body: `${callData.callerName} is calling...`,
+          sound: 'default',
+          channelId: 'incoming_calls'
+        }
+      },
+      apns: {
+        payload: {
+          aps: {
+            sound: 'default',
+            badge: 1
+          }
+        }
+      }
+    };
+    
+    const response = await admin.messaging().send(message);
+    console.log(`✅ FCM notification sent: ${response}`);
+    
+  } catch (error) {
+    console.error('❌ FCM send error:', error);
+  }
+}
+
+// 5. Update the initiate-call handler
+socket.on('initiate-call', async (data) => {
+  try {
+    const { chatId, callerId, calleeId, isAudioOnly } = data;
+    
+    console.log(`📞 Call initiated: ${callerId} → ${calleeId}`);
+    
+    // Send to socket (if user is online)
+    socket.to(chatId).emit('incoming-call', {
+      chatId,
+      callerId,
+      callerName: socket.userName,
+      isAudioOnly,
+      timestamp: new Date().toISOString()
+    });
+    
+    // ✅ Check if user is offline → send FCM
+    const calleePresence = userPresence.get(calleeId);
+    if (!calleePresence || calleePresence.status === 'OFFLINE') {
+      console.log(`📱 User offline - sending FCM notification`);
+      
+      await sendCallNotification(calleeId, {
+        chatId,
+        callerId,
+        callerName: socket.userName,
+        isAudioOnly
+      });
+    }
+    
+  } catch (error) {
+    console.error('Call initiation error:', error);
+  }
+});
+
+// 6. When call ends, send notification to cancel
+socket.on('end-call', async (data) => {
+  const { chatId } = data;
+  
+  console.log(`📵 Call ended in chat: ${chatId}`);
+  
+  // Notify via socket
+  socket.to(chatId).emit('call-ended', {
+    timestamp: new Date().toISOString()
+  });
   
   // ==================== MESSAGE DELIVERED ====================
   socket.on('message-delivered', async (data) => {
