@@ -1,4 +1,4 @@
-// server.js - FIXED SOCKET AUTHENTICATION (handles both query and auth methods)
+// server.js - IMPROVED CALL SIGNALING WITH USER INFO
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -6,8 +6,6 @@ const http = require('http');
 const socketIo = require('socket.io');
 const jwt = require('jsonwebtoken');
 const dotenv = require('dotenv');
-const admin = require('firebase-admin');
-
 
 dotenv.config();
 
@@ -34,34 +32,29 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.set('io', io);
 
 // =============================================
-// IN-MEMORY PRESENCE TRACKING
+// IN-MEMORY PRESENCE & USER INFO TRACKING
 // =============================================
 const userPresence = new Map();
 const chatUsers = new Map();
+const userInfo = new Map(); // ✅ Store user info for calls
 
 // =============================================
-// SOCKET AUTHENTICATION MIDDLEWARE (FIXED)
+// SOCKET AUTHENTICATION MIDDLEWARE
 // =============================================
 io.use((socket, next) => {
   try {
-    // ✅ Try to get token from multiple sources
-    // 1. From auth object (socket.io-client 3.x+)
     let token = socket.handshake.auth?.token;
     
-    // 2. From query params (socket.io-client 2.x)
     if (!token) {
       token = socket.handshake.query?.token;
     }
     
-    // 3. From headers (fallback)
     if (!token) {
       token = socket.handshake.headers?.authorization?.replace('Bearer ', '');
     }
     
     if (!token) {
       console.log('❌ Socket auth failed: No token provided');
-      console.log('Handshake auth:', socket.handshake.auth);
-      console.log('Handshake query:', socket.handshake.query);
       return next(new Error('Authentication error: No token provided'));
     }
     
@@ -69,10 +62,31 @@ io.use((socket, next) => {
     const decoded = jwt.verify(token, JWT_SECRET);
     
     socket.userId = decoded.userId;
-    socket.userName = `${decoded.firstName} ${decoded.lastName || ''}`.trim();
     socket.userRole = decoded.role || 'USER';
     
-    console.log(`✅ Socket authenticated: ${socket.userName} (${socket.userId})`);
+    // ✅ Get user info from database
+    const User = mongoose.model('User');
+    User.findById(decoded.userId)
+      .select('firstName lastName profilePhoto')
+      .then(user => {
+        if (user) {
+          socket.userName = `${user.firstName} ${user.lastName || ''}`.trim();
+          socket.userPhoto = user.profilePhoto;
+          
+          // ✅ Store in global map for quick access
+          userInfo.set(socket.userId, {
+            name: socket.userName,
+            photo: socket.userPhoto
+          });
+          
+          console.log(`✅ Socket authenticated: ${socket.userName} (${socket.userId})`);
+        }
+      })
+      .catch(err => {
+        console.error('Error fetching user info:', err);
+        socket.userName = 'User';
+      });
+    
     next();
     
   } catch (err) {
@@ -103,7 +117,9 @@ io.on('connection', (socket) => {
   userPresence.set(userId, {
     socketId: socket.id,
     status: 'ONLINE',
-    lastSeen: new Date()
+    lastSeen: new Date(),
+    name: userName,
+    photo: socket.userPhoto
   });
   
   // Broadcast user online status
@@ -144,7 +160,6 @@ io.on('connection', (socket) => {
           p.userId.toString() !== userId
         )?.userId;
         
-        // Find pending messages sent to this user
         const pending = await Message.find({
           chatId,
           senderId: otherUserId,
@@ -155,7 +170,6 @@ io.on('connection', (socket) => {
           console.log(`📬 Delivering ${pending.length} pending messages to ${userName}`);
           
           for (const msg of pending) {
-            // Emit to user
             socket.emit('new-message', {
               _id: msg._id.toString(),
               chatId: msg.chatId.toString(),
@@ -172,12 +186,10 @@ io.on('connection', (socket) => {
               deliveryStatus: 'SENT'
             });
             
-            // Update to DELIVERED
             msg.deliveryStatus = 'DELIVERED';
             msg.deliveredAt = new Date();
             await msg.save();
             
-            // Notify sender of delivery
             io.to(chatId).emit('message-delivered', {
               messageId: msg._id.toString(),
               deliveredTo: userId,
@@ -210,6 +222,7 @@ io.on('connection', (socket) => {
       userName
     });
   });
+
   // ==================== MESSAGE DELIVERED ====================
   socket.on('message-delivered', async (data) => {
     try {
@@ -223,7 +236,6 @@ io.on('connection', (socket) => {
         message.deliveredAt = new Date();
         await message.save();
         
-        // Notify sender
         socket.to(chatId).emit('message-delivered', {
           messageId,
           deliveredTo: userId,
@@ -250,7 +262,6 @@ io.on('connection', (socket) => {
         message.readAt = new Date();
         await message.save();
         
-        // Notify sender
         socket.to(chatId).emit('message-read', {
           messageId,
           readBy: userId,
@@ -267,57 +278,51 @@ io.on('connection', (socket) => {
   // ==================== TYPING INDICATORS ====================
   socket.on('typing-start', (data) => {
     const { chatId } = data;
-    
     socket.to(chatId).emit('user-typing', {
       userId,
       userName,
       isTyping: true
     });
-    
-    console.log(`⌨️ ${userName} started typing in ${chatId}`);
   });
   
   socket.on('typing-stop', (data) => {
     const { chatId } = data;
-    
     socket.to(chatId).emit('user-typing', {
       userId,
       userName,
       isTyping: false
     });
-    
-    console.log(`⌨️ ${userName} stopped typing in ${chatId}`);
   });
 
-  // ==================== ✅ CALL SIGNALING ====================
+  // ==================== ✅ IMPROVED CALL SIGNALING ====================
   socket.on('initiate-call', async (data) => {
     try {
       const { chatId, callerId, calleeId, isAudioOnly } = data;
       
-      console.log(`📞 Call initiated: ${callerId} → ${calleeId} (audio: ${isAudioOnly})`);
+      console.log(`📞 Call initiated: ${userName} (${callerId}) → ${calleeId} (audio: ${isAudioOnly})`);
       
-      // Send call to the other user
+      // ✅ Get caller info
+      const callerInfo = userInfo.get(callerId) || {
+        name: userName,
+        photo: socket.userPhoto
+      };
+      
+      // ✅ Send call to the other user with FULL caller info
       socket.to(chatId).emit('incoming-call', {
         chatId,
         callerId,
-        callerName: socket.userName,
+        callerName: callerInfo.name,
+        callerPhoto: callerInfo.photo,
         isAudioOnly,
         timestamp: new Date().toISOString()
       });
       
+      console.log(`📞 Call sent to chat ${chatId} with caller: ${callerInfo.name}`);
+      
       // ✅ Check if user is offline → send FCM notification
       const calleePresence = userPresence.get(calleeId);
       if (!calleePresence || calleePresence.status === 'OFFLINE') {
-        console.log(`📱 User offline - sending push notification`);
-        
-        // TODO: Send FCM push notification here
-        // Example:
-        // await sendCallNotification(calleeId, {
-        //   title: `${socket.userName} is calling...`,
-        //   body: isAudioOnly ? 'Voice call' : 'Video call',
-        //   chatId,
-        //   callerId
-        // });
+        console.log(`📱 User offline - would send push notification`);
       }
     } catch (error) {
       console.error('Call initiation error:', error);
@@ -327,10 +332,18 @@ io.on('connection', (socket) => {
   socket.on('accept-call', (data) => {
     const { chatId, calleeId } = data;
     
-    console.log(`✅ Call accepted by: ${calleeId}`);
+    console.log(`✅ Call accepted by: ${userName} (${calleeId})`);
+    
+    // ✅ Get callee info
+    const calleeInfo = userInfo.get(calleeId) || {
+      name: userName,
+      photo: socket.userPhoto
+    };
     
     socket.to(chatId).emit('call-accepted', {
       calleeId,
+      calleeName: calleeInfo.name,
+      calleePhoto: calleeInfo.photo,
       timestamp: new Date().toISOString()
     });
   });
@@ -338,7 +351,7 @@ io.on('connection', (socket) => {
   socket.on('reject-call', (data) => {
     const { chatId, calleeId } = data;
     
-    console.log(`❌ Call rejected by: ${calleeId}`);
+    console.log(`❌ Call rejected by: ${userName} (${calleeId})`);
     
     socket.to(chatId).emit('call-rejected', {
       calleeId,
@@ -349,10 +362,38 @@ io.on('connection', (socket) => {
   socket.on('end-call', (data) => {
     const { chatId } = data;
     
-    console.log(`📵 Call ended in chat: ${chatId}`);
+    console.log(`📵 Call ended in chat: ${chatId} by ${userName}`);
     
     socket.to(chatId).emit('call-ended', {
+      endedBy: userId,
       timestamp: new Date().toISOString()
+    });
+  });
+
+  // ==================== ✅ WEBRTC SIGNALING (for peer-to-peer) ====================
+  socket.on('webrtc-offer', (data) => {
+    const { chatId, offer } = data;
+    console.log(`📡 WebRTC offer from ${userName}`);
+    socket.to(chatId).emit('webrtc-offer', {
+      from: userId,
+      offer
+    });
+  });
+
+  socket.on('webrtc-answer', (data) => {
+    const { chatId, answer } = data;
+    console.log(`📡 WebRTC answer from ${userName}`);
+    socket.to(chatId).emit('webrtc-answer', {
+      from: userId,
+      answer
+    });
+  });
+
+  socket.on('webrtc-ice-candidate', (data) => {
+    const { chatId, candidate } = data;
+    socket.to(chatId).emit('webrtc-ice-candidate', {
+      from: userId,
+      candidate
     });
   });
   
@@ -402,8 +443,13 @@ function getUserLastSeen(userId) {
   return presence?.lastSeen || null;
 }
 
+function getUserInfo(userId) {
+  return userInfo.get(userId) || null;
+}
+
 global.isUserOnline = isUserOnline;
 global.getUserLastSeen = getUserLastSeen;
+global.getUserInfo = getUserInfo;
 
 // =============================================
 // DATABASE CONNECTION
@@ -444,7 +490,6 @@ app.use('/api/spotlight', spotlightRoutes);
 app.use('/api/safety', safetyReportRoutes);
 app.use('/api/admin', require('./routes/admin'));
 app.use('/api/random-booking', require('./routes/randomBooking'));
-// Add this after other routes
 app.use('/api/agora', require('./routes/agora'));
 
 // Cron jobs
@@ -476,10 +521,11 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`🚀 Humrah Server running on port ${PORT}`);
   console.log(`✅ Socket.IO enabled with:`);
+  console.log(`   - Voice/Video calls with user info`);
   console.log(`   - Delivery receipts (SENT → DELIVERED → READ)`);
   console.log(`   - Typing indicators`);
   console.log(`   - Presence tracking (online/offline)`);
-  console.log(`   - JWT authentication (query + auth)`);
+  console.log(`   - JWT authentication`);
 });
 
 // Graceful shutdown
