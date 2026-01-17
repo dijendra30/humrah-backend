@@ -6,11 +6,18 @@ const http = require('http');
 const socketIo = require('socket.io');
 const jwt = require('jsonwebtoken');
 const dotenv = require('dotenv');
+const admin = require('firebase-admin');
+
 
 dotenv.config();
 
 const app = express();
 const server = http.createServer(app);
+const serviceAccount = require('./path/to/serviceAccountKey.json'); // ✅ Download from Firebase Console
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount)
+});
 
 // ✅ Socket.IO with authentication
 const io = socketIo(server, {
