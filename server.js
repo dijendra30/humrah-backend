@@ -491,6 +491,7 @@ app.use('/api/safety', safetyReportRoutes);
 app.use('/api/admin', require('./routes/admin'));
 app.use('/api/random-booking', require('./routes/randomBooking'));
 app.use('/api/agora', require('./routes/agora'));
+app.use('/api/voice-call', require('./routes/voice-call'));
 
 // Cron jobs
 require('./cronJobs');
