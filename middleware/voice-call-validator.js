@@ -34,7 +34,7 @@ async function validateCallEligibility(callerId, receiverId, bookingId) {
   }
   
   // ==================== 3. VALIDATE BOOKING STATUS ====================
-  if (booking.status !== 'ACCEPTED') {
+  if (booking.status !== 'MATCHED') {
     errors.push({
       code: 'BOOKING_NOT_ACCEPTED',
       message: 'Voice calls are only available for accepted bookings'
