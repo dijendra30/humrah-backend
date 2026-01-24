@@ -64,7 +64,7 @@ function objectIdToUid(objectId) {
  */
 router.post('/initiate', authenticate, validateCallInitiation, async (req, res) => {
   try {
-    const callerId = req.user.userId;
+    const callerId = req.userId;
     const { receiverId, bookingId } = req.body;
     const { caller, receiver, booking } = req.validatedCallData;
     
