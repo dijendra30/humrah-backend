@@ -197,7 +197,7 @@ async function validateCallInitiation(req, res, next) {
  */
 async function validateCallAcceptance(req, res, next) {
   try {
-    const userId = req.user.userId;
+    const userId = req.userId; // ✅ FIXED
     const { callId } = req.params;
     
     // Fetch call
@@ -248,7 +248,7 @@ async function validateCallAcceptance(req, res, next) {
  */
 async function validateCallEnd(req, res, next) {
   try {
-    const userId = req.user.userId;
+    const userId = req.userId; // ✅ FIXED
     const { callId } = req.params;
     
     // Fetch call
