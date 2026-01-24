@@ -152,7 +152,7 @@ async function validateCallEligibility(callerId, receiverId, bookingId) {
  */
 async function validateCallInitiation(req, res, next) {
   try {
-    const callerId = req.user.userId; // From auth middleware
+    const callerId = req.userId; // From auth middleware
     const { receiverId, bookingId } = req.body;
     
     // Validate request body
