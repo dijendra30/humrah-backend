@@ -1,4 +1,4 @@
-// middleware/voice-call-validator.js - Call Eligibility Validation
+// middleware/voice-call-validator.js - FINAL FIXED VERSION
 const RandomBooking = require('../models/RandomBooking');
 const VoiceCall = require('../models/VoiceCall');
 const User = require('../models/User');
@@ -75,18 +75,18 @@ async function validateCallEligibility(callerId, receiverId, bookingId) {
     });
   }
   
-  // ==================== 6. VALIDATE USERS ACTIVE ====================
-  if (!caller.isActive) {
+  // ==================== 6. VALIDATE USERS ACTIVE (FIXED) ====================
+  if (caller.status !== 'ACTIVE') {
     errors.push({
       code: 'CALLER_INACTIVE',
-      message: 'Caller account is inactive'
+      message: `Caller account is not active (status: ${caller.status})`
     });
   }
   
-  if (!receiver.isActive) {
+  if (receiver.status !== 'ACTIVE') {
     errors.push({
       code: 'RECEIVER_INACTIVE',
-      message: 'Receiver account is inactive'
+      message: `Receiver account is not active (status: ${receiver.status})`
     });
   }
   
@@ -133,7 +133,7 @@ async function validateCallEligibility(callerId, receiverId, bookingId) {
   
   // ==================== RETURN RESULT ====================
   if (errors.length > 0) {
-    return { valid: false, errors, data: null };
+    return { valid: false, errors, data: { caller, receiver, booking } };
   }
   
   return {
@@ -197,7 +197,7 @@ async function validateCallInitiation(req, res, next) {
  */
 async function validateCallAcceptance(req, res, next) {
   try {
-    const userId = req.userId; // ✅ FIXED
+    const userId = req.userId;
     const { callId } = req.params;
     
     // Fetch call
@@ -248,7 +248,7 @@ async function validateCallAcceptance(req, res, next) {
  */
 async function validateCallEnd(req, res, next) {
   try {
-    const userId = req.userId; // ✅ FIXED
+    const userId = req.userId;
     const { callId } = req.params;
     
     // Fetch call
