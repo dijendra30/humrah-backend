@@ -79,17 +79,20 @@ async function validateCallEligibility(callerId, receiverId, bookingId) {
   if (caller.status !== 'ACTIVE') {
     errors.push({
       code: 'CALLER_INACTIVE',
-      message: `Caller account is not active (status: ${caller.status})`
+      // BEFORE: message: `Caller account is not active (status: ${caller.status})`
+      // AFTER: Add a unique identifier
+      message: `V2_VALIDATOR: Caller account is not ACTIVE. Status is: ${caller.status}` 
     });
   }
   
   if (receiver.status !== 'ACTIVE') {
     errors.push({
       code: 'RECEIVER_INACTIVE',
-      message: `Receiver account is not active (status: ${receiver.status})`
+       // BEFORE: message: `Receiver account is not active (status: ${receiver.status})`
+      // AFTER: Add a unique identifier
+      message: `V2_VALIDATOR: Receiver account is not ACTIVE. Status is: ${receiver.status}`
     });
   }
-  
   // ==================== 7. VALIDATE NOT BLOCKED ====================
   const callerBlocked = caller.blockedUsers?.includes(receiverId);
   const receiverBlocked = receiver.blockedUsers?.includes(callerId);
