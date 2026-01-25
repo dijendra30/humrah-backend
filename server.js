@@ -494,7 +494,10 @@ app.use('/api/agora', require('./routes/agora'));
 app.use('/api/voice-call', require('./routes/voice-call'));
 
 // Cron jobs
-require('./cronJobs');
+require('./cronJobs/cronJobs.js');
+// server.js
+require('./cronJobs/voice-call-cleanup');
+
 
 // Health Check
 app.get('/api/health', (req, res) => {
