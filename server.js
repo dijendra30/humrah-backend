@@ -495,8 +495,6 @@ app.use('/api/voice-call', require('./routes/voice-call'));
 
 // Cron jobs
 require('./cronJobs');
-// server.js
-require('./cronJobs/voice-call-cleanup');
 
 
 // Health Check
