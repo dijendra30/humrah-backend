@@ -66,23 +66,60 @@ function isReceiverOnline(receiverId, io) {
 
 // ==================== ROUTES ====================
 
+// routes/voice-call.js - ADD THIS VALIDATION IMMEDIATELY
+
 /**
  * POST /api/voice-call/initiate
- * ✅ FIXED: Sends FCM notification + socket event
+ * ✅ WITH SELF-CALL PREVENTION
  */
 router.post('/initiate', authenticate, validateCallInitiation, async (req, res) => {
   try {
     const callerId = req.userId;
     const { receiverId, bookingId } = req.body;
+    
+    // ==================== DEBUG LOGS ====================
+    console.log('=================================');
+    console.log('📞 VOICE CALL INITIATION');
+    console.log('=================================');
+    console.log('Caller ID (from auth):', callerId.toString());
+    console.log('Receiver ID (from body):', receiverId.toString());
+    console.log('Booking ID:', bookingId.toString());
+    console.log('Are they the same?', callerId.toString() === receiverId.toString());
+    console.log('=================================');
+    
+    // ==================== PREVENT SELF-CALLING ====================
+    // ✅ CRITICAL FIX: Stop users from calling themselves
+    if (callerId.toString() === receiverId.toString()) {
+      console.error('❌ CRITICAL BUG DETECTED: User trying to call themselves!');
+      console.error('   User ID:', callerId.toString());
+      console.error('   This means the chat participants data is corrupted!');
+      console.error('   Both participants in the chat have the same user ID.');
+      
+      return res.status(400).json({
+        success: false,
+        error: 'INVALID_RECEIVER',
+        message: 'Cannot call yourself. Please check chat participants data.',
+        debug: {
+          callerId: callerId.toString(),
+          receiverId: receiverId.toString(),
+          hint: 'Chat participants may have duplicate user IDs'
+        }
+      });
+    }
+    
+    // ==================== CONTINUE WITH NORMAL FLOW ====================
     const { caller, receiver, booking } = req.validatedCallData;
     
+    console.log('✅ Validation passed - different users confirmed');
     console.log('📞 Initiating call:', {
       callerId: callerId.toString(),
       receiverId: receiverId.toString(),
       bookingId: bookingId.toString()
     });
     
-    // ✅ Generate Agora credentials
+    // ... rest of your existing code
+    
+    // Generate Agora credentials
     const channelName = `voice_${booking._id}_${Date.now()}`;
     const callerUid = objectIdToUid(callerId);
     const callerToken = generateAgoraToken(channelName, callerUid);
@@ -93,7 +130,7 @@ router.post('/initiate', authenticate, validateCallInitiation, async (req, res) 
       appId: AGORA_APP_ID
     });
     
-    // ✅ Create voice call record
+    // Create voice call record
     const voiceCall = new VoiceCall({
       callerId,
       receiverId,
@@ -107,11 +144,15 @@ router.post('/initiate', authenticate, validateCallInitiation, async (req, res) 
     await voiceCall.save();
     
     console.log('✅ Voice call record created:', voiceCall._id);
+    console.log('   Caller:', callerId.toString());
+    console.log('   Receiver:', receiverId.toString());
     
-    // ✅ CRITICAL: Send FCM notification to receiver
+    // Send FCM notification to receiver
     try {
       if (receiver.fcmTokens && receiver.fcmTokens.length > 0) {
-        console.log(`📨 Sending FCM to ${receiver.fcmTokens.length} token(s)`);
+        console.log(`📨 Sending FCM to receiver: ${receiverId.toString()}`);
+        console.log(`   Receiver name: ${receiver.firstName} ${receiver.lastName}`);
+        console.log(`   Token count: ${receiver.fcmTokens.length}`);
         
         const fcmMessage = {
           notification: {
@@ -126,7 +167,7 @@ router.post('/initiate', authenticate, validateCallInitiation, async (req, res) 
             callerName: `${caller.firstName} ${caller.lastName}`,
             callerPhoto: caller.profilePhoto || '',
             channelName: channelName,
-            token: callerToken, // ✅ Send token so receiver can join immediately
+            token: callerToken,
             uid: callerUid.toString(),
             appId: AGORA_APP_ID
           },
@@ -146,11 +187,11 @@ router.post('/initiate', authenticate, validateCallInitiation, async (req, res) 
         const fcmResponse = await admin.messaging().sendEachForMulticast(fcmMessage);
         
         console.log(`✅ FCM sent: ${fcmResponse.successCount}/${receiver.fcmTokens.length} successful`);
+        console.log(`   Sent to receiver ID: ${receiverId.toString()}`);
         
         if (fcmResponse.failureCount > 0) {
           console.log(`⚠️ FCM failures: ${fcmResponse.failureCount}`);
           
-          // Remove invalid tokens
           const failedTokens = [];
           fcmResponse.responses.forEach((resp, idx) => {
             if (!resp.success) {
@@ -168,13 +209,13 @@ router.post('/initiate', authenticate, validateCallInitiation, async (req, res) 
         }
       } else {
         console.log('⚠️ Receiver has no FCM tokens');
+        console.log('   Receiver ID:', receiverId.toString());
       }
     } catch (fcmError) {
       console.error('❌ FCM send error:', fcmError);
-      // Don't fail the call, just log the error
     }
     
-    // ✅ Also emit socket event (for when app is open)
+    // Emit socket event
     const io = req.app.get('io');
     if (io) {
       const receiverSockets = Array.from(io.sockets.sockets.values())
@@ -196,12 +237,14 @@ router.post('/initiate', authenticate, validateCallInitiation, async (req, res) 
           });
         });
         console.log(`✅ Socket event sent to ${receiverSockets.length} socket(s)`);
+        console.log(`   Receiver ID: ${receiverId.toString()}`);
       } else {
         console.log('⚠️ Receiver not connected via socket (app might be closed)');
+        console.log('   Receiver ID:', receiverId.toString());
       }
     }
     
-    // ✅ Return success to caller
+    // Return success to caller
     res.status(201).json({
       success: true,
       callId: voiceCall._id,
