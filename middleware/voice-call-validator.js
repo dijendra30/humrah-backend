@@ -153,6 +153,9 @@ async function validateCallEligibility(callerId, receiverId, bookingId) {
 /**
  * Middleware to validate call initiation
  */
+/**
+ * Middleware to validate call initiation
+ */
 async function validateCallInitiation(req, res, next) {
   try {
     const callerId = req.userId; // From auth middleware
@@ -164,6 +167,15 @@ async function validateCallInitiation(req, res, next) {
         success: false,
         error: 'INVALID_REQUEST',
         message: 'receiverId and bookingId are required'
+      });
+    }
+
+    // ✅ NEW: Explicitly check if caller is trying to call themselves
+    if (callerId.toString() === receiverId.toString()) {
+      return res.status(400).json({
+        success: false,
+        error: 'SELF_CALL_NOT_ALLOWED',
+        message: 'You cannot start a voice call with yourself.'
       });
     }
     
