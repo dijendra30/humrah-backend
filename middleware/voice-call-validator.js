@@ -150,19 +150,18 @@ async function validateCallEligibility(callerId, receiverId, bookingId) {
   };
 }
 
-/**
- * Middleware to validate call initiation
- */
-/**
- * Middleware to validate call initiation
- */
-/**
- * Middleware to validate call initiation
- */
 async function validateCallInitiation(req, res, next) {
   try {
-    const callerId = req.userId; // From auth middleware
+    const callerId = req.userId;
     const { receiverId, bookingId } = req.body;
+    
+    // ✅ ENHANCED LOGGING
+    console.log('=================================');
+    console.log('📞 CALL VALIDATION');
+    console.log('=================================');
+    console.log('Caller ID:', callerId.toString());
+    console.log('Receiver ID:', receiverId.toString());
+    console.log('Booking ID:', bookingId.toString());
     
     // Validate request body
     if (!receiverId || !bookingId) {
@@ -173,7 +172,7 @@ async function validateCallInitiation(req, res, next) {
       });
     }
     
-    // ✅ ADD THIS BLOCK: Explicitly check if caller is trying to call themselves
+    // ✅ Self-call check
     if (callerId.toString() === receiverId.toString()) {
       return res.status(400).json({
         success: false,
@@ -185,14 +184,40 @@ async function validateCallInitiation(req, res, next) {
     // Validate eligibility
     const validation = await validateCallEligibility(callerId, receiverId, bookingId);
     
+    // ✅ ENHANCED ERROR RESPONSE
     if (!validation.valid) {
-      // Return first error
       const error = validation.errors[0];
+      
+      // Log the validation errors
+      console.log('❌ VALIDATION FAILED:');
+      validation.errors.forEach(err => {
+        console.log(`   - ${err.code}: ${err.message}`);
+      });
+      
+      // Special handling for BOOKING_NOT_FOUND
+      if (error.code === 'BOOKING_NOT_FOUND') {
+        console.log('=================================');
+        console.log('🔍 BOOKING NOT FOUND DEBUG INFO');
+        console.log('=================================');
+        console.log('Searched for booking ID:', bookingId.toString());
+        console.log('Caller ID:', callerId.toString());
+        console.log('Receiver ID:', receiverId.toString());
+        console.log('Suggestion: Check if this booking exists in the database');
+        console.log('MongoDB Query: db.randombookings.findOne({_id: ObjectId("' + bookingId + '")})');
+        console.log('=================================');
+      }
+      
       return res.status(400).json({
         success: false,
         error: error.code,
         message: error.message,
-        allErrors: validation.errors
+        allErrors: validation.errors,
+        debug: {
+          bookingId: bookingId.toString(),
+          callerId: callerId.toString(),
+          receiverId: receiverId.toString(),
+          hint: 'Check if the booking exists and belongs to these users'
+        }
       });
     }
     
@@ -206,56 +231,6 @@ async function validateCallInitiation(req, res, next) {
       success: false,
       error: 'VALIDATION_ERROR',
       message: 'Failed to validate call eligibility'
-    });
-  }
-}
-/**
- * Middleware to validate call acceptance
- */
-async function validateCallAcceptance(req, res, next) {
-  try {
-    const userId = req.userId;
-    const { callId } = req.params;
-    
-    // Fetch call
-    const call = await VoiceCall.findById(callId);
-    
-    if (!call) {
-      return res.status(404).json({
-        success: false,
-        error: 'CALL_NOT_FOUND',
-        message: 'Call not found'
-      });
-    }
-    
-    // Validate user is receiver
-    if (call.receiverId.toString() !== userId.toString()) {
-      return res.status(403).json({
-        success: false,
-        error: 'UNAUTHORIZED',
-        message: 'You are not the receiver of this call'
-      });
-    }
-    
-    // Validate call can be accepted
-    if (!call.canBeAccepted()) {
-      return res.status(400).json({
-        success: false,
-        error: 'CALL_CANNOT_BE_ACCEPTED',
-        message: 'This call can no longer be accepted'
-      });
-    }
-    
-    // Attach call to request
-    req.voiceCall = call;
-    
-    next();
-  } catch (error) {
-    console.error('Call acceptance validation error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'VALIDATION_ERROR',
-      message: 'Failed to validate call acceptance'
     });
   }
 }
