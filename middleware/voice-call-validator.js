@@ -156,6 +156,9 @@ async function validateCallEligibility(callerId, receiverId, bookingId) {
 /**
  * Middleware to validate call initiation
  */
+/**
+ * Middleware to validate call initiation
+ */
 async function validateCallInitiation(req, res, next) {
   try {
     const callerId = req.userId; // From auth middleware
@@ -169,8 +172,8 @@ async function validateCallInitiation(req, res, next) {
         message: 'receiverId and bookingId are required'
       });
     }
-
-    // ✅ NEW: Explicitly check if caller is trying to call themselves
+    
+    // ✅ ADD THIS BLOCK: Explicitly check if caller is trying to call themselves
     if (callerId.toString() === receiverId.toString()) {
       return res.status(400).json({
         success: false,
@@ -206,7 +209,6 @@ async function validateCallInitiation(req, res, next) {
     });
   }
 }
-
 /**
  * Middleware to validate call acceptance
  */
