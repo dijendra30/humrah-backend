@@ -1,4 +1,4 @@
-// middleware/voice-call-validator.js - FINAL FIXED VERSION
+//middleware/voice-call-validator.js - FINAL FIXED VERSION
 const RandomBooking = require('../models/RandomBooking');
 const VoiceCall = require('../models/VoiceCall');
 const User = require('../models/User');
@@ -150,6 +150,10 @@ async function validateCallEligibility(callerId, receiverId, bookingId) {
   };
 }
 
+/**
+ * Middleware to validate call initiation
+ */
+
 async function validateCallInitiation(req, res, next) {
   try {
     const callerId = req.userId;
@@ -231,6 +235,56 @@ async function validateCallInitiation(req, res, next) {
       success: false,
       error: 'VALIDATION_ERROR',
       message: 'Failed to validate call eligibility'
+    });
+  }
+}
+/**
+ * Middleware to validate call acceptance
+ */
+async function validateCallAcceptance(req, res, next) {
+  try {
+    const userId = req.userId;
+    const { callId } = req.params;
+    
+    // Fetch call
+    const call = await VoiceCall.findById(callId);
+    
+    if (!call) {
+      return res.status(404).json({
+        success: false,
+        error: 'CALL_NOT_FOUND',
+        message: 'Call not found'
+      });
+    }
+    
+    // Validate user is receiver
+    if (call.receiverId.toString() !== userId.toString()) {
+      return res.status(403).json({
+        success: false,
+        error: 'UNAUTHORIZED',
+        message: 'You are not the receiver of this call'
+      });
+    }
+    
+    // Validate call can be accepted
+    if (!call.canBeAccepted()) {
+      return res.status(400).json({
+        success: false,
+        error: 'CALL_CANNOT_BE_ACCEPTED',
+        message: 'This call can no longer be accepted'
+      });
+    }
+    
+    // Attach call to request
+    req.voiceCall = call;
+    
+    next();
+  } catch (error) {
+    console.error('Call acceptance validation error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'VALIDATION_ERROR',
+      message: 'Failed to validate call acceptance'
     });
   }
 }
