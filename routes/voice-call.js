@@ -1,136 +1,124 @@
-// routes/voice-call.js - COMPLETE FIXED VERSION WITH FCM
+// routes/voice-call.js - COMPLETE FIXED VERSION WITH PROPER AGORA INTEGRATION
 const express = require('express');
 const router = express.Router();
 const { RtcTokenBuilder, RtcRole } = require('agora-access-token');
 const VoiceCall = require('../models/VoiceCall');
 const User = require('../models/User');
-const admin = require('../config/firebase'); // ✅ Import Firebase Admin
+const admin = require('../config/firebase');
 const {
   validateCallInitiation,
-  validateCallAcceptance,
   validateCallEnd
 } = require('../middleware/voice-call-validator');
 const { authenticate } = require('../middleware/auth');
 
 // ==================== AGORA CONFIGURATION ====================
-const AGORA_APP_ID = process.env.AGORA_APP_ID;
-const AGORA_APP_CERTIFICATE = process.env.AGORA_APP_CERTIFICATE;
+const AGORA_APP_ID = process.env.AGORA_APP_ID || '183926da16b6416f98b50a78c6673c97';
+const AGORA_APP_CERTIFICATE = process.env.AGORA_APP_CERTIFICATE || '4cc9dde943ca49a398fd120ebb1207ba';
 const TOKEN_EXPIRATION_TIME = 30 * 60; // 30 minutes
 
 /**
- * Generate Agora RTC Token
+ * ✅ FIXED: Convert MongoDB ObjectId to numeric UID for Agora
+ * MUST be consistent - same ObjectId always returns same UID
+ */
+function objectIdToUid(objectId) {
+  const objectIdString = objectId.toString();
+  
+  // Take last 8 characters of ObjectId and convert to integer
+  const hex = objectIdString.slice(-8);
+  const uid = parseInt(hex, 16);
+  
+  // Ensure it's within Agora's valid range (0 to 2^32-1)
+  const result = Math.abs(uid) % 0xFFFFFFFF;
+  
+  console.log(`🔢 UID Conversion: ${objectIdString.slice(0, 8)}... -> ${hex} -> ${result}`);
+  
+  return result;
+}
+
+/**
+ * ✅ FIXED: Generate Agora RTC Token with proper error handling
  */
 function generateAgoraToken(channelName, uid, role = RtcRole.PUBLISHER) {
   if (!AGORA_APP_ID || !AGORA_APP_CERTIFICATE) {
-    throw new Error('Agora credentials not configured');
+    throw new Error('Agora credentials not configured. Check AGORA_APP_ID and AGORA_APP_CERTIFICATE in .env');
   }
   
   const currentTimestamp = Math.floor(Date.now() / 1000);
   const privilegeExpireTime = currentTimestamp + TOKEN_EXPIRATION_TIME;
   
-  return RtcTokenBuilder.buildTokenWithUid(
-    AGORA_APP_ID,
-    AGORA_APP_CERTIFICATE,
-    channelName,
-    uid,
-    role,
-    privilegeExpireTime
-  );
-}
-
-/**
- * Convert MongoDB ObjectId to numeric UID for Agora
- */
-function objectIdToUid(objectId) {
-  const hex = objectId.toString().slice(-8);
-  const uid = parseInt(hex, 16);
-  return Math.abs(uid) % 0xFFFFFFFF;
-}
-
-/**
- * Check if receiver is online (has active socket connection)
- */
-function isReceiverOnline(receiverId, io) {
-  if (!io) return false;
+  console.log('🔐 Generating Agora Token:');
+  console.log(`   App ID: ${AGORA_APP_ID}`);
+  console.log(`   Channel: ${channelName}`);
+  console.log(`   UID: ${uid}`);
+  console.log(`   Role: ${role === RtcRole.PUBLISHER ? 'PUBLISHER' : 'SUBSCRIBER'}`);
+  console.log(`   Expires: ${new Date(privilegeExpireTime * 1000).toISOString()}`);
   
-  const sockets = io.sockets.sockets;
-  
-  for (const [socketId, socket] of sockets) {
-    if (socket.userId?.toString() === receiverId.toString()) {
-      return true;
-    }
+  try {
+    const token = RtcTokenBuilder.buildTokenWithUid(
+      AGORA_APP_ID,
+      AGORA_APP_CERTIFICATE,
+      channelName,
+      uid,
+      role,
+      privilegeExpireTime
+    );
+    
+    console.log(`✅ Token generated (length: ${token.length})`);
+    
+    return token;
+  } catch (error) {
+    console.error('❌ Token generation failed:', error);
+    throw new Error(`Token generation failed: ${error.message}`);
   }
-  
-  return false;
 }
 
 // ==================== ROUTES ====================
 
-// routes/voice-call.js - ADD THIS VALIDATION IMMEDIATELY
-
 /**
  * POST /api/voice-call/initiate
- * ✅ WITH SELF-CALL PREVENTION
+ * ✅ COMPLETE FIX: Proper UID and token handling
  */
 router.post('/initiate', authenticate, validateCallInitiation, async (req, res) => {
   try {
     const callerId = req.userId;
     const { receiverId, bookingId } = req.body;
     
-    // ==================== DEBUG LOGS ====================
+    console.log('\n=================================');
+    console.log('📞 VOICE CALL INITIATION REQUEST');
     console.log('=================================');
-    console.log('📞 VOICE CALL INITIATION');
-    console.log('=================================');
-    console.log('Caller ID (from auth):', callerId.toString());
-    console.log('Receiver ID (from body):', receiverId.toString());
-    console.log('Booking ID:', bookingId.toString());
-    console.log('Are they the same?', callerId.toString() === receiverId.toString());
-    console.log('=================================');
+    console.log(`Caller ID: ${callerId.toString()}`);
+    console.log(`Receiver ID: ${receiverId.toString()}`);
+    console.log(`Booking ID: ${bookingId.toString()}`);
+    console.log(`Timestamp: ${new Date().toISOString()}`);
     
-    // ==================== PREVENT SELF-CALLING ====================
-    // ✅ CRITICAL FIX: Stop users from calling themselves
-    if (callerId.toString() === receiverId.toString()) {
-      console.error('❌ CRITICAL BUG DETECTED: User trying to call themselves!');
-      console.error('   User ID:', callerId.toString());
-      console.error('   This means the chat participants data is corrupted!');
-      console.error('   Both participants in the chat have the same user ID.');
+    const { caller, receiver, booking } = req.validatedCallData;
+    
+    // ✅ STEP 1: Generate consistent UID for caller
+    const callerUid = objectIdToUid(callerId);
+    const channelName = `voice_${booking._id}_${Date.now()}`;
+    
+    console.log('\n📋 Call Configuration:');
+    console.log(`   Channel Name: ${channelName}`);
+    console.log(`   Caller UID: ${callerUid}`);
+    
+    // ✅ STEP 2: Generate token with EXACT same UID
+    let callerToken;
+    try {
+      callerToken = generateAgoraToken(channelName, callerUid, RtcRole.PUBLISHER);
+    } catch (tokenError) {
+      console.error('\n❌ TOKEN GENERATION FAILED');
+      console.error(`   Error: ${tokenError.message}`);
+      console.error(`   This usually means AGORA_APP_ID or AGORA_APP_CERTIFICATE is wrong`);
       
-      return res.status(400).json({
+      return res.status(500).json({
         success: false,
-        error: 'INVALID_RECEIVER',
-        message: 'Cannot call yourself. Please check chat participants data.',
-        debug: {
-          callerId: callerId.toString(),
-          receiverId: receiverId.toString(),
-          hint: 'Chat participants may have duplicate user IDs'
-        }
+        error: 'TOKEN_GENERATION_FAILED',
+        message: 'Failed to generate authentication token',
+        details: tokenError.message
       });
     }
     
-    // ==================== CONTINUE WITH NORMAL FLOW ====================
-    const { caller, receiver, booking } = req.validatedCallData;
-    
-    console.log('✅ Validation passed - different users confirmed');
-    console.log('📞 Initiating call:', {
-      callerId: callerId.toString(),
-      receiverId: receiverId.toString(),
-      bookingId: bookingId.toString()
-    });
-    
-    // ... rest of your existing code
-    
-    // Generate Agora credentials
-    const channelName = `voice_${booking._id}_${Date.now()}`;
-    const callerUid = objectIdToUid(callerId);
-    const callerToken = generateAgoraToken(channelName, callerUid);
-    
-    console.log('🔐 Agora credentials generated:', {
-      channelName,
-      callerUid,
-      appId: AGORA_APP_ID
-    });
-    
-    // Create voice call record
+    // ✅ STEP 3: Create voice call record
     const voiceCall = new VoiceCall({
       callerId,
       receiverId,
@@ -143,16 +131,16 @@ router.post('/initiate', authenticate, validateCallInitiation, async (req, res) 
     
     await voiceCall.save();
     
-    console.log('✅ Voice call record created:', voiceCall._id);
-    console.log('   Caller:', callerId.toString());
-    console.log('   Receiver:', receiverId.toString());
+    console.log(`\n✅ Voice Call Record Created:`);
+    console.log(`   Call ID: ${voiceCall._id}`);
+    console.log(`   Status: ${voiceCall.status}`);
     
-    // Send FCM notification to receiver
+    // ✅ STEP 4: Send FCM notification to receiver
     try {
       if (receiver.fcmTokens && receiver.fcmTokens.length > 0) {
-        console.log(`📨 Sending FCM to receiver: ${receiverId.toString()}`);
-        console.log(`   Receiver name: ${receiver.firstName} ${receiver.lastName}`);
-        console.log(`   Token count: ${receiver.fcmTokens.length}`);
+        console.log(`\n📨 Sending FCM Notification:`);
+        console.log(`   To: ${receiver.firstName} ${receiver.lastName}`);
+        console.log(`   Token Count: ${receiver.fcmTokens.length}`);
         
         const fcmMessage = {
           notification: {
@@ -167,8 +155,6 @@ router.post('/initiate', authenticate, validateCallInitiation, async (req, res) 
             callerName: `${caller.firstName} ${caller.lastName}`,
             callerPhoto: caller.profilePhoto || '',
             channelName: channelName,
-            token: callerToken,
-            uid: callerUid.toString(),
             appId: AGORA_APP_ID
           },
           tokens: receiver.fcmTokens,
@@ -186,17 +172,14 @@ router.post('/initiate', authenticate, validateCallInitiation, async (req, res) 
         
         const fcmResponse = await admin.messaging().sendEachForMulticast(fcmMessage);
         
-        console.log(`✅ FCM sent: ${fcmResponse.successCount}/${receiver.fcmTokens.length} successful`);
-        console.log(`   Sent to receiver ID: ${receiverId.toString()}`);
+        console.log(`✅ FCM Sent: ${fcmResponse.successCount}/${receiver.fcmTokens.length} successful`);
         
         if (fcmResponse.failureCount > 0) {
-          console.log(`⚠️ FCM failures: ${fcmResponse.failureCount}`);
-          
           const failedTokens = [];
           fcmResponse.responses.forEach((resp, idx) => {
             if (!resp.success) {
               failedTokens.push(receiver.fcmTokens[idx]);
-              console.log(`   Token ${idx}: ${resp.error?.code}`);
+              console.log(`   Failed Token ${idx}: ${resp.error?.code}`);
             }
           });
           
@@ -204,18 +187,17 @@ router.post('/initiate', authenticate, validateCallInitiation, async (req, res) 
             await User.findByIdAndUpdate(receiverId, {
               $pull: { fcmTokens: { $in: failedTokens } }
             });
-            console.log(`🧹 Removed ${failedTokens.length} invalid tokens`);
+            console.log(`🧹 Removed ${failedTokens.length} invalid FCM tokens`);
           }
         }
       } else {
-        console.log('⚠️ Receiver has no FCM tokens');
-        console.log('   Receiver ID:', receiverId.toString());
+        console.log('\n⚠️  Receiver has no FCM tokens registered');
       }
     } catch (fcmError) {
-      console.error('❌ FCM send error:', fcmError);
+      console.error('\n❌ FCM Send Error:', fcmError);
     }
     
-    // Emit socket event
+    // ✅ STEP 5: Emit socket event
     const io = req.app.get('io');
     if (io) {
       const receiverSockets = Array.from(io.sockets.sockets.values())
@@ -236,22 +218,31 @@ router.post('/initiate', authenticate, validateCallInitiation, async (req, res) 
             channelName
           });
         });
-        console.log(`✅ Socket event sent to ${receiverSockets.length} socket(s)`);
-        console.log(`   Receiver ID: ${receiverId.toString()}`);
+        console.log(`\n✅ Socket Event Sent: ${receiverSockets.length} socket(s)`);
       } else {
-        console.log('⚠️ Receiver not connected via socket (app might be closed)');
-        console.log('   Receiver ID:', receiverId.toString());
+        console.log('\n⚠️  Receiver not connected via socket (app likely closed)');
       }
     }
     
-    // Return success to caller
+    // ✅ STEP 6: Return credentials to caller
+    console.log('\n=================================');
+    console.log('📤 RESPONSE TO CALLER');
+    console.log('=================================');
+    console.log(`Call ID: ${voiceCall._id}`);
+    console.log(`Channel Name: ${channelName}`);
+    console.log(`UID: ${callerUid}`);
+    console.log(`App ID: ${AGORA_APP_ID}`);
+    console.log(`Token (preview): ${callerToken.substring(0, 20)}...`);
+    console.log(`Token Length: ${callerToken.length} chars`);
+    console.log('=================================\n');
+    
     res.status(201).json({
       success: true,
       callId: voiceCall._id,
-      token: callerToken,
-      channelName,
-      uid: callerUid,
-      appId: AGORA_APP_ID,
+      token: callerToken,        // ✅ Token generated with callerUid
+      channelName,               // ✅ Unique channel name
+      uid: callerUid,            // ✅ MUST match token UID
+      appId: AGORA_APP_ID,       // ✅ Same App ID used for token
       receiver: {
         _id: receiver._id,
         firstName: receiver.firstName,
@@ -261,39 +252,90 @@ router.post('/initiate', authenticate, validateCallInitiation, async (req, res) 
     });
     
   } catch (error) {
-    console.error('❌ Error initiating voice call:', error);
+    console.error('\n❌ ERROR INITIATING VOICE CALL');
+    console.error(`   Error: ${error.message}`);
+    console.error(`   Stack: ${error.stack}`);
+    
     res.status(500).json({
       success: false,
       error: 'CALL_INITIATION_FAILED',
-      message: 'Failed to initiate voice call'
+      message: 'Failed to initiate voice call',
+      details: error.message
     });
   }
 });
 
 /**
  * POST /api/voice-call/accept/:callId
- * ✅ FIXED: Sends FCM to caller + socket event
+ * ✅ COMPLETE FIX: Proper receiver token generation
  */
-router.post('/accept/:callId', authenticate, validateCallAcceptance, async (req, res) => {
+router.post('/accept/:callId', authenticate, async (req, res) => {
   try {
     const userId = req.userId;
-    const call = req.voiceCall;
+    const { callId } = req.params;
     
-    console.log('✅ Accepting call:', call._id);
+    console.log('\n=================================');
+    console.log('✅ ACCEPTING CALL');
+    console.log('=================================');
+    console.log(`Call ID: ${callId}`);
+    console.log(`Receiver ID: ${userId.toString()}`);
     
-    // Generate token for receiver
+    const call = await VoiceCall.findById(callId);
+    
+    if (!call) {
+      return res.status(404).json({
+        success: false,
+        error: 'CALL_NOT_FOUND',
+        message: 'Call not found'
+      });
+    }
+    
+    if (call.receiverId.toString() !== userId.toString()) {
+      return res.status(403).json({
+        success: false,
+        error: 'UNAUTHORIZED',
+        message: 'You are not the receiver of this call'
+      });
+    }
+    
+    if (!call.canBeAccepted()) {
+      return res.status(400).json({
+        success: false,
+        error: 'CALL_CANNOT_BE_ACCEPTED',
+        message: 'This call can no longer be accepted'
+      });
+    }
+    
+    // ✅ STEP 1: Generate UID for receiver
     const receiverUid = objectIdToUid(userId);
-    const receiverToken = generateAgoraToken(call.channelName, receiverUid);
+    console.log(`\n📋 Receiver Configuration:`);
+    console.log(`   Channel Name: ${call.channelName}`);
+    console.log(`   Receiver UID: ${receiverUid}`);
     
-    // Update call status
+    // ✅ STEP 2: Generate token with EXACT same UID
+    let receiverToken;
+    try {
+      receiverToken = generateAgoraToken(call.channelName, receiverUid, RtcRole.PUBLISHER);
+    } catch (tokenError) {
+      console.error('\n❌ TOKEN GENERATION FAILED FOR RECEIVER');
+      console.error(`   Error: ${tokenError.message}`);
+      
+      return res.status(500).json({
+        success: false,
+        error: 'TOKEN_GENERATION_FAILED',
+        message: 'Failed to generate authentication token'
+      });
+    }
+    
+    // ✅ STEP 3: Update call status
     call.status = 'CONNECTING';
     call.acceptedAt = new Date();
     call.receiverAgoraUid = receiverUid;
     await call.save();
     
-    console.log('✅ Call status updated to CONNECTING');
+    console.log(`\n✅ Call Status Updated: CONNECTING`);
     
-    // ✅ Send FCM to caller
+    // ✅ STEP 4: Notify caller
     try {
       const caller = await User.findById(call.callerId).select('fcmTokens firstName lastName');
       
@@ -307,38 +349,50 @@ router.post('/accept/:callId', authenticate, validateCallAcceptance, async (req,
         };
         
         await admin.messaging().sendEachForMulticast(fcmMessage);
-        console.log('✅ FCM sent to caller (call accepted)');
+        console.log(`✅ FCM sent to caller (call accepted)`);
       }
     } catch (fcmError) {
       console.error('❌ FCM error:', fcmError);
     }
     
-    // ✅ Emit socket event
+    // ✅ STEP 5: Emit socket event
     const io = req.app.get('io');
     if (io) {
       const callerSockets = Array.from(io.sockets.sockets.values())
         .filter(s => s.userId?.toString() === call.callerId.toString());
       
       callerSockets.forEach(socket => {
-        socket.emit('voice-call-accepted', { 
-          callId: call._id.toString() 
+        socket.emit('voice-call-accepted', {
+          callId: call._id.toString()
         });
       });
       
       console.log(`✅ Socket event sent to ${callerSockets.length} caller socket(s)`);
     }
     
-    // Return credentials to receiver
+    // ✅ STEP 6: Return credentials to receiver
+    console.log('\n=================================');
+    console.log('📤 RESPONSE TO RECEIVER');
+    console.log('=================================');
+    console.log(`Channel Name: ${call.channelName}`);
+    console.log(`UID: ${receiverUid}`);
+    console.log(`App ID: ${AGORA_APP_ID}`);
+    console.log(`Token (preview): ${receiverToken.substring(0, 20)}...`);
+    console.log(`Token Length: ${receiverToken.length} chars`);
+    console.log('=================================\n');
+    
     res.json({
       success: true,
-      token: receiverToken,
+      token: receiverToken,      // ✅ Token generated with receiverUid
       channelName: call.channelName,
-      uid: receiverUid,
+      uid: receiverUid,          // ✅ MUST match token UID
       appId: AGORA_APP_ID
     });
     
   } catch (error) {
-    console.error('❌ Error accepting voice call:', error);
+    console.error('\n❌ ERROR ACCEPTING VOICE CALL');
+    console.error(`   Error: ${error.message}`);
+    
     res.status(500).json({
       success: false,
       error: 'CALL_ACCEPTANCE_FAILED',
@@ -349,7 +403,6 @@ router.post('/accept/:callId', authenticate, validateCallAcceptance, async (req,
 
 /**
  * POST /api/voice-call/reject/:callId
- * ✅ FIXED: Sends FCM to caller + socket event
  */
 router.post('/reject/:callId', authenticate, async (req, res) => {
   try {
@@ -359,31 +412,31 @@ router.post('/reject/:callId', authenticate, async (req, res) => {
     const call = await VoiceCall.findById(callId);
     
     if (!call) {
-      return res.status(404).json({ 
-        success: false, 
-        error: 'CALL_NOT_FOUND' 
+      return res.status(404).json({
+        success: false,
+        error: 'CALL_NOT_FOUND'
       });
     }
     
     if (call.receiverId.toString() !== userId.toString()) {
-      return res.status(403).json({ 
-        success: false, 
-        error: 'UNAUTHORIZED' 
+      return res.status(403).json({
+        success: false,
+        error: 'UNAUTHORIZED'
       });
     }
     
     if (call.status !== 'RINGING') {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'INVALID_STATE' 
+      return res.status(400).json({
+        success: false,
+        error: 'INVALID_STATE'
       });
     }
     
     await call.decline();
     
-    console.log('❌ Call rejected:', callId);
+    console.log(`❌ Call rejected: ${callId}`);
     
-    // ✅ Send FCM to caller
+    // Notify caller
     try {
       const caller = await User.findById(call.callerId).select('fcmTokens');
       
@@ -398,21 +451,20 @@ router.post('/reject/:callId', authenticate, async (req, res) => {
         };
         
         await admin.messaging().sendEachForMulticast(fcmMessage);
-        console.log('✅ FCM sent to caller (call rejected)');
       }
     } catch (fcmError) {
       console.error('❌ FCM error:', fcmError);
     }
     
-    // ✅ Emit socket event
+    // Emit socket event
     const io = req.app.get('io');
     if (io) {
       const callerSockets = Array.from(io.sockets.sockets.values())
         .filter(s => s.userId?.toString() === call.callerId.toString());
-        
+      
       callerSockets.forEach(socket => {
-        socket.emit('voice-call-rejected', { 
-          callId: call._id.toString() 
+        socket.emit('voice-call-rejected', {
+          callId: call._id.toString()
         });
       });
     }
@@ -421,16 +473,15 @@ router.post('/reject/:callId', authenticate, async (req, res) => {
     
   } catch (error) {
     console.error('❌ Error rejecting voice call:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'CALL_REJECTION_FAILED' 
+    res.status(500).json({
+      success: false,
+      error: 'CALL_REJECTION_FAILED'
     });
   }
 });
 
 /**
  * POST /api/voice-call/end/:callId
- * ✅ FIXED: Sends FCM to other user + socket event
  */
 router.post('/end/:callId', authenticate, validateCallEnd, async (req, res) => {
   try {
@@ -440,14 +491,14 @@ router.post('/end/:callId', authenticate, validateCallEnd, async (req, res) => {
     
     await call.end(reason);
     
-    console.log('📴 Call ended:', call._id);
+    console.log(`📴 Call ended: ${call._id} (${reason})`);
     
     // Get other user
-    const otherUserId = call.callerId.toString() === userId.toString() 
-      ? call.receiverId 
+    const otherUserId = call.callerId.toString() === userId.toString()
+      ? call.receiverId
       : call.callerId;
     
-    // ✅ Send FCM to other user
+    // Notify other user
     try {
       const otherUser = await User.findById(otherUserId).select('fcmTokens');
       
@@ -463,44 +514,42 @@ router.post('/end/:callId', authenticate, validateCallEnd, async (req, res) => {
         };
         
         await admin.messaging().sendEachForMulticast(fcmMessage);
-        console.log('✅ FCM sent to other user (call ended)');
       }
     } catch (fcmError) {
       console.error('❌ FCM error:', fcmError);
     }
     
-    // ✅ Emit socket event
+    // Emit socket event
     const io = req.app.get('io');
     if (io) {
       const otherUserSockets = Array.from(io.sockets.sockets.values())
         .filter(s => s.userId?.toString() === otherUserId.toString());
-        
+      
       otherUserSockets.forEach(socket => {
-        socket.emit('voice-call-ended', { 
-          callId: call._id.toString(), 
-          reason, 
-          duration: call.duration || 0 
+        socket.emit('voice-call-ended', {
+          callId: call._id.toString(),
+          reason,
+          duration: call.duration || 0
         });
       });
     }
     
-    res.json({ 
-      success: true, 
-      duration: call.duration || 0 
+    res.json({
+      success: true,
+      duration: call.duration || 0
     });
     
   } catch (error) {
     console.error('❌ Error ending voice call:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'CALL_END_FAILED' 
+    res.status(500).json({
+      success: false,
+      error: 'CALL_END_FAILED'
     });
   }
 });
 
 /**
  * PATCH /api/voice-call/status/:callId
- * Update call status (CONNECTING → CONNECTED)
  */
 router.patch('/status/:callId', authenticate, async (req, res) => {
   try {
@@ -533,7 +582,7 @@ router.patch('/status/:callId', authenticate, async (req, res) => {
       call.connectedAt = new Date();
       await call.save();
       
-      console.log('✅ Voice call connected:', call._id);
+      console.log(`✅ Voice call connected: ${call._id}`);
     }
     
     res.json({
@@ -552,7 +601,6 @@ router.patch('/status/:callId', authenticate, async (req, res) => {
 
 /**
  * GET /api/voice-call/active
- * Get user's active call (if any)
  */
 router.get('/active', authenticate, async (req, res) => {
   try {
