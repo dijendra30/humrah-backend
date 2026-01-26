@@ -1,19 +1,23 @@
-//middleware/voice-call-validator.js - FINAL FIXED VERSION
+// middleware/voice-call-validator.js - PRODUCTION VERSION
+// ✅ NO CALL LIMITS - Users can call anytime until chat expires
+// ✅ Calls auto-end after 30 minutes
 const RandomBooking = require('../models/RandomBooking');
 const VoiceCall = require('../models/VoiceCall');
 const User = require('../models/User');
+const RandomBookingChat = require('../models/RandomBookingChat');
 
 /**
- * Validate if a voice call can be initiated
+ * ✅ Validate if a voice call can be initiated
  */
 async function validateCallEligibility(callerId, receiverId, bookingId) {
   const errors = [];
   
   // ==================== 1. FETCH REQUIRED DATA ====================
-  const [caller, receiver, booking] = await Promise.all([
+  const [caller, receiver, booking, chat] = await Promise.all([
     User.findById(callerId),
     User.findById(receiverId),
-    RandomBooking.findById(bookingId)
+    RandomBooking.findById(bookingId),
+    RandomBookingChat.findOne({ bookingId, isDeleted: false })
   ]);
   
   // ==================== 2. VALIDATE EXISTENCE ====================
@@ -29,26 +33,28 @@ async function validateCallEligibility(callerId, receiverId, bookingId) {
     errors.push({ code: 'BOOKING_NOT_FOUND', message: 'Booking not found' });
   }
   
+  if (!chat) {
+    errors.push({ code: 'CHAT_NOT_FOUND', message: 'Chat not found for this booking' });
+  }
+  
   if (errors.length > 0) {
     return { valid: false, errors, data: null };
   }
   
-  // ==================== 3. VALIDATE BOOKING STATUS ====================
+  // ==================== 3. VALIDATE CHAT NOT EXPIRED ====================
+  // ✅ CRITICAL: Check if chat is expired
+  if (chat.isExpired()) {
+    errors.push({
+      code: 'CHAT_EXPIRED',
+      message: 'This chat has expired. Voice calls are no longer available.'
+    });
+  }
+  
+  // ==================== 4. VALIDATE BOOKING STATUS ====================
   if (booking.status !== 'MATCHED') {
     errors.push({
       code: 'BOOKING_NOT_ACCEPTED',
       message: 'Voice calls are only available for accepted bookings'
-    });
-  }
-  
-  // ==================== 4. VALIDATE BOOKING NOT EXPIRED ====================
-  const meetupDate = new Date(booking.date);
-  meetupDate.setHours(23, 59, 59, 999); // End of meetup day
-  
-  if (new Date() > meetupDate) {
-    errors.push({
-      code: 'BOOKING_EXPIRED',
-      message: 'This booking has ended. Voice calls are no longer available.'
     });
   }
   
@@ -75,24 +81,21 @@ async function validateCallEligibility(callerId, receiverId, bookingId) {
     });
   }
   
-  // ==================== 6. VALIDATE USERS ACTIVE (FIXED) ====================
+  // ==================== 6. VALIDATE USERS ACTIVE ====================
   if (caller.status !== 'ACTIVE') {
     errors.push({
       code: 'CALLER_INACTIVE',
-      // BEFORE: message: `Caller account is not active (status: ${caller.status})`
-      // AFTER: Add a unique identifier
-      message: `V2_VALIDATOR: Caller account is not ACTIVE. Status is: ${caller.status}` 
+      message: 'Caller account is not active'
     });
   }
   
   if (receiver.status !== 'ACTIVE') {
     errors.push({
       code: 'RECEIVER_INACTIVE',
-       // BEFORE: message: `Receiver account is not active (status: ${receiver.status})`
-      // AFTER: Add a unique identifier
-      message: `V2_VALIDATOR: Receiver account is not ACTIVE. Status is: ${receiver.status}`
+      message: 'Receiver account is not active'
     });
   }
+  
   // ==================== 7. VALIDATE NOT BLOCKED ====================
   const callerBlocked = caller.blockedUsers?.includes(receiverId);
   const receiverBlocked = receiver.blockedUsers?.includes(callerId);
@@ -124,19 +127,12 @@ async function validateCallEligibility(callerId, receiverId, bookingId) {
     });
   }
   
-  // ==================== 10. RATE LIMITING ====================
-  const recentAttempts = await VoiceCall.countRecentAttempts(callerId, bookingId, 1);
-  
-  if (recentAttempts >= 3) {
-    errors.push({
-      code: 'RATE_LIMIT_EXCEEDED',
-      message: 'Too many call attempts. Please wait before trying again.'
-    });
-  }
+  // ==================== NO RATE LIMITING ✅ ====================
+  // Users can call as many times as they want until chat expires
   
   // ==================== RETURN RESULT ====================
   if (errors.length > 0) {
-    return { valid: false, errors, data: { caller, receiver, booking } };
+    return { valid: false, errors, data: { caller, receiver, booking, chat } };
   }
   
   return {
@@ -145,7 +141,8 @@ async function validateCallEligibility(callerId, receiverId, bookingId) {
     data: {
       caller,
       receiver,
-      booking
+      booking,
+      chat
     }
   };
 }
@@ -153,13 +150,11 @@ async function validateCallEligibility(callerId, receiverId, bookingId) {
 /**
  * Middleware to validate call initiation
  */
-
 async function validateCallInitiation(req, res, next) {
   try {
     const callerId = req.userId;
     const { receiverId, bookingId } = req.body;
     
-    // ✅ ENHANCED LOGGING
     console.log('=================================');
     console.log('📞 CALL VALIDATION');
     console.log('=================================');
@@ -188,45 +183,32 @@ async function validateCallInitiation(req, res, next) {
     // Validate eligibility
     const validation = await validateCallEligibility(callerId, receiverId, bookingId);
     
-    // ✅ ENHANCED ERROR RESPONSE
     if (!validation.valid) {
       const error = validation.errors[0];
       
-      // Log the validation errors
       console.log('❌ VALIDATION FAILED:');
       validation.errors.forEach(err => {
         console.log(`   - ${err.code}: ${err.message}`);
       });
       
-      // Special handling for BOOKING_NOT_FOUND
-      if (error.code === 'BOOKING_NOT_FOUND') {
-        console.log('=================================');
-        console.log('🔍 BOOKING NOT FOUND DEBUG INFO');
-        console.log('=================================');
-        console.log('Searched for booking ID:', bookingId.toString());
-        console.log('Caller ID:', callerId.toString());
-        console.log('Receiver ID:', receiverId.toString());
-        console.log('Suggestion: Check if this booking exists in the database');
-        console.log('MongoDB Query: db.randombookings.findOne({_id: ObjectId("' + bookingId + '")})');
-        console.log('=================================');
+      // Special handling for CHAT_EXPIRED
+      if (error.code === 'CHAT_EXPIRED') {
+        console.log('⏰ Chat has expired - voice calls no longer available');
       }
       
       return res.status(400).json({
         success: false,
         error: error.code,
         message: error.message,
-        allErrors: validation.errors,
-        debug: {
-          bookingId: bookingId.toString(),
-          callerId: callerId.toString(),
-          receiverId: receiverId.toString(),
-          hint: 'Check if the booking exists and belongs to these users'
-        }
+        allErrors: validation.errors
       });
     }
     
     // Attach validated data to request
     req.validatedCallData = validation.data;
+    
+    console.log('✅ Validation passed - call allowed');
+    console.log('=================================');
     
     next();
   } catch (error) {
@@ -235,56 +217,6 @@ async function validateCallInitiation(req, res, next) {
       success: false,
       error: 'VALIDATION_ERROR',
       message: 'Failed to validate call eligibility'
-    });
-  }
-}
-/**
- * Middleware to validate call acceptance
- */
-async function validateCallAcceptance(req, res, next) {
-  try {
-    const userId = req.userId;
-    const { callId } = req.params;
-    
-    // Fetch call
-    const call = await VoiceCall.findById(callId);
-    
-    if (!call) {
-      return res.status(404).json({
-        success: false,
-        error: 'CALL_NOT_FOUND',
-        message: 'Call not found'
-      });
-    }
-    
-    // Validate user is receiver
-    if (call.receiverId.toString() !== userId.toString()) {
-      return res.status(403).json({
-        success: false,
-        error: 'UNAUTHORIZED',
-        message: 'You are not the receiver of this call'
-      });
-    }
-    
-    // Validate call can be accepted
-    if (!call.canBeAccepted()) {
-      return res.status(400).json({
-        success: false,
-        error: 'CALL_CANNOT_BE_ACCEPTED',
-        message: 'This call can no longer be accepted'
-      });
-    }
-    
-    // Attach call to request
-    req.voiceCall = call;
-    
-    next();
-  } catch (error) {
-    console.error('Call acceptance validation error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'VALIDATION_ERROR',
-      message: 'Failed to validate call acceptance'
     });
   }
 }
@@ -297,7 +229,6 @@ async function validateCallEnd(req, res, next) {
     const userId = req.userId;
     const { callId } = req.params;
     
-    // Fetch call
     const call = await VoiceCall.findById(callId);
     
     if (!call) {
@@ -344,27 +275,8 @@ async function validateCallEnd(req, res, next) {
   }
 }
 
-/**
- * Helper: Check if receiver is online (has active socket connection)
- */
-function isReceiverOnline(receiverId, io) {
-  // Get all connected sockets
-  const sockets = io.sockets.sockets;
-  
-  // Check if any socket belongs to receiver
-  for (const [socketId, socket] of sockets) {
-    if (socket.userId?.toString() === receiverId.toString()) {
-      return true;
-    }
-  }
-  
-  return false;
-}
-
 module.exports = {
   validateCallEligibility,
   validateCallInitiation,
-  validateCallAcceptance,
-  validateCallEnd,
-  isReceiverOnline
+  validateCallEnd
 };
