@@ -1,4 +1,4 @@
-// routes/voice-call.js - COMPLETE FIXED VERSION WITH PROPER AGORA INTEGRATION
+// routes/voice-call.js - FINAL FIX WITH PROPER UID RANGE
 const express = require('express');
 const router = express.Router();
 const { RtcTokenBuilder, RtcRole } = require('agora-access-token');
@@ -17,30 +17,39 @@ const AGORA_APP_CERTIFICATE = process.env.AGORA_APP_CERTIFICATE || '4cc9dde943ca
 const TOKEN_EXPIRATION_TIME = 30 * 60; // 30 minutes
 
 /**
- * ✅ FIXED: Convert MongoDB ObjectId to numeric UID for Agora
- * MUST be consistent - same ObjectId always returns same UID
+ * ✅ CRITICAL FIX: Convert MongoDB ObjectId to UID in SIGNED 32-bit range
+ * Android Int is signed: -2,147,483,648 to 2,147,483,647
+ * We MUST keep UIDs within this range to avoid overflow
  */
 function objectIdToUid(objectId) {
   const objectIdString = objectId.toString();
   
   // Take last 8 characters of ObjectId and convert to integer
   const hex = objectIdString.slice(-8);
-  const uid = parseInt(hex, 16);
+  let uid = parseInt(hex, 16);
   
-  // Ensure it's within Agora's valid range (0 to 2^32-1)
-  const result = Math.abs(uid) % 0xFFFFFFFF;
+  // ✅ CRITICAL: Keep within SIGNED 32-bit range for Android
+  // Instead of using full unsigned range, use signed range
+  const SIGNED_INT_MAX = 2147483647;
   
-  console.log(`🔢 UID Conversion: ${objectIdString.slice(0, 8)}... -> ${hex} -> ${result}`);
+  // Ensure UID is positive and within signed int range
+  uid = Math.abs(uid) % SIGNED_INT_MAX;
   
-  return result;
+  // Ensure UID is never 0 (add 1 if it is)
+  if (uid === 0) uid = 1;
+  
+  console.log(`🔢 UID Conversion: ${objectIdString.slice(0, 8)}... -> ${hex} -> ${uid}`);
+  console.log(`   ✅ UID is within signed 32-bit range (max: ${SIGNED_INT_MAX})`);
+  
+  return uid;
 }
 
 /**
- * ✅ FIXED: Generate Agora RTC Token with proper error handling
+ * ✅ Generate Agora RTC Token
  */
 function generateAgoraToken(channelName, uid, role = RtcRole.PUBLISHER) {
   if (!AGORA_APP_ID || !AGORA_APP_CERTIFICATE) {
-    throw new Error('Agora credentials not configured. Check AGORA_APP_ID and AGORA_APP_CERTIFICATE in .env');
+    throw new Error('Agora credentials not configured');
   }
   
   const currentTimestamp = Math.floor(Date.now() / 1000);
@@ -76,7 +85,6 @@ function generateAgoraToken(channelName, uid, role = RtcRole.PUBLISHER) {
 
 /**
  * POST /api/voice-call/initiate
- * ✅ COMPLETE FIX: Proper UID and token handling
  */
 router.post('/initiate', authenticate, validateCallInitiation, async (req, res) => {
   try {
@@ -93,7 +101,7 @@ router.post('/initiate', authenticate, validateCallInitiation, async (req, res) 
     
     const { caller, receiver, booking } = req.validatedCallData;
     
-    // ✅ STEP 1: Generate consistent UID for caller
+    // ✅ Generate UID within signed 32-bit range
     const callerUid = objectIdToUid(callerId);
     const channelName = `voice_${booking._id}_${Date.now()}`;
     
@@ -101,14 +109,13 @@ router.post('/initiate', authenticate, validateCallInitiation, async (req, res) 
     console.log(`   Channel Name: ${channelName}`);
     console.log(`   Caller UID: ${callerUid}`);
     
-    // ✅ STEP 2: Generate token with EXACT same UID
+    // ✅ Generate token
     let callerToken;
     try {
       callerToken = generateAgoraToken(channelName, callerUid, RtcRole.PUBLISHER);
     } catch (tokenError) {
       console.error('\n❌ TOKEN GENERATION FAILED');
       console.error(`   Error: ${tokenError.message}`);
-      console.error(`   This usually means AGORA_APP_ID or AGORA_APP_CERTIFICATE is wrong`);
       
       return res.status(500).json({
         success: false,
@@ -118,7 +125,7 @@ router.post('/initiate', authenticate, validateCallInitiation, async (req, res) 
       });
     }
     
-    // ✅ STEP 3: Create voice call record
+    // Create voice call record
     const voiceCall = new VoiceCall({
       callerId,
       receiverId,
@@ -135,7 +142,7 @@ router.post('/initiate', authenticate, validateCallInitiation, async (req, res) 
     console.log(`   Call ID: ${voiceCall._id}`);
     console.log(`   Status: ${voiceCall.status}`);
     
-    // ✅ STEP 4: Send FCM notification to receiver
+    // Send FCM notification
     try {
       if (receiver.fcmTokens && receiver.fcmTokens.length > 0) {
         console.log(`\n📨 Sending FCM Notification:`);
@@ -171,7 +178,6 @@ router.post('/initiate', authenticate, validateCallInitiation, async (req, res) 
         };
         
         const fcmResponse = await admin.messaging().sendEachForMulticast(fcmMessage);
-        
         console.log(`✅ FCM Sent: ${fcmResponse.successCount}/${receiver.fcmTokens.length} successful`);
         
         if (fcmResponse.failureCount > 0) {
@@ -179,7 +185,6 @@ router.post('/initiate', authenticate, validateCallInitiation, async (req, res) 
           fcmResponse.responses.forEach((resp, idx) => {
             if (!resp.success) {
               failedTokens.push(receiver.fcmTokens[idx]);
-              console.log(`   Failed Token ${idx}: ${resp.error?.code}`);
             }
           });
           
@@ -190,14 +195,12 @@ router.post('/initiate', authenticate, validateCallInitiation, async (req, res) 
             console.log(`🧹 Removed ${failedTokens.length} invalid FCM tokens`);
           }
         }
-      } else {
-        console.log('\n⚠️  Receiver has no FCM tokens registered');
       }
     } catch (fcmError) {
       console.error('\n❌ FCM Send Error:', fcmError);
     }
     
-    // ✅ STEP 5: Emit socket event
+    // Emit socket event
     const io = req.app.get('io');
     if (io) {
       const receiverSockets = Array.from(io.sockets.sockets.values())
@@ -219,18 +222,16 @@ router.post('/initiate', authenticate, validateCallInitiation, async (req, res) 
           });
         });
         console.log(`\n✅ Socket Event Sent: ${receiverSockets.length} socket(s)`);
-      } else {
-        console.log('\n⚠️  Receiver not connected via socket (app likely closed)');
       }
     }
     
-    // ✅ STEP 6: Return credentials to caller
+    // ✅ Return response
     console.log('\n=================================');
     console.log('📤 RESPONSE TO CALLER');
     console.log('=================================');
     console.log(`Call ID: ${voiceCall._id}`);
     console.log(`Channel Name: ${channelName}`);
-    console.log(`UID: ${callerUid}`);
+    console.log(`UID: ${callerUid} (signed 32-bit)`);
     console.log(`App ID: ${AGORA_APP_ID}`);
     console.log(`Token (preview): ${callerToken.substring(0, 20)}...`);
     console.log(`Token Length: ${callerToken.length} chars`);
@@ -239,10 +240,10 @@ router.post('/initiate', authenticate, validateCallInitiation, async (req, res) 
     res.status(201).json({
       success: true,
       callId: voiceCall._id,
-      token: callerToken,        // ✅ Token generated with callerUid
-      channelName,               // ✅ Unique channel name
-      uid: callerUid,            // ✅ MUST match token UID
-      appId: AGORA_APP_ID,       // ✅ Same App ID used for token
+      token: callerToken,
+      channelName,
+      uid: callerUid,  // ✅ Now within signed 32-bit range
+      appId: AGORA_APP_ID,
       receiver: {
         _id: receiver._id,
         firstName: receiver.firstName,
@@ -267,7 +268,6 @@ router.post('/initiate', authenticate, validateCallInitiation, async (req, res) 
 
 /**
  * POST /api/voice-call/accept/:callId
- * ✅ COMPLETE FIX: Proper receiver token generation
  */
 router.post('/accept/:callId', authenticate, async (req, res) => {
   try {
@@ -306,13 +306,13 @@ router.post('/accept/:callId', authenticate, async (req, res) => {
       });
     }
     
-    // ✅ STEP 1: Generate UID for receiver
+    // ✅ Generate UID within signed 32-bit range
     const receiverUid = objectIdToUid(userId);
     console.log(`\n📋 Receiver Configuration:`);
     console.log(`   Channel Name: ${call.channelName}`);
     console.log(`   Receiver UID: ${receiverUid}`);
     
-    // ✅ STEP 2: Generate token with EXACT same UID
+    // Generate token
     let receiverToken;
     try {
       receiverToken = generateAgoraToken(call.channelName, receiverUid, RtcRole.PUBLISHER);
@@ -327,7 +327,7 @@ router.post('/accept/:callId', authenticate, async (req, res) => {
       });
     }
     
-    // ✅ STEP 3: Update call status
+    // Update call status
     call.status = 'CONNECTING';
     call.acceptedAt = new Date();
     call.receiverAgoraUid = receiverUid;
@@ -335,7 +335,7 @@ router.post('/accept/:callId', authenticate, async (req, res) => {
     
     console.log(`\n✅ Call Status Updated: CONNECTING`);
     
-    // ✅ STEP 4: Notify caller
+    // Notify caller
     try {
       const caller = await User.findById(call.callerId).select('fcmTokens firstName lastName');
       
@@ -355,7 +355,7 @@ router.post('/accept/:callId', authenticate, async (req, res) => {
       console.error('❌ FCM error:', fcmError);
     }
     
-    // ✅ STEP 5: Emit socket event
+    // Emit socket event
     const io = req.app.get('io');
     if (io) {
       const callerSockets = Array.from(io.sockets.sockets.values())
@@ -370,12 +370,12 @@ router.post('/accept/:callId', authenticate, async (req, res) => {
       console.log(`✅ Socket event sent to ${callerSockets.length} caller socket(s)`);
     }
     
-    // ✅ STEP 6: Return credentials to receiver
+    // Return response
     console.log('\n=================================');
     console.log('📤 RESPONSE TO RECEIVER');
     console.log('=================================');
     console.log(`Channel Name: ${call.channelName}`);
-    console.log(`UID: ${receiverUid}`);
+    console.log(`UID: ${receiverUid} (signed 32-bit)`);
     console.log(`App ID: ${AGORA_APP_ID}`);
     console.log(`Token (preview): ${receiverToken.substring(0, 20)}...`);
     console.log(`Token Length: ${receiverToken.length} chars`);
@@ -383,9 +383,9 @@ router.post('/accept/:callId', authenticate, async (req, res) => {
     
     res.json({
       success: true,
-      token: receiverToken,      // ✅ Token generated with receiverUid
+      token: receiverToken,
       channelName: call.channelName,
-      uid: receiverUid,          // ✅ MUST match token UID
+      uid: receiverUid,  // ✅ Now within signed 32-bit range
       appId: AGORA_APP_ID
     });
     
@@ -433,7 +433,6 @@ router.post('/reject/:callId', authenticate, async (req, res) => {
     }
     
     await call.decline();
-    
     console.log(`❌ Call rejected: ${callId}`);
     
     // Notify caller
@@ -490,7 +489,6 @@ router.post('/end/:callId', authenticate, validateCallEnd, async (req, res) => {
     const { reason = 'user_ended' } = req.body;
     
     await call.end(reason);
-    
     console.log(`📴 Call ended: ${call._id} (${reason})`);
     
     // Get other user
