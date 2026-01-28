@@ -1,437 +1,351 @@
-// models/VoiceCall.js - FIXED VERSION WITH AUTO-CLEANUP
+// models/VoiceCall.js - FIXED VERSION WITH PROPER CLEANUP
 const mongoose = require('mongoose');
 
-const voiceCallSchema = new mongoose.Schema({
-  // ==================== CALL PARTICIPANTS ====================
+const VoiceCallSchema = new mongoose.Schema({
   callerId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
-    required: true,
-    index: true
+    required: true
   },
-  
   receiverId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
-    required: true,
-    index: true
+    required: true
   },
-  
-  // ==================== BOOKING REFERENCE ====================
   bookingId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'RandomBooking',
-    required: true,
-    index: true
+    required: true
   },
-  
-  // ==================== AGORA DETAILS ====================
   channelName: {
     type: String,
-    required: true,
-    unique: true,
-    index: true
+    required: true
   },
-  
   callerAgoraUid: {
     type: Number,
     required: true
   },
-  
   receiverAgoraUid: {
     type: Number,
     default: null
   },
-  
-  // ==================== CALL STATUS ====================
   status: {
     type: String,
-    enum: [
-      'RINGING',
-      'CONNECTING',
-      'CONNECTED',
-      'DECLINED',
-      'TIMEOUT',
-      'ENDED',
-      'FAILED',
-      'EXPIRED'
-    ],
-    default: 'RINGING',
-    required: true,
-    index: true
+    enum: ['RINGING', 'CONNECTING', 'CONNECTED', 'ENDED', 'DECLINED', 'MISSED', 'FAILED'],
+    default: 'RINGING'
   },
-  
-  // ==================== TIMESTAMPS ====================
   initiatedAt: {
     type: Date,
-    default: Date.now,
-    required: true,
-    index: true
+    default: Date.now
   },
-  
   acceptedAt: {
     type: Date,
     default: null
   },
-  
   connectedAt: {
     type: Date,
     default: null
   },
-  
   endedAt: {
     type: Date,
     default: null
   },
-  
-  // ==================== DURATION ====================
   duration: {
-    type: Number,
-    default: null
+    type: Number, // in seconds
+    default: 0
   },
-  
-  // ==================== END REASON ====================
   endReason: {
     type: String,
-    enum: [
-      'user_ended',
-      'receiver_declined',
-      'no_answer',
-      'network_failure',
-      'max_duration_exceeded',
-      'booking_expired',
-      'system_error',
-      'auto_expired',
-      'auto_timeout',
-      'stale_cleanup'
-    ],
     default: null
   },
-  
-  // ==================== FAILURE DETAILS ====================
-  failureReason: {
-    type: String,
-    default: null
-  },
-  
-  // ==================== NETWORK QUALITY ====================
-  networkQuality: {
-    caller: {
-      type: String,
-      enum: ['excellent', 'good', 'fair', 'poor', 'unknown'],
-      default: 'unknown'
-    },
-    receiver: {
-      type: String,
-      enum: ['excellent', 'good', 'fair', 'poor', 'unknown'],
-      default: 'unknown'
-    }
-  },
-  
-  // ==================== CLIENT INFO ====================
-  clientInfo: {
-    callerAppVersion: String,
-    receiverAppVersion: String,
-    callerPlatform: String,
-    receiverPlatform: String
-  },
-  
-  // ==================== PRIVACY & COMPLIANCE ====================
-  audioRecorded: {
+  isDeleted: {
     type: Boolean,
-    default: false,
-    immutable: true
+    default: false
   }
-  
 }, {
   timestamps: true
 });
 
 // ==================== INDEXES ====================
-voiceCallSchema.index({ callerId: 1, status: 1 });
-voiceCallSchema.index({ receiverId: 1, status: 1 });
-voiceCallSchema.index({ bookingId: 1, createdAt: -1 });
-voiceCallSchema.index({ status: 1, initiatedAt: 1 });
-voiceCallSchema.index(
-  { createdAt: 1 },
-  { expireAfterSeconds: 30 * 24 * 60 * 60 }
-);
+VoiceCallSchema.index({ callerId: 1, status: 1 });
+VoiceCallSchema.index({ receiverId: 1, status: 1 });
+VoiceCallSchema.index({ bookingId: 1 });
+VoiceCallSchema.index({ status: 1, initiatedAt: 1 });
+VoiceCallSchema.index({ createdAt: 1 }); // For cleanup job
 
-// ==================== VIRTUAL FIELDS ====================
-voiceCallSchema.virtual('isActive').get(function() {
+// ==================== VIRTUALS ====================
+VoiceCallSchema.virtual('isActive').get(function() {
   return ['RINGING', 'CONNECTING', 'CONNECTED'].includes(this.status);
 });
 
-// ==================== METHODS ====================
+// ==================== INSTANCE METHODS ====================
 
-voiceCallSchema.methods.canBeAccepted = function() {
+/**
+ * ✅ Check if call has timed out
+ */
+VoiceCallSchema.methods.hasTimedOut = function() {
+  const now = new Date();
+  
+  // RINGING calls timeout after 30 seconds
+  if (this.status === 'RINGING') {
+    const ringingDuration = (now - this.initiatedAt) / 1000; // in seconds
+    return ringingDuration > 30;
+  }
+  
+  // CONNECTING calls timeout after 60 seconds
+  if (this.status === 'CONNECTING') {
+    const connectingDuration = (now - (this.acceptedAt || this.initiatedAt)) / 1000;
+    return connectingDuration > 60;
+  }
+  
+  // CONNECTED calls timeout after 30 minutes
+  if (this.status === 'CONNECTED') {
+    const connectedDuration = (now - this.connectedAt) / 1000;
+    return connectedDuration > 1800; // 30 minutes
+  }
+  
+  return false;
+};
+
+/**
+ * ✅ Check if call can be accepted
+ */
+VoiceCallSchema.methods.canBeAccepted = function() {
   if (this.status !== 'RINGING') return false;
-  
-  const thirtySecondsAgo = new Date(Date.now() - 30 * 1000);
-  if (this.initiatedAt < thirtySecondsAgo) return false;
-  
+  if (this.hasTimedOut()) return false;
   return true;
 };
 
-voiceCallSchema.methods.accept = async function() {
-  if (!this.canBeAccepted()) {
-    throw new Error('Call can no longer be accepted');
-  }
-  
-  this.status = 'CONNECTING';
-  this.acceptedAt = new Date();
-  
-  return this.save();
+/**
+ * ✅ Decline call
+ */
+VoiceCallSchema.methods.decline = async function() {
+  this.status = 'DECLINED';
+  this.endedAt = new Date();
+  this.duration = 0;
+  this.endReason = 'declined';
+  await this.save();
 };
 
-voiceCallSchema.methods.connect = async function() {
-  if (this.status !== 'CONNECTING') {
-    throw new Error('Call must be in CONNECTING state');
-  }
-  
-  this.status = 'CONNECTED';
-  this.connectedAt = new Date();
-  
-  return this.save();
-};
-
-voiceCallSchema.methods.end = async function(reason = 'user_ended') {
+/**
+ * ✅ End call
+ */
+VoiceCallSchema.methods.end = async function(reason = 'user_ended') {
+  // Only end if call is active
   if (!this.isActive) {
-    throw new Error('Call is not active');
+    console.log(`⚠️ Call ${this._id} is not active (${this.status}), cannot end`);
+    return;
   }
   
   this.status = 'ENDED';
   this.endedAt = new Date();
   this.endReason = reason;
   
+  // Calculate duration only if call was connected
   if (this.connectedAt) {
     this.duration = Math.floor((this.endedAt - this.connectedAt) / 1000);
+  } else {
+    this.duration = 0;
   }
   
-  return this.save();
+  await this.save();
+  
+  console.log(`✅ Call ${this._id} ended: ${reason} (duration: ${this.duration}s)`);
 };
 
-voiceCallSchema.methods.decline = async function() {
-  if (this.status !== 'RINGING') {
-    throw new Error('Can only decline ringing calls');
-  }
+/**
+ * ✅ Mark as missed
+ */
+VoiceCallSchema.methods.markAsMissed = async function() {
+  if (this.status !== 'RINGING') return;
   
-  this.status = 'DECLINED';
+  this.status = 'MISSED';
   this.endedAt = new Date();
-  this.endReason = 'receiver_declined';
+  this.duration = 0;
+  this.endReason = 'timeout';
+  await this.save();
   
-  return this.save();
-};
-
-voiceCallSchema.methods.fail = async function(reason) {
-  this.status = 'FAILED';
-  this.endedAt = new Date();
-  this.endReason = 'system_error';
-  this.failureReason = reason;
-  
-  return this.save();
+  console.log(`⏰ Call ${this._id} marked as missed (timeout)`);
 };
 
 // ==================== STATIC METHODS ====================
 
 /**
- * ✅ FIXED: Check if user is on call WITH AUTO-CLEANUP
+ * ✅ CRITICAL FIX: Check if user is on an ACTIVE call (with timeout cleanup)
  */
-voiceCallSchema.statics.isUserOnCall = async function(userId) {
-  // ✅ STEP 1: Auto-cleanup stale calls first
-  const STALE_THRESHOLD = 5 * 60 * 1000; // 5 minutes
-  const staleTime = new Date(Date.now() - STALE_THRESHOLD);
+VoiceCallSchema.statics.isUserOnCall = async function(userId) {
+  const now = new Date();
   
-  const cleanupResult = await this.updateMany(
-    {
-      $or: [
-        { callerId: userId },
-        { receiverId: userId }
-      ],
-      status: { $in: ['RINGING', 'CONNECTING', 'CONNECTED'] },
-      initiatedAt: { $lt: staleTime }
-    },
-    {
-      $set: {
-        status: 'ENDED',
-        endedAt: new Date(),
-        endReason: 'auto_timeout'
-      }
-    }
-  );
+  // ✅ STEP 1: Find calls where user is participant
+  const activeCalls = await this.find({
+    $or: [
+      { callerId: userId },
+      { receiverId: userId }
+    ],
+    status: { $in: ['RINGING', 'CONNECTING', 'CONNECTED'] },
+    isDeleted: false
+  });
   
-  if (cleanupResult.modifiedCount > 0) {
-    console.log(`🧹 Auto-cleaned ${cleanupResult.modifiedCount} stale call(s) for user ${userId}`);
+  console.log(`\n🔍 CHECKING USER ON CALL:`);
+  console.log(`   User ID: ${userId}`);
+  console.log(`   Found ${activeCalls.length} active call(s)`);
+  
+  if (activeCalls.length === 0) {
+    console.log(`   ✅ User is NOT on any call`);
+    return false;
   }
   
-  // ✅ STEP 2: Check for remaining active calls
-  const activeCall = await this.findOne({
-    $or: [
-      { callerId: userId },
-      { receiverId: userId }
-    ],
-    status: { $in: ['RINGING', 'CONNECTING', 'CONNECTED'] }
-  });
+  // ✅ STEP 2: Check each call for timeout and auto-cleanup
+  let hasActiveCall = false;
   
-  return !!activeCall;
-};
-
-/**
- * ✅ FIXED: Get user's active call WITH AUTO-CLEANUP
- */
-voiceCallSchema.statics.getUserActiveCall = async function(userId) {
-  // Clean up stale calls first
-  const STALE_THRESHOLD = 5 * 60 * 1000;
-  const staleTime = new Date(Date.now() - STALE_THRESHOLD);
-  
-  await this.updateMany(
-    {
-      $or: [
-        { callerId: userId },
-        { receiverId: userId }
-      ],
-      status: { $in: ['RINGING', 'CONNECTING', 'CONNECTED'] },
-      initiatedAt: { $lt: staleTime }
-    },
-    {
-      $set: {
-        status: 'ENDED',
-        endedAt: new Date(),
-        endReason: 'auto_timeout'
+  for (const call of activeCalls) {
+    const isTimedOut = call.hasTimedOut();
+    
+    console.log(`\n   📞 Call ${call._id}:`);
+    console.log(`      Status: ${call.status}`);
+    console.log(`      Initiated: ${call.initiatedAt}`);
+    console.log(`      Timed out: ${isTimedOut}`);
+    
+    if (isTimedOut) {
+      // ✅ Auto-cleanup timed out calls
+      console.log(`      ⏰ Auto-ending timed out call...`);
+      
+      if (call.status === 'RINGING') {
+        await call.markAsMissed();
+      } else {
+        await call.end('timeout');
       }
+    } else {
+      // Call is still active
+      hasActiveCall = true;
+      console.log(`      ✅ Call is active and valid`);
     }
-  );
+  }
   
-  // Then find active call
-  return this.findOne({
+  if (hasActiveCall) {
+    console.log(`\n   ❌ User IS on an active call`);
+  } else {
+    console.log(`\n   ✅ All calls were timed out and cleaned up - user is FREE`);
+  }
+  
+  return hasActiveCall;
+};
+
+/**
+ * ✅ Get user's active call (if any)
+ */
+VoiceCallSchema.statics.getUserActiveCall = async function(userId) {
+  const activeCalls = await this.find({
     $or: [
       { callerId: userId },
       { receiverId: userId }
     ],
-    status: { $in: ['RINGING', 'CONNECTING', 'CONNECTED'] }
-  });
+    status: { $in: ['RINGING', 'CONNECTING', 'CONNECTED'] },
+    isDeleted: false
+  }).sort({ createdAt: -1 }).limit(1);
+  
+  if (activeCalls.length === 0) return null;
+  
+  const call = activeCalls[0];
+  
+  // Check if timed out
+  if (call.hasTimedOut()) {
+    if (call.status === 'RINGING') {
+      await call.markAsMissed();
+    } else {
+      await call.end('timeout');
+    }
+    return null;
+  }
+  
+  return call;
 };
 
 /**
- * Count recent call attempts
+ * ✅ Cleanup abandoned calls (cron job)
  */
-voiceCallSchema.statics.countRecentAttempts = async function(callerId, bookingId, hours = 1) {
-  const cutoffTime = new Date(Date.now() - hours * 60 * 60 * 1000);
+VoiceCallSchema.statics.cleanupAbandonedCalls = async function() {
+  console.log('\n🧹 CLEANUP JOB: Checking for abandoned calls...');
   
-  return this.countDocuments({
-    callerId,
+  const now = new Date();
+  const thirtySecondsAgo = new Date(now - 30 * 1000);
+  const sixtySecondsAgo = new Date(now - 60 * 1000);
+  const thirtyMinutesAgo = new Date(now - 30 * 60 * 1000);
+  
+  // Find timed-out RINGING calls (>30s)
+  const ringingCalls = await this.find({
+    status: 'RINGING',
+    initiatedAt: { $lt: thirtySecondsAgo },
+    isDeleted: false
+  });
+  
+  // Find timed-out CONNECTING calls (>60s)
+  const connectingCalls = await this.find({
+    status: 'CONNECTING',
+    acceptedAt: { $lt: sixtySecondsAgo },
+    isDeleted: false
+  });
+  
+  // Find timed-out CONNECTED calls (>30min)
+  const connectedCalls = await this.find({
+    status: 'CONNECTED',
+    connectedAt: { $lt: thirtyMinutesAgo },
+    isDeleted: false
+  });
+  
+  let cleanedCount = 0;
+  
+  // Cleanup RINGING calls
+  for (const call of ringingCalls) {
+    await call.markAsMissed();
+    cleanedCount++;
+  }
+  
+  // Cleanup CONNECTING calls
+  for (const call of connectingCalls) {
+    await call.end('timeout');
+    cleanedCount++;
+  }
+  
+  // Cleanup CONNECTED calls
+  for (const call of connectedCalls) {
+    await call.end('max_duration_reached');
+    cleanedCount++;
+  }
+  
+  if (cleanedCount > 0) {
+    console.log(`✅ Cleaned up ${cleanedCount} abandoned call(s)`);
+  } else {
+    console.log(`✅ No abandoned calls found`);
+  }
+  
+  return cleanedCount;
+};
+
+/**
+ * ✅ Get call history for a booking
+ */
+VoiceCallSchema.statics.getBookingCallHistory = async function(bookingId) {
+  return this.find({
     bookingId,
-    createdAt: { $gte: cutoffTime }
-  });
+    isDeleted: false
+  })
+  .sort({ createdAt: -1 })
+  .populate('callerId', 'firstName lastName profilePhoto')
+  .populate('receiverId', 'firstName lastName profilePhoto');
 };
 
-/**
- * Get call statistics
- */
-voiceCallSchema.statics.getBookingCallStats = async function(bookingId) {
-  const calls = await this.find({ bookingId });
-  
-  return {
-    total: calls.length,
-    connected: calls.filter(c => c.status === 'CONNECTED' || c.status === 'ENDED').length,
-    declined: calls.filter(c => c.status === 'DECLINED').length,
-    timeout: calls.filter(c => c.status === 'TIMEOUT').length,
-    failed: calls.filter(c => c.status === 'FAILED').length,
-    totalDuration: calls.reduce((sum, c) => sum + (c.duration || 0), 0)
-  };
-};
+// ==================== MIDDLEWARE ====================
 
-/**
- * ✅ Cleanup stale RINGING calls (cron job)
- */
-voiceCallSchema.statics.cleanupStaleCalls = async function() {
-  const thirtySecondsAgo = new Date(Date.now() - 30 * 1000);
-  
-  const result = await this.updateMany(
-    {
-      status: 'RINGING',
-      initiatedAt: { $lt: thirtySecondsAgo }
-    },
-    {
-      $set: {
-        status: 'TIMEOUT',
-        endedAt: new Date(),
-        endReason: 'no_answer'
-      }
-    }
-  );
-  
-  return result.modifiedCount;
-};
-
-/**
- * ✅ Expire long CONNECTED calls (cron job)
- */
-voiceCallSchema.statics.expireConnectedCalls = async function() {
-  const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
-  
-  const result = await this.updateMany(
-    {
-      status: 'CONNECTED',
-      connectedAt: { $lt: twoHoursAgo }
-    },
-    {
-      $set: {
-        status: 'ENDED',
-        endedAt: new Date(),
-        endReason: 'max_duration_exceeded'
-      }
-    }
-  );
-  
-  return result.modifiedCount;
-};
-
-/**
- * ✅ NEW: Global cleanup of all stale calls
- */
-voiceCallSchema.statics.cleanupAllStaleCalls = async function(thresholdMinutes = 5) {
-  const staleTime = new Date(Date.now() - thresholdMinutes * 60 * 1000);
-  
-  console.log('🧹 Running global stale call cleanup...');
-  
-  const result = await this.updateMany(
-    {
-      status: { $in: ['RINGING', 'CONNECTING', 'CONNECTED'] },
-      initiatedAt: { $lt: staleTime }
-    },
-    {
-      $set: {
-        status: 'ENDED',
-        endedAt: new Date(),
-        endReason: 'stale_cleanup'
-      }
-    }
-  );
-  
-  console.log(`✅ Cleaned up ${result.modifiedCount} stale calls`);
-  
-  return result;
-};
-
-// ==================== HOOKS ====================
-
-voiceCallSchema.pre('save', function(next) {
-  if (this.audioRecorded === true) {
-    return next(new Error('Audio recording is not allowed'));
+// Auto-cleanup on save
+VoiceCallSchema.pre('save', function(next) {
+  // If marking as ended/declined/missed, ensure endedAt is set
+  if (['ENDED', 'DECLINED', 'MISSED', 'FAILED'].includes(this.status) && !this.endedAt) {
+    this.endedAt = new Date();
   }
-  
-  if (this.status === 'ENDED' && this.connectedAt && this.endedAt && !this.duration) {
-    this.duration = Math.floor((this.endedAt - this.connectedAt) / 1000);
-  }
-  
   next();
 });
 
-voiceCallSchema.post('save', function(doc) {
-  console.log(`VoiceCall ${doc._id}: ${doc.status}`);
-});
-
-const VoiceCall = mongoose.model('VoiceCall', voiceCallSchema);
+const VoiceCall = mongoose.model('VoiceCall', VoiceCallSchema);
 
 module.exports = VoiceCall;
