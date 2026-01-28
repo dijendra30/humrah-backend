@@ -97,25 +97,23 @@ async function validateCallEligibility(callerId, receiverId, bookingId) {
   }
   
   // ==================== 7. VALIDATE NOT BLOCKED ====================
-  const callerBlocked = caller.blockedUsers?.includes(receiverId);
-  const receiverBlocked = receiver.blockedUsers?.includes(callerId);
-  
-  if (callerBlocked || receiverBlocked) {
-    errors.push({
-      code: 'USER_BLOCKED',
-      message: 'Cannot call this user'
-    });
-  }
-  // In your voice-call validation middleware:
-  // ==================== 8. VALIDATE RECEIVER NOT ON ANOTHER CALL ====================
-  const receiverOnCall = await VoiceCall.isUserOnCall(receiverId);
-  
-  if (receiverOnCall) {
-    errors.push({
-      code: 'RECEIVER_BUSY',
-      message: 'User is currently on another call'
-    });
-  }
+  const isCallerBusy = await VoiceCall.isUserOnCall(callerId);
+if (isCallerBusy) {
+  return res.status(400).json({
+    success: false,
+    error: 'CALLER_BUSY',
+    message: 'You are already on a call'
+  });
+}
+
+const isReceiverBusy = await VoiceCall.isUserOnCall(receiverId);
+if (isReceiverBusy) {
+  return res.status(400).json({
+    success: false,
+    error: 'RECEIVER_BUSY',
+    message: 'User is currently on another call'
+  });
+}
   
   // ==================== 9. VALIDATE CALLER NOT ON ANOTHER CALL ====================
   const callerOnCall = await VoiceCall.isUserOnCall(callerId);
