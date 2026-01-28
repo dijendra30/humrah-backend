@@ -1,4 +1,4 @@
-// middleware/voice-call-validator.js - PRODUCTION VERSION
+// middleware/voice-call-validator.js - FIXED VERSION
 // ✅ NO CALL LIMITS - Users can call anytime until chat expires
 // ✅ Calls auto-end after 30 minutes
 const RandomBooking = require('../models/RandomBooking');
@@ -7,7 +7,7 @@ const User = require('../models/User');
 const RandomBookingChat = require('../models/RandomBookingChat');
 
 /**
- * ✅ Validate if a voice call can be initiated
+ * ✅ FIXED: Validate if a voice call can be initiated
  */
 async function validateCallEligibility(callerId, receiverId, bookingId) {
   const errors = [];
@@ -42,7 +42,6 @@ async function validateCallEligibility(callerId, receiverId, bookingId) {
   }
   
   // ==================== 3. VALIDATE CHAT NOT EXPIRED ====================
-  // ✅ CRITICAL: Check if chat is expired
   if (chat.isExpired()) {
     errors.push({
       code: 'CHAT_EXPIRED',
@@ -106,25 +105,28 @@ async function validateCallEligibility(callerId, receiverId, bookingId) {
       message: 'Cannot call this user'
     });
   }
-  // In your voice-call validation middleware:
+  
   // ==================== 8. VALIDATE RECEIVER NOT ON ANOTHER CALL ====================
-  const isCallerBusy = await VoiceCall.isUserOnCall(callerId);
-if (isCallerBusy) {
-  return res.status(400).json({
-    success: false,
-    error: 'CALLER_BUSY',
-    message: 'You are already on a call'
-  });
-}
-
-const isReceiverBusy = await VoiceCall.isUserOnCall(receiverId);
-if (isReceiverBusy) {
-  return res.status(400).json({
-    success: false,
-    error: 'RECEIVER_BUSY',
-    message: 'User is currently on another call'
-  });
-}
+  // ✅ FIXED: Don't use res.status() here - just push errors
+  const receiverOnCall = await VoiceCall.isUserOnCall(receiverId);
+  
+  if (receiverOnCall) {
+    errors.push({
+      code: 'RECEIVER_BUSY',
+      message: 'User is currently on another call'
+    });
+  }
+  
+  // ==================== 9. VALIDATE CALLER NOT ON ANOTHER CALL ====================
+  // ✅ FIXED: Don't use res.status() here - just push errors
+  const callerOnCall = await VoiceCall.isUserOnCall(callerId);
+  
+  if (callerOnCall) {
+    errors.push({
+      code: 'CALLER_BUSY',
+      message: 'You are already on a call'
+    });
+  }
   
   // ==================== NO RATE LIMITING ✅ ====================
   // Users can call as many times as they want until chat expires
