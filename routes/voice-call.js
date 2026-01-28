@@ -13,7 +13,7 @@ const { authenticate } = require('../middleware/auth');
 
 // ==================== AGORA CONFIGURATION ====================
 const AGORA_APP_ID = process.env.AGORA_APP_ID || '183926da16b6416f98b50a78c6673c97';
-const AGORA_APP_CERTIFICATE = process.env.AGORA_APP_CERTIFICATE || '4cc9dde943ca49a398fd120ebb1207ba';
+const AGORA_APP_CERTIFICATE = process.env.AGORA_APP_CERTIFICATE || null;
 const TOKEN_EXPIRATION_TIME = 30 * 60; // 30 minutes
 
 /**
@@ -48,8 +48,15 @@ function objectIdToUid(objectId) {
  * ✅ Generate Agora RTC Token
  */
 function generateAgoraToken(channelName, uid, role = RtcRole.PUBLISHER) {
-  if (!AGORA_APP_ID || !AGORA_APP_CERTIFICATE) {
-    throw new Error('Agora credentials not configured');
+  if (!AGORA_APP_ID) {
+    throw new Error('Agora App ID not configured');
+  }
+  
+  // ✅ If no certificate, return null (testing mode)
+  if (!AGORA_APP_CERTIFICATE) {
+    console.log('⚠️ Running in TESTING MODE - No token required');
+    console.log('⚠️ DISABLE CERTIFICATE in Agora Console!');
+    return null; // Agora SDK accepts null token when certificate is disabled
   }
   
   const currentTimestamp = Math.floor(Date.now() / 1000);
@@ -59,8 +66,6 @@ function generateAgoraToken(channelName, uid, role = RtcRole.PUBLISHER) {
   console.log(`   App ID: ${AGORA_APP_ID}`);
   console.log(`   Channel: ${channelName}`);
   console.log(`   UID: ${uid}`);
-  console.log(`   Role: ${role === RtcRole.PUBLISHER ? 'PUBLISHER' : 'SUBSCRIBER'}`);
-  console.log(`   Expires: ${new Date(privilegeExpireTime * 1000).toISOString()}`);
   
   try {
     const token = RtcTokenBuilder.buildTokenWithUid(
@@ -73,7 +78,6 @@ function generateAgoraToken(channelName, uid, role = RtcRole.PUBLISHER) {
     );
     
     console.log(`✅ Token generated (length: ${token.length})`);
-    
     return token;
   } catch (error) {
     console.error('❌ Token generation failed:', error);
