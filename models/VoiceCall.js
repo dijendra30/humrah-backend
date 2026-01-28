@@ -173,92 +173,108 @@ VoiceCallSchema.methods.markAsMissed = async function() {
 /**
  * ✅ CRITICAL FIX: Check if user is on an ACTIVE call (with timeout cleanup)
  */
-VoiceCallSchema.statics.isUserOnCall = async function(userId) {
-  const now = new Date();
+
+voiceCallSchema.statics.isUserOnCall = async function(userId) {
+  console.log(`\n🔍 Checking if user ${userId} is on call...`);
   
-  // ✅ STEP 1: Find calls where user is participant
-  const activeCalls = await this.find({
+  // ✅ CRITICAL FIX: Auto-cleanup stale calls BEFORE checking
+  const STALE_THRESHOLD = 2 * 60 * 1000; // 2 minutes (reduced from 5)
+  const staleTime = new Date(Date.now() - STALE_THRESHOLD);
+  
+  console.log(`   Stale threshold: ${new Date(staleTime).toISOString()}`);
+  
+  // Find all potentially active calls for this user
+  const potentialCalls = await this.find({
     $or: [
       { callerId: userId },
       { receiverId: userId }
     ],
-    status: { $in: ['RINGING', 'CONNECTING', 'CONNECTED'] },
-    isDeleted: false
-  });
+    status: { $in: ['RINGING', 'CONNECTING', 'CONNECTED'] }
+  }).select('_id status initiatedAt acceptedAt connectedAt');
   
-  console.log(`\n🔍 CHECKING USER ON CALL:`);
-  console.log(`   User ID: ${userId}`);
-  console.log(`   Found ${activeCalls.length} active call(s)`);
+  console.log(`   Found ${potentialCalls.length} potentially active call(s)`);
   
-  if (activeCalls.length === 0) {
+  if (potentialCalls.length === 0) {
     console.log(`   ✅ User is NOT on any call`);
     return false;
   }
   
-  // ✅ STEP 2: Check each call for timeout and auto-cleanup
+  // Check each call for staleness
   let hasActiveCall = false;
+  const now = new Date();
   
-  for (const call of activeCalls) {
-    const isTimedOut = call.hasTimedOut();
+  for (const call of potentialCalls) {
+    const age = (now - call.initiatedAt) / 1000; // seconds
+    const isStale = call.initiatedAt < staleTime;
     
-    console.log(`\n   📞 Call ${call._id}:`);
+    console.log(`   Call ${call._id}:`);
     console.log(`      Status: ${call.status}`);
-    console.log(`      Initiated: ${call.initiatedAt}`);
-    console.log(`      Timed out: ${isTimedOut}`);
+    console.log(`      Age: ${Math.floor(age)}s`);
+    console.log(`      Stale: ${isStale}`);
     
-    if (isTimedOut) {
-      // ✅ Auto-cleanup timed out calls
-      console.log(`      ⏰ Auto-ending timed out call...`);
+    if (isStale) {
+      // Auto-cleanup this stale call
+      console.log(`      🧹 Auto-cleaning stale call...`);
       
-      if (call.status === 'RINGING') {
-        await call.markAsMissed();
-      } else {
-        await call.end('timeout');
-      }
+      await this.updateOne(
+        { _id: call._id },
+        {
+          $set: {
+            status: 'ENDED',
+            endedAt: new Date(),
+            endReason: 'auto_timeout'
+          }
+        }
+      );
     } else {
-      // Call is still active
+      // Call is still fresh
       hasActiveCall = true;
-      console.log(`      ✅ Call is active and valid`);
+      console.log(`      ✅ Call is active`);
     }
   }
   
   if (hasActiveCall) {
-    console.log(`\n   ❌ User IS on an active call`);
+    console.log(`   ❌ User IS on an active call`);
   } else {
-    console.log(`\n   ✅ All calls were timed out and cleaned up - user is FREE`);
+    console.log(`   ✅ All calls were stale - User is FREE`);
   }
   
   return hasActiveCall;
 };
-
 /**
  * ✅ Get user's active call (if any)
  */
-VoiceCallSchema.statics.getUserActiveCall = async function(userId) {
-  const activeCalls = await this.find({
+voiceCallSchema.statics.getUserActiveCall = async function(userId) {
+  // Auto-cleanup stale calls first
+  const STALE_THRESHOLD = 2 * 60 * 1000; // 2 minutes
+  const staleTime = new Date(Date.now() - STALE_THRESHOLD);
+  
+  await this.updateMany(
+    {
+      $or: [
+        { callerId: userId },
+        { receiverId: userId }
+      ],
+      status: { $in: ['RINGING', 'CONNECTING', 'CONNECTED'] },
+      initiatedAt: { $lt: staleTime }
+    },
+    {
+      $set: {
+        status: 'ENDED',
+        endedAt: new Date(),
+        endReason: 'auto_timeout'
+      }
+    }
+  );
+  
+  // Then find active call
+  return this.findOne({
     $or: [
       { callerId: userId },
       { receiverId: userId }
     ],
-    status: { $in: ['RINGING', 'CONNECTING', 'CONNECTED'] },
-    isDeleted: false
-  }).sort({ createdAt: -1 }).limit(1);
-  
-  if (activeCalls.length === 0) return null;
-  
-  const call = activeCalls[0];
-  
-  // Check if timed out
-  if (call.hasTimedOut()) {
-    if (call.status === 'RINGING') {
-      await call.markAsMissed();
-    } else {
-      await call.end('timeout');
-    }
-    return null;
-  }
-  
-  return call;
+    status: { $in: ['RINGING', 'CONNECTING', 'CONNECTED'] }
+  });
 };
 
 /**
