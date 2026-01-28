@@ -107,26 +107,8 @@ async function validateCallEligibility(callerId, receiverId, bookingId) {
     });
   }
   // In your voice-call validation middleware:
-
-const isCallerBusy = await VoiceCall.isUserOnCall(callerId);
-if (isCallerBusy) {
-  return res.status(400).json({
-    success: false,
-    error: 'CALLER_BUSY',
-    message: 'You are already on a call'
-  });
-}
-
-const isReceiverBusy = await VoiceCall.isUserOnCall(receiverId);
-if (isReceiverBusy) {
-  return res.status(400).json({
-    success: false,
-    error: 'RECEIVER_BUSY',
-    message: 'User is currently on another call'
-  });
-}
   // ==================== 8. VALIDATE RECEIVER NOT ON ANOTHER CALL ====================
-  /*const receiverOnCall = await VoiceCall.isUserOnCall(receiverId);
+  const receiverOnCall = await VoiceCall.isUserOnCall(receiverId);
   
   if (receiverOnCall) {
     errors.push({
@@ -143,7 +125,7 @@ if (isReceiverBusy) {
       code: 'CALLER_BUSY',
       message: 'You are already on a call'
     });
-  }*/
+  }
   
   // ==================== NO RATE LIMITING ✅ ====================
   // Users can call as many times as they want until chat expires
