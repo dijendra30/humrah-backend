@@ -1,11 +1,9 @@
-// routes/voice-call.js - COMPLETE WITH CALL LOGS
+// routes/voice-call.js - FIXED VERSION (No Call Log Messages)
 const express = require('express');
 const router = express.Router();
 const { RtcTokenBuilder, RtcRole } = require('agora-access-token');
 const VoiceCall = require('../models/VoiceCall');
 const User = require('../models/User');
-const Message = require('../models/Message'); // ✅ ADD: For call logs
-const RandomBooking = require('../models/RandomBooking'); // ✅ ADD: For getting chatId
 const admin = require('../config/firebase');
 const {
   validateCallInitiation,
@@ -20,13 +18,23 @@ const TOKEN_EXPIRATION_TIME = 30 * 60; // 30 minutes
 
 /**
  * ✅ CRITICAL FIX: Convert MongoDB ObjectId to UID in SIGNED 32-bit range
+ * Android Int is signed: -2,147,483,648 to 2,147,483,647
+ * We MUST keep UIDs within this range to avoid overflow
  */
 function objectIdToUid(objectId) {
   const objectIdString = objectId.toString();
+  
+  // Take last 8 characters of ObjectId and convert to integer
   const hex = objectIdString.slice(-8);
   let uid = parseInt(hex, 16);
+  
+  // ✅ CRITICAL: Keep within SIGNED 32-bit range for Android
   const SIGNED_INT_MAX = 2147483647;
+  
+  // Ensure UID is positive and within signed int range
   uid = Math.abs(uid) % SIGNED_INT_MAX;
+  
+  // Ensure UID is never 0 (add 1 if it is)
   if (uid === 0) uid = 1;
   
   console.log(`🔢 UID Conversion: ${objectIdString.slice(0, 8)}... -> ${hex} -> ${uid}`);
@@ -43,6 +51,7 @@ function generateAgoraToken(channelName, uid, role = RtcRole.PUBLISHER) {
     throw new Error('Agora App ID not configured');
   }
   
+  // ✅ If no certificate, return null (testing mode)
   if (!AGORA_APP_CERTIFICATE) {
     console.log('⚠️ Running in TESTING MODE - No token required');
     console.log('⚠️ DISABLE CERTIFICATE in Agora Console!');
@@ -75,64 +84,10 @@ function generateAgoraToken(channelName, uid, role = RtcRole.PUBLISHER) {
   }
 }
 
-/**
- * ✅ NEW: Create call log message in chat
- */
-async function createCallLogMessage(booking, callId, content, metadata = {}) {
-  try {
-    if (!booking.chatId) {
-      console.log('⚠️ No chatId in booking - cannot create call log');
-      return null;
-    }
-
-    const callLogMessage = new Message({
-      chatId: booking.chatId,
-      senderId: booking.initiatorId,
-      content: content,
-      messageType: 'SYSTEM',
-      isSystemMessage: true,
-      metadata: {
-        callId: callId.toString(),
-        callType: 'VOICE',
-        ...metadata,
-        timestamp: new Date().toISOString()
-      }
-    });
-
-    await callLogMessage.save();
-    console.log('✅ Call log message saved to chat');
-
-    return callLogMessage;
-  } catch (error) {
-    console.error('❌ Error creating call log:', error);
-    return null;
-  }
-}
-
-/**
- * ✅ NEW: Emit call log via Socket.IO
- */
-function emitCallLog(io, chatId, message) {
-  if (!io || !message) return;
-
-  try {
-    io.to(chatId.toString()).emit('new-message', {
-      ...message.toObject(),
-      _id: message._id.toString(),
-      chatId: chatId.toString(),
-      senderId: message.senderId.toString()
-    });
-    console.log('✅ Call log emitted via socket');
-  } catch (error) {
-    console.error('❌ Error emitting call log:', error);
-  }
-}
-
 // ==================== ROUTES ====================
 
 /**
  * POST /api/voice-call/initiate
- * ✅ NOW WITH CALL LOG
  */
 router.post('/initiate', authenticate, validateCallInitiation, async (req, res) => {
   try {
@@ -149,6 +104,7 @@ router.post('/initiate', authenticate, validateCallInitiation, async (req, res) 
     
     const { caller, receiver, booking } = req.validatedCallData;
     
+    // ✅ Generate UID within signed 32-bit range
     const callerUid = objectIdToUid(callerId);
     const channelName = `voice_${booking._id}_${Date.now()}`;
     
@@ -156,6 +112,7 @@ router.post('/initiate', authenticate, validateCallInitiation, async (req, res) 
     console.log(`   Channel Name: ${channelName}`);
     console.log(`   Caller UID: ${callerUid}`);
     
+    // ✅ Generate token
     let callerToken;
     try {
       callerToken = generateAgoraToken(channelName, callerUid, RtcRole.PUBLISHER);
@@ -171,6 +128,7 @@ router.post('/initiate', authenticate, validateCallInitiation, async (req, res) 
       });
     }
     
+    // Create voice call record
     const voiceCall = new VoiceCall({
       callerId,
       receiverId,
@@ -186,23 +144,6 @@ router.post('/initiate', authenticate, validateCallInitiation, async (req, res) 
     console.log(`\n✅ Voice Call Record Created:`);
     console.log(`   Call ID: ${voiceCall._id}`);
     console.log(`   Status: ${voiceCall.status}`);
-
-    // ✅ NEW: Create call initiation log message
-    const callLogMessage = await createCallLogMessage(
-      booking,
-      voiceCall._id,
-      `📞 Voice call initiated by ${caller.firstName}`,
-      {
-        callStatus: 'INITIATED',
-        callerName: `${caller.firstName} ${caller.lastName}`.trim()
-      }
-    );
-
-    // ✅ NEW: Emit call log to chat
-    if (callLogMessage) {
-      const io = req.app.get('io');
-      emitCallLog(io, booking.chatId, callLogMessage);
-    }
     
     // Send FCM notification
     try {
@@ -262,7 +203,7 @@ router.post('/initiate', authenticate, validateCallInitiation, async (req, res) 
       console.error('\n❌ FCM Send Error:', fcmError);
     }
     
-    // Emit socket event for incoming call
+    // Emit socket event
     const io = req.app.get('io');
     if (io) {
       const receiverSockets = Array.from(io.sockets.sockets.values())
@@ -287,6 +228,7 @@ router.post('/initiate', authenticate, validateCallInitiation, async (req, res) 
       }
     }
     
+    // ✅ Return response
     console.log('\n=================================');
     console.log('📤 RESPONSE TO CALLER');
     console.log('=================================');
@@ -314,15 +256,11 @@ router.post('/initiate', authenticate, validateCallInitiation, async (req, res) 
     });
     
   } catch (error) {
-    console.error('\n❌ ERROR INITIATING VOICE CALL');
-    console.error(`   Error: ${error.message}`);
-    console.error(`   Stack: ${error.stack}`);
-    
+    console.error('\n❌ Voice Call Initiation Error:', error);
     res.status(500).json({
       success: false,
       error: 'CALL_INITIATION_FAILED',
-      message: 'Failed to initiate voice call',
-      details: error.message
+      message: 'Failed to initiate voice call'
     });
   }
 });
@@ -355,29 +293,32 @@ router.post('/accept/:callId', authenticate, async (req, res) => {
       return res.status(403).json({
         success: false,
         error: 'UNAUTHORIZED',
-        message: 'You are not the receiver of this call'
+        message: 'You are not authorized to accept this call'
       });
     }
     
     if (!call.canBeAccepted()) {
       return res.status(400).json({
         success: false,
-        error: 'CALL_CANNOT_BE_ACCEPTED',
+        error: 'CALL_EXPIRED',
         message: 'This call can no longer be accepted'
       });
     }
     
+    // Generate receiver UID and token
     const receiverUid = objectIdToUid(userId);
-    console.log(`\n📋 Receiver Configuration:`);
+    
+    console.log('\n📋 Receiver Configuration:');
     console.log(`   Channel Name: ${call.channelName}`);
     console.log(`   Receiver UID: ${receiverUid}`);
     
+    // Generate token for receiver
     let receiverToken;
     try {
       receiverToken = generateAgoraToken(call.channelName, receiverUid, RtcRole.PUBLISHER);
+      console.log(`✅ Token generated (length: ${receiverToken ? receiverToken.length : 0})`);
     } catch (tokenError) {
-      console.error('\n❌ TOKEN GENERATION FAILED FOR RECEIVER');
-      console.error(`   Error: ${tokenError.message}`);
+      console.error('❌ Token generation failed:', tokenError);
       
       return res.status(500).json({
         success: false,
@@ -386,14 +327,13 @@ router.post('/accept/:callId', authenticate, async (req, res) => {
       });
     }
     
-    call.status = 'CONNECTING';
-    call.acceptedAt = new Date();
+    // Accept the call
     call.receiverAgoraUid = receiverUid;
-    await call.save();
+    await call.accept();
     
-    console.log(`\n✅ Call Status Updated: CONNECTING`);
+    console.log(`✅ Call Status Updated: ${call.status}`);
     
-    // Notify caller
+    // Notify caller via FCM
     try {
       const caller = await User.findById(call.callerId).select('fcmTokens firstName lastName');
       
@@ -413,7 +353,7 @@ router.post('/accept/:callId', authenticate, async (req, res) => {
       console.error('❌ FCM error:', fcmError);
     }
     
-    // Emit socket event
+    // Emit socket event to caller
     const io = req.app.get('io');
     if (io) {
       const callerSockets = Array.from(io.sockets.sockets.values())
@@ -427,6 +367,8 @@ router.post('/accept/:callId', authenticate, async (req, res) => {
       
       console.log(`✅ Socket event sent to ${callerSockets.length} caller socket(s)`);
     }
+    
+    // ✅ NO CALL LOG MESSAGE CREATION - REMOVED TO FIX ERROR
     
     console.log('\n=================================');
     console.log('📤 RESPONSE TO RECEIVER');
@@ -443,13 +385,12 @@ router.post('/accept/:callId', authenticate, async (req, res) => {
       token: receiverToken,
       channelName: call.channelName,
       uid: receiverUid,
-      appId: AGORA_APP_ID
+      appId: AGORA_APP_ID,
+      status: call.status
     });
     
   } catch (error) {
-    console.error('\n❌ ERROR ACCEPTING VOICE CALL');
-    console.error(`   Error: ${error.message}`);
-    
+    console.error('❌ Error accepting voice call:', error);
     res.status(500).json({
       success: false,
       error: 'CALL_ACCEPTANCE_FAILED',
@@ -460,7 +401,6 @@ router.post('/accept/:callId', authenticate, async (req, res) => {
 
 /**
  * POST /api/voice-call/reject/:callId
- * ✅ NOW WITH CALL LOG
  */
 router.post('/reject/:callId', authenticate, async (req, res) => {
   try {
@@ -492,27 +432,6 @@ router.post('/reject/:callId', authenticate, async (req, res) => {
     
     await call.decline();
     console.log(`❌ Call rejected: ${callId}`);
-
-    // ✅ NEW: Create missed call log
-    const booking = await RandomBooking.findById(call.bookingId);
-    if (booking && booking.chatId) {
-      const receiver = await User.findById(userId).select('firstName lastName');
-      const callLogMessage = await createCallLogMessage(
-        booking,
-        call._id,
-        `📞 Missed voice call (declined by ${receiver.firstName})`,
-        {
-          callStatus: 'DECLINED',
-          declinedBy: `${receiver.firstName} ${receiver.lastName}`.trim()
-        }
-      );
-
-      // Emit to chat
-      if (callLogMessage) {
-        const io = req.app.get('io');
-        emitCallLog(io, booking.chatId, callLogMessage);
-      }
-    }
     
     // Notify caller
     try {
@@ -560,7 +479,6 @@ router.post('/reject/:callId', authenticate, async (req, res) => {
 
 /**
  * POST /api/voice-call/end/:callId
- * ✅ NOW WITH CALL LOG
  */
 router.post('/end/:callId', authenticate, validateCallEnd, async (req, res) => {
   try {
@@ -570,40 +488,6 @@ router.post('/end/:callId', authenticate, validateCallEnd, async (req, res) => {
     
     await call.end(reason);
     console.log(`📴 Call ended: ${call._id} (${reason})`);
-
-    // ✅ NEW: Create call end log message
-    const booking = await RandomBooking.findById(call.bookingId);
-    if (booking && booking.chatId) {
-      const endingUser = await User.findById(userId).select('firstName lastName');
-      
-      // Format duration
-      const durationText = call.duration 
-        ? `${Math.floor(call.duration / 60)}m ${call.duration % 60}s`
-        : 'Not connected';
-      
-      // Format end reason
-      const reasonText = reason === 'user_ended' 
-        ? 'Call ended' 
-        : reason.replace(/_/g, ' ');
-
-      const callLogMessage = await createCallLogMessage(
-        booking,
-        call._id,
-        `📞 ${reasonText}. Duration: ${durationText}`,
-        {
-          callStatus: 'ENDED',
-          duration: call.duration || 0,
-          endReason: reason,
-          endedBy: `${endingUser.firstName} ${endingUser.lastName}`.trim()
-        }
-      );
-
-      // Emit to chat
-      if (callLogMessage) {
-        const io = req.app.get('io');
-        emitCallLog(io, booking.chatId, callLogMessage);
-      }
-    }
     
     // Get other user
     const otherUserId = call.callerId.toString() === userId.toString()
