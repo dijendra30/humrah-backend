@@ -478,6 +478,9 @@ const messageRoutes = require('./routes/messages');
 const postRoutes = require('./routes/posts');
 const spotlightRoutes = require('./routes/spotlight.route');
 const safetyReportRoutes = require('./routes/safetyReports');
+const profileRoutes = require('./routes/profile');
+const reviewRoutes = require('./routes/reviews');
+const paymentRoutes = require('./routes/payment');
 
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
@@ -492,10 +495,13 @@ app.use('/api/admin', require('./routes/admin'));
 app.use('/api/random-booking', require('./routes/randomBooking'));
 app.use('/api/agora', require('./routes/agora'));
 app.use('/api/voice-call', require('./routes/voice-call'));
+app.use('/api/profile', profileRoutes);
+app.use('/api/reviews', reviewRoutes);
+app.use('/api/payment', paymentRoutes);
 
 // Cron jobs
 require('./cronJobs');
-
+const { startPayoutCronJobs } = require('./cronjobs/payoutCron');
 
 // Health Check
 app.get('/api/health', (req, res) => {
