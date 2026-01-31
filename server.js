@@ -501,7 +501,6 @@ app.use('/api/payment', paymentRoutes);
 
 // Cron jobs
 require('./cronJobs');
-const { startPayoutCronJobs } = require('./cronjobs/payoutCron');
 
 // Health Check
 app.get('/api/health', (req, res) => {
