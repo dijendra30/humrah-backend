@@ -1,44 +1,79 @@
-// services/paymentGateway.js - Payment Gateway Service (FIXED)
+// services/paymentGateway.js - UPDATED FIX
 const axios = require('axios');
 
 /**
- * Payment Gateway Service with Development Mode Fallback
+ * Payment Gateway Service with Better Development Mode Detection
  */
 
 class PaymentGatewayService {
   constructor() {
     this.apiKey = process.env.PAYMENT_GATEWAY_API_KEY;
     this.apiSecret = process.env.PAYMENT_GATEWAY_API_SECRET;
+    this.accountNumber = process.env.RAZORPAY_ACCOUNT_NUMBER;
     this.baseURL = process.env.PAYMENT_GATEWAY_URL || 'https://api.razorpay.com/v1';
     
-    // ✅ FIX: Add development mode
-    this.isDevelopment = process.env.NODE_ENV !== 'production' || !this.apiKey || !this.apiSecret;
+    // ✅ IMPROVED: More comprehensive development mode check
+    this.isDevelopment = this.detectDevelopmentMode();
     
     if (this.isDevelopment) {
-      console.warn('⚠️  Payment Gateway running in DEVELOPMENT MODE');
-      console.warn('⚠️  Set PAYMENT_GATEWAY_API_KEY and PAYMENT_GATEWAY_API_SECRET for production');
+      console.log('');
+      console.log('🧪 ========================================');
+      console.log('🧪  PAYMENT GATEWAY: DEVELOPMENT MODE');
+      console.log('🧪 ========================================');
+      console.log('🧪  Using MOCK verification (no real API calls)');
+      console.log('🧪  To use real Razorpay, set these env vars:');
+      console.log('🧪    - PAYMENT_GATEWAY_API_KEY');
+      console.log('🧪    - PAYMENT_GATEWAY_API_SECRET');
+      console.log('🧪    - RAZORPAY_ACCOUNT_NUMBER');
+      console.log('🧪 ========================================');
+      console.log('');
+    } else {
+      console.log('✅ Payment Gateway: Production mode (Real Razorpay API)');
     }
+  }
+
+  /**
+   * ✅ NEW: Better development mode detection
+   */
+  detectDevelopmentMode() {
+    // Development mode if ANY of these conditions is true:
+    const checks = {
+      noApiKey: !this.apiKey,
+      noApiSecret: !this.apiSecret,
+      noAccountNumber: !this.accountNumber,
+      envSetToDev: process.env.NODE_ENV === 'development',
+      useMockPayments: process.env.USE_MOCK_PAYMENTS === 'true'
+    };
+    
+    const isDevMode = Object.values(checks).some(check => check === true);
+    
+    if (isDevMode) {
+      console.log('🔍 Development mode activated due to:');
+      if (checks.noApiKey) console.log('   ❌ Missing PAYMENT_GATEWAY_API_KEY');
+      if (checks.noApiSecret) console.log('   ❌ Missing PAYMENT_GATEWAY_API_SECRET');
+      if (checks.noAccountNumber) console.log('   ❌ Missing RAZORPAY_ACCOUNT_NUMBER');
+      if (checks.envSetToDev) console.log('   ✅ NODE_ENV=development');
+      if (checks.useMockPayments) console.log('   ✅ USE_MOCK_PAYMENTS=true');
+    }
+    
+    return isDevMode;
   }
 
   /**
    * Verify UPI ID exists and get account holder name
    */
   async verifyUPI(upiId) {
-    // ✅ FIX: Use mock verification in development
+    console.log(`\n📝 Verifying UPI: ${upiId}`);
+    
+    // ✅ Use mock verification in development
     if (this.isDevelopment) {
+      console.log('🧪 Using MOCK verification...');
       return this.mockVerifyUPI(upiId);
     }
     
+    console.log('🔐 Using REAL Razorpay API...');
+    
     try {
-      // Check if credentials are set
-      if (!this.apiKey || !this.apiSecret) {
-        console.error('❌ Payment gateway credentials not configured');
-        return {
-          success: false,
-          error: 'Payment gateway not configured. Please contact support.'
-        };
-      }
-      
       // Razorpay Fund Account Validation API
       const response = await axios.post(
         `${this.baseURL}/fund_accounts/validations`,
@@ -68,6 +103,7 @@ class PaymentGatewayService {
       );
 
       if (response.data.status === 'completed' && response.data.results.account_status === 'active') {
+        console.log('✅ UPI verification successful');
         return {
           success: true,
           name: response.data.results.registered_name || 'Account Holder',
@@ -75,15 +111,16 @@ class PaymentGatewayService {
           provider: response.data.results.vpa_details?.provider || 'Unknown'
         };
       } else {
+        console.log('❌ UPI verification failed:', response.data.status);
         return {
           success: false,
           error: 'UPI ID not active or invalid'
         };
       }
     } catch (error) {
-      console.error('UPI verification error:', error.response?.data || error.message);
+      console.error('❌ UPI verification error:', error.response?.data || error.message);
       
-      // ✅ FIX: Better error handling
+      // Better error handling
       const errorMessage = error.response?.data?.error?.description || 
                           error.message || 
                           'Verification failed';
@@ -96,10 +133,10 @@ class PaymentGatewayService {
   }
 
   /**
-   * ✅ NEW: Mock UPI verification for development/testing
+   * ✅ Mock UPI verification for development/testing
    */
   mockVerifyUPI(upiId) {
-    console.log(`🧪 Mock verifying UPI: ${upiId}`);
+    console.log(`   🎭 Simulating verification for: ${upiId}`);
     
     // Simulate network delay
     return new Promise((resolve) => {
@@ -107,6 +144,7 @@ class PaymentGatewayService {
         // Basic validation
         const upiRegex = /^[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z]{2,64}$/;
         if (!upiRegex.test(upiId)) {
+          console.log('   ❌ Invalid UPI format');
           resolve({
             success: false,
             error: 'Invalid UPI ID format'
@@ -117,11 +155,14 @@ class PaymentGatewayService {
         // Extract name from UPI (before @)
         const namePart = upiId.split('@')[0];
         const provider = upiId.split('@')[1];
+        const generatedName = this.generateMockName(namePart);
+        
+        console.log(`   ✅ Mock success! Name: ${generatedName}`);
         
         // Mock success response
         resolve({
           success: true,
-          name: this.generateMockName(namePart),
+          name: generatedName,
           upiId: upiId,
           provider: provider.toUpperCase()
         });
@@ -149,23 +190,29 @@ class PaymentGatewayService {
    * Transfer money to UPI ID
    */
   async transferToUPI({ upiId, amount, referenceId }) {
-    // ✅ FIX: Use mock transfer in development
+    console.log(`\n💸 Transferring ₹${amount} to ${upiId}`);
+    
+    // ✅ Use mock transfer in development
     if (this.isDevelopment) {
+      console.log('🧪 Using MOCK transfer...');
       return this.mockTransferToUPI({ upiId, amount, referenceId });
     }
     
+    console.log('🔐 Using REAL Razorpay API...');
+    
     try {
-      if (!this.apiKey || !this.apiSecret) {
+      if (!this.accountNumber) {
+        console.error('❌ RAZORPAY_ACCOUNT_NUMBER not set!');
         return {
           success: false,
-          error: 'Payment gateway not configured'
+          error: 'Payment gateway account not configured'
         };
       }
       
       const response = await axios.post(
         `${this.baseURL}/payouts`,
         {
-          account_number: process.env.RAZORPAY_ACCOUNT_NUMBER,
+          account_number: this.accountNumber,
           fund_account: {
             account_type: 'vpa',
             vpa: {
@@ -194,6 +241,7 @@ class PaymentGatewayService {
       );
 
       if (response.data.status === 'processed' || response.data.status === 'processing') {
+        console.log('✅ Transfer successful');
         return {
           success: true,
           transactionId: response.data.id,
@@ -202,13 +250,14 @@ class PaymentGatewayService {
           processedAt: response.data.processed_at
         };
       } else {
+        console.log('❌ Transfer failed:', response.data.status);
         return {
           success: false,
           error: response.data.status_details?.description || 'Transfer failed'
         };
       }
     } catch (error) {
-      console.error('UPI transfer error:', error.response?.data || error.message);
+      console.error('❌ Transfer error:', error.response?.data || error.message);
       return {
         success: false,
         error: error.response?.data?.error?.description || 'Transfer failed',
@@ -218,16 +267,19 @@ class PaymentGatewayService {
   }
 
   /**
-   * ✅ NEW: Mock UPI transfer for development
+   * ✅ Mock UPI transfer for development
    */
   mockTransferToUPI({ upiId, amount, referenceId }) {
-    console.log(`🧪 Mock transferring ₹${amount} to ${upiId}`);
+    console.log(`   🎭 Simulating transfer of ₹${amount}`);
     
     return new Promise((resolve) => {
       setTimeout(() => {
+        const txnId = `mock_txn_${Date.now()}`;
+        console.log(`   ✅ Mock transfer successful! TXN: ${txnId}`);
+        
         resolve({
           success: true,
-          transactionId: `mock_txn_${Date.now()}`,
+          transactionId: txnId,
           utr: `${Date.now()}`,
           status: 'processed',
           processedAt: new Date().toISOString()
@@ -285,7 +337,7 @@ class PaymentGatewayService {
     
     if (!secret) {
       console.warn('⚠️  Webhook secret not configured');
-      return false;
+      return this.isDevelopment; // Return true in dev mode
     }
     
     const expectedSignature = crypto
