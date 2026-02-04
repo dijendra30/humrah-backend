@@ -1,17 +1,22 @@
-// routes/companions.js - Companion Routes
+// routes/companions.js - UPDATED Companion Routes
 const express = require('express');
 const router = express.Router();
 const { auth } = require('../middleware/auth');
 const User = require('../models/User');
 
 // @route   GET /api/companions
-// @desc    Get list of companions/users
+// @desc    Get list of companions (only users with userType='COMPANION')
 // @access  Private
 router.get('/', auth, async (req, res) => {
   try {
     const { interests, city, state, limit = 20 } = req.query;
     
-    const filter = { _id: { $ne: req.userId } };
+    // ✅ CRITICAL FIX: Only show COMPANION users
+    const filter = { 
+      _id: { $ne: req.userId },
+      userType: 'COMPANION',      // ✅ Only companions
+      status: 'ACTIVE'             // Only active users
+    };
 
     if (interests) {
       const interestArray = interests.split(',');
@@ -22,9 +27,13 @@ router.get('/', auth, async (req, res) => {
     if (state) filter['questionnaire.state'] = state;
 
     const companions = await User.find(filter)
-      .select('firstName lastName profilePhoto questionnaire.interests questionnaire.city verified isPremium')
+      .select('firstName lastName profilePhoto questionnaire ratingStats verified isPremium userType')
       .limit(parseInt(limit))
-      .sort({ lastActive: -1 });
+      .sort({ 
+        isPremium: -1,                    // Premium first
+        'ratingStats.averageRating': -1,  // Then by rating
+        lastActive: -1                     // Then by activity
+      });
 
     res.json({
       success: true,
@@ -41,7 +50,7 @@ router.get('/', auth, async (req, res) => {
 });
 
 // @route   GET /api/companions/recommended
-// @desc    Get recommended companions
+// @desc    Get recommended companions (only userType='COMPANION')
 // @access  Private
 router.get('/recommended', auth, async (req, res) => {
   try {
@@ -54,12 +63,19 @@ router.get('/recommended', auth, async (req, res) => {
       });
     }
 
-    const filter = { _id: { $ne: req.userId } };
+    // ✅ CRITICAL FIX: Only show COMPANION users
+    const filter = { 
+      _id: { $ne: req.userId },
+      userType: 'COMPANION',  // ✅ Only companions
+      status: 'ACTIVE'
+    };
 
+    // Match by location
     if (currentUser.questionnaire.city) {
       filter['questionnaire.city'] = currentUser.questionnaire.city;
     }
 
+    // Match by interests
     if (currentUser.questionnaire.interests?.length > 0) {
       filter['questionnaire.interests'] = { 
         $in: currentUser.questionnaire.interests 
@@ -67,9 +83,12 @@ router.get('/recommended', auth, async (req, res) => {
     }
 
     const companions = await User.find(filter)
-      .select('firstName lastName profilePhoto questionnaire.interests questionnaire.city verified isPremium')
+      .select('firstName lastName profilePhoto questionnaire ratingStats verified isPremium userType')
       .limit(10)
-      .sort({ lastActive: -1 });
+      .sort({ 
+        'ratingStats.averageRating': -1,
+        lastActive: -1 
+      });
 
     res.json({
       success: true,
@@ -85,5 +104,36 @@ router.get('/recommended', auth, async (req, res) => {
   }
 });
 
+// @route   GET /api/companions/:companionId
+// @desc    Get companion profile details
+// @access  Private
+router.get('/:companionId', auth, async (req, res) => {
+  try {
+    const companion = await User.findOne({
+      _id: req.params.companionId,
+      userType: 'COMPANION',  // ✅ Must be companion
+      status: 'ACTIVE'
+    }).select('-password -emailVerificationOTP -fcmTokens');
+
+    if (!companion) {
+      return res.status(404).json({
+        success: false,
+        message: 'Companion not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      companion: companion.getPublicProfile()
+    });
+
+  } catch (error) {
+    console.error('Get companion error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
 
 module.exports = router;
