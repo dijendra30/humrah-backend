@@ -1,15 +1,14 @@
-// controllers/spotlight.controller.js - UPDATED to filter COMPANION users only
+// controllers/spotlight.controller.js - FIXED with correct Android field mapping
 const User = require('../models/User');
 
 /**
  * Get spotlight companions
  * 
- * ✅ CRITICAL FIX: Only show users with userType='COMPANION'
- * 
- * This ensures that:
- * - Regular members (userType='MEMBER') don't appear in spotlight
- * - Only users who selected "Yes, I'm interested" for companion mode appear
- * - Admin users (SUPER_ADMIN, SAFETY_ADMIN) don't appear unless they're also companions
+ * ✅ FIXED: Correct field mapping for Android app
+ * - id (not _id)
+ * - name (combined firstName + lastName)
+ * - sharedHangouts (interests)
+ * - overlapCount (calculated based on matching interests)
  */
 exports.getSpotlightCompanions = async (req, res) => {
   try {
@@ -24,12 +23,16 @@ exports.getSpotlightCompanions = async (req, res) => {
       page = 1 
     } = req.query;
 
+    // Get current user's interests for overlap calculation
+    const currentUser = await User.findById(currentUserId).select('questionnaire');
+    const userInterests = currentUser?.questionnaire?.hangoutPreferences || [];
+
     // ✅ BASE FILTER: Only COMPANION users
     const filter = {
-      _id: { $ne: currentUserId },  // Exclude current user
-      userType: 'COMPANION',         // ✅ CRITICAL: Only companions
-      status: 'ACTIVE',              // Only active users
-      profilePhoto: { $ne: null }    // Must have profile photo
+      _id: { $ne: currentUserId },
+      userType: 'COMPANION',
+      status: 'ACTIVE',
+      profilePhoto: { $ne: null }
     };
 
     // Additional filters
@@ -59,43 +62,65 @@ exports.getSpotlightCompanions = async (req, res) => {
 
     // Query companions
     const companions = await User.find(filter)
-      .select('firstName lastName profilePhoto questionnaire ratingStats verified isPremium userType')
+      .select('firstName lastName profilePhoto questionnaire ratingStats verified isPremium userType photoVerificationStatus')
       .sort({ 
-        isPremium: -1,                      // Premium users first
-        'ratingStats.averageRating': -1,    // Then by rating
-        lastActive: -1                       // Then by recent activity
+        isPremium: -1,
+        'ratingStats.averageRating': -1,
+        lastActive: -1
       })
       .limit(parseInt(limit))
       .skip(skip);
 
-    // Get total count for pagination
+    // Get total count
     const totalCompanions = await User.countDocuments(filter);
     const totalPages = Math.ceil(totalCompanions / parseInt(limit));
 
-    // Format response
-    const formattedCompanions = companions.map(companion => ({
-      _id: companion._id,
-      firstName: companion.firstName,
-      lastName: companion.lastName,
-      profilePhoto: companion.profilePhoto,
-      verified: companion.verified,
-      isPremium: companion.isPremium,
-      userType: companion.userType,
-      
-      // Companion details
-      tagline: companion.questionnaire?.tagline,
-      price: companion.questionnaire?.price,
-      availability: companion.questionnaire?.availability,
-      openFor: companion.questionnaire?.openFor,
-      city: companion.questionnaire?.city,
-      state: companion.questionnaire?.state,
-      interests: companion.questionnaire?.interests,
-      
-      // Ratings
-      averageRating: companion.ratingStats?.averageRating || 0,
-      totalRatings: companion.ratingStats?.totalRatings || 0,
-      completedBookings: companion.ratingStats?.completedBookings || 0
-    }));
+    // ✅ FIXED: Format response with correct field names for Android
+    const formattedCompanions = companions.map(companion => {
+      // Calculate overlap count
+      const companionInterests = companion.questionnaire?.hangoutPreferences || [];
+      const overlapCount = userInterests.filter(interest => 
+        companionInterests.includes(interest)
+      ).length;
+
+      return {
+        // ✅ FIX: Use 'id' not '_id'
+        id: companion._id.toString(),
+        
+        // ✅ FIX: Combine firstName + lastName into 'name'
+        name: `${companion.firstName} ${companion.lastName}`.trim(),
+        
+        profilePhoto: companion.profilePhoto,
+        verified: companion.verified,
+        isPremium: companion.isPremium,
+        userType: companion.userType,
+        photoVerificationStatus: companion.photoVerificationStatus,
+        
+        // ✅ FIX: Use 'sharedHangouts' for interests
+        sharedHangouts: companionInterests,
+        
+        // ✅ FIX: Calculate and include overlapCount
+        overlapCount: overlapCount,
+        
+        // Companion details from questionnaire
+        bio: companion.questionnaire?.bio || null,
+        tagline: companion.questionnaire?.tagline || null,
+        price: companion.questionnaire?.price || null,
+        availability: companion.questionnaire?.availability || null,
+        availableTimes: companion.questionnaire?.availableTimes || null,
+        city: companion.questionnaire?.city || null,
+        state: companion.questionnaire?.state || null,
+        languagePreference: companion.questionnaire?.languagePreference || null,
+        comfortZones: companion.questionnaire?.comfortZones || null,
+        vibeWords: companion.questionnaire?.vibeWords || null,
+        openFor: companion.questionnaire?.openFor || null,
+        
+        // Ratings
+        averageRating: companion.ratingStats?.averageRating || 0,
+        totalRatings: companion.ratingStats?.totalRatings || 0,
+        completedBookings: companion.ratingStats?.completedBookings || 0
+      };
+    });
 
     res.json({
       success: true,
@@ -119,8 +144,6 @@ exports.getSpotlightCompanions = async (req, res) => {
 
 /**
  * Get companion details by ID
- * 
- * ✅ Ensures requested user is actually a companion
  */
 exports.getCompanionDetails = async (req, res) => {
   try {
@@ -128,7 +151,7 @@ exports.getCompanionDetails = async (req, res) => {
 
     const companion = await User.findOne({
       _id: companionId,
-      userType: 'COMPANION',  // ✅ Must be companion
+      userType: 'COMPANION',
       status: 'ACTIVE'
     }).select('-password -emailVerificationOTP -fcmTokens');
 
@@ -139,9 +162,39 @@ exports.getCompanionDetails = async (req, res) => {
       });
     }
 
+    // ✅ FIXED: Format response correctly
+    const formattedCompanion = {
+      id: companion._id.toString(),
+      name: `${companion.firstName} ${companion.lastName}`.trim(),
+      profilePhoto: companion.profilePhoto,
+      verified: companion.verified,
+      isPremium: companion.isPremium,
+      userType: companion.userType,
+      photoVerificationStatus: companion.photoVerificationStatus,
+      
+      sharedHangouts: companion.questionnaire?.hangoutPreferences || [],
+      overlapCount: 0, // Would need current user's interests to calculate
+      
+      bio: companion.questionnaire?.bio || null,
+      tagline: companion.questionnaire?.tagline || null,
+      price: companion.questionnaire?.price || null,
+      availability: companion.questionnaire?.availability || null,
+      availableTimes: companion.questionnaire?.availableTimes || null,
+      city: companion.questionnaire?.city || null,
+      state: companion.questionnaire?.state || null,
+      languagePreference: companion.questionnaire?.languagePreference || null,
+      comfortZones: companion.questionnaire?.comfortZones || null,
+      vibeWords: companion.questionnaire?.vibeWords || null,
+      openFor: companion.questionnaire?.openFor || null,
+      
+      averageRating: companion.ratingStats?.averageRating || 0,
+      totalRatings: companion.ratingStats?.totalRatings || 0,
+      completedBookings: companion.ratingStats?.completedBookings || 0
+    };
+
     res.json({
       success: true,
-      companion: companion.getPublicProfile()
+      companion: formattedCompanion
     });
 
   } catch (error) {
@@ -172,7 +225,7 @@ exports.searchCompanions = async (req, res) => {
 
     const filter = {
       _id: { $ne: req.userId },
-      userType: 'COMPANION',  // ✅ Only companions
+      userType: 'COMPANION',
       status: 'ACTIVE'
     };
 
@@ -190,12 +243,6 @@ exports.searchCompanions = async (req, res) => {
     if (city) filter['questionnaire.city'] = city;
     if (state) filter['questionnaire.state'] = state;
 
-    // Price range
-    if (minPrice || maxPrice) {
-      filter['questionnaire.price'] = {};
-      // Note: Price is stored as string, would need parsing logic here
-    }
-
     // Availability
     if (availability) {
       filter['questionnaire.availability'] = availability;
@@ -204,7 +251,7 @@ exports.searchCompanions = async (req, res) => {
     // Interests
     if (interests) {
       const interestArray = interests.split(',');
-      filter['questionnaire.interests'] = { $in: interestArray };
+      filter['questionnaire.hangoutPreferences'] = { $in: interestArray };
     }
 
     // Rating
@@ -213,14 +260,44 @@ exports.searchCompanions = async (req, res) => {
     }
 
     const companions = await User.find(filter)
-      .select('firstName lastName profilePhoto questionnaire ratingStats verified isPremium')
+      .select('firstName lastName profilePhoto questionnaire ratingStats verified isPremium photoVerificationStatus')
       .sort({ 'ratingStats.averageRating': -1, lastActive: -1 })
       .limit(parseInt(limit));
 
+    // Get current user for overlap calculation
+    const currentUser = await User.findById(req.userId).select('questionnaire');
+    const userInterests = currentUser?.questionnaire?.hangoutPreferences || [];
+
+    // ✅ FIXED: Format response correctly
+    const formattedCompanions = companions.map(companion => {
+      const companionInterests = companion.questionnaire?.hangoutPreferences || [];
+      const overlapCount = userInterests.filter(interest => 
+        companionInterests.includes(interest)
+      ).length;
+
+      return {
+        id: companion._id.toString(),
+        name: `${companion.firstName} ${companion.lastName}`.trim(),
+        profilePhoto: companion.profilePhoto,
+        verified: companion.verified,
+        isPremium: companion.isPremium,
+        photoVerificationStatus: companion.photoVerificationStatus,
+        sharedHangouts: companionInterests,
+        overlapCount: overlapCount,
+        bio: companion.questionnaire?.bio || null,
+        tagline: companion.questionnaire?.tagline || null,
+        price: companion.questionnaire?.price || null,
+        city: companion.questionnaire?.city || null,
+        state: companion.questionnaire?.state || null,
+        averageRating: companion.ratingStats?.averageRating || 0,
+        totalRatings: companion.ratingStats?.totalRatings || 0
+      };
+    });
+
     res.json({
       success: true,
-      companions,
-      count: companions.length
+      companions: formattedCompanions,
+      count: formattedCompanions.length
     });
 
   } catch (error) {
