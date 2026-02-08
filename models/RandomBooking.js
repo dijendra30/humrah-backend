@@ -1,235 +1,155 @@
-// models/RandomBooking.js - WITH AREA FIELD
+// models/RandomBooking.js - GPS-BASED MODEL
+
 const mongoose = require('mongoose');
 
 const randomBookingSchema = new mongoose.Schema({
+  // Creator
   initiatorId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     required: true,
     index: true
   },
-  
-  destination: {
-    type: String,
-    required: true,
-    trim: true,
-    maxlength: 200
-  },
-  
-  // ✅ City: normalized, from user.questionnaire.city
-  city: {
-    type: String,
-    required: true,
-    trim: true,
-    lowercase: true,  // Always stored in lowercase
-    index: true
-  },
-  
-  // ✅ Area: normalized, from user.questionnaire.area (optional)
-  area: {
-    type: String,
-    trim: true,
-    lowercase: true,  // Always stored in lowercase
-    default: null
-  },
-  
-  date: {
-    type: Date,
-    required: true,
-    index: true
-  },
-  
-  timeRange: {
-    start: {
-      type: String,
-      required: true
-    },
-    end: {
-      type: String,
-      required: true
-    }
-  },
-  
-  preferredGender: {
-    type: String,
-    enum: ['MALE', 'FEMALE', 'ANY'],
-    required: true
-  },
-  
-  ageRange: {
-    min: {
-      type: Number,
-      required: true,
-      min: 18,
-      max: 100
-    },
-    max: {
-      type: Number,
-      required: true,
-      min: 18,
-      max: 100
-    }
-  },
-  
-  activityType: {
-    type: String,
-    enum: ['WALK', 'FOOD', 'EXPLORE', 'EVENT', 'CASUAL'],
-    required: true,
-    index: true
-  },
-  
-  note: {
-    type: String,
-    maxlength: 500,
-    default: null
-  },
-  
-  status: {
-    type: String,
-    enum: ['PENDING', 'MATCHED', 'EXPIRED', 'CANCELLED'],
-    default: 'PENDING',
-    required: true,
-    index: true
-  },
-  
-  acceptedUserId: {
+
+  // Acceptor (set when matched)
+  acceptorId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     default: null,
     index: true
   },
-  
-  matchedAt: {
-    type: Date,
-    default: null
+
+  // Location (GPS-based)
+  city: {
+    type: String,
+    required: true,
+    index: true
   },
-  
+
+  lat: {
+    type: Number,
+    required: true,
+    min: -90,
+    max: 90,
+    index: true
+  },
+
+  lng: {
+    type: Number,
+    required: true,
+    min: -180,
+    max: 180,
+    index: true
+  },
+
+  locationCategory: {
+    type: String,
+    enum: ['Park', 'Mall', 'Cafe', 'Event Venue', 'Public Place'],
+    default: 'Public Place'
+  },
+
+  // Activity
+  activityType: {
+    type: String,
+    enum: ['WALK', 'FOOD', 'EVENT', 'EXPLORE'],
+    required: true
+  },
+
+  // Time
+  startTime: {
+    type: Date,
+    required: true,
+    index: true
+  },
+
+  endTime: {
+    type: Date,
+    required: true
+  },
+
+  // Status
+  status: {
+    type: String,
+    enum: ['PENDING', 'MATCHED', 'CANCELLED', 'COMPLETED', 'EXPIRED'],
+    default: 'PENDING',
+    required: true,
+    index: true
+  },
+
+  // Timestamps
   createdAt: {
     type: Date,
     default: Date.now,
     required: true,
     index: true
   },
-  
-  expiresAt: {
+
+  matchedAt: {
     type: Date,
-    required: true
+    default: null
   },
-  
+
   cancelledAt: {
     type: Date,
     default: null
   },
-  
+
   cancellationReason: {
     type: String,
     default: null
   },
-  
-  chatId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Chat',
-    default: null
-  },
-  
-  meetupCompletedAt: {
+
+  completedAt: {
     type: Date,
     default: null
   },
-  
-  completedBy: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User',
+
+  expiredAt: {
+    type: Date,
     default: null
   },
-  
-  reportedBy: [{
+
+  expiresAt: {
+    type: Date,
+    required: true,
+    index: true
+  },
+
+  // Chat reference
+  chatId: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: 'User'
-  }],
-  
-  isUnderReview: {
-    type: Boolean,
-    default: false
+    ref: 'RandomBookingChat',
+    default: null
   }
 }, {
   timestamps: true
 });
 
 // =============================================
-// INDEXES
+// INDEXES (for GPS-based queries)
 // =============================================
-randomBookingSchema.index({ status: 1, city: 1, date: 1 });
-randomBookingSchema.index({ initiatorId: 1, createdAt: -1 });
-randomBookingSchema.index({ acceptedUserId: 1, matchedAt: -1 });
-randomBookingSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
-
-// =============================================
-// PRE-SAVE VALIDATION
-// =============================================
-randomBookingSchema.pre('save', function(next) {
-  if (this.isNew && this.date < new Date()) {
-    return next(new Error('Booking date cannot be in the past'));
-  }
-  
-  if (this.ageRange.min > this.ageRange.max) {
-    return next(new Error('Minimum age cannot be greater than maximum age'));
-  }
-  
-  if (this.isNew && !this.expiresAt) {
-    this.expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
-  }
-  
-  next();
-});
+randomBookingSchema.index({ lat: 1, lng: 1 });
+randomBookingSchema.index({ city: 1, status: 1, expiresAt: 1 });
+randomBookingSchema.index({ status: 1, startTime: 1 });
 
 // =============================================
 // INSTANCE METHODS
 // =============================================
 
-randomBookingSchema.methods.isValid = function() {
-  return this.status === 'PENDING' && 
-         this.expiresAt > new Date() &&
-         this.date > new Date();
-};
-
-randomBookingSchema.methods.acceptBooking = function(userId) {
-  if (this.status !== 'PENDING') {
-    throw new Error('Booking is no longer available');
-  }
-  
-  this.status = 'MATCHED';
-  this.acceptedUserId = userId;
-  this.matchedAt = new Date();
-  
-  return this.save();
+randomBookingSchema.methods.isExpired = function() {
+  return this.expiresAt < new Date() || this.status === 'EXPIRED';
 };
 
 randomBookingSchema.methods.cancel = function(reason) {
-  if (this.status === 'MATCHED') {
-    throw new Error('Cannot cancel matched booking');
-  }
-  
   this.status = 'CANCELLED';
   this.cancelledAt = new Date();
-  this.cancellationReason = reason;
-  
+  this.cancellationReason = reason || 'User cancelled';
   return this.save();
 };
 
-randomBookingSchema.methods.completeMeetup = function(userId) {
-  if (this.status !== 'MATCHED') {
-    throw new Error('Only matched bookings can be completed');
-  }
-  
-  if (userId.toString() !== this.initiatorId.toString() && 
-      userId.toString() !== this.acceptedUserId.toString()) {
-    throw new Error('Unauthorized to complete this booking');
-  }
-  
-  this.meetupCompletedAt = new Date();
-  this.completedBy = userId;
-  
+randomBookingSchema.methods.complete = function() {
+  this.status = 'COMPLETED';
+  this.completedAt = new Date();
   return this.save();
 };
 
@@ -237,29 +157,44 @@ randomBookingSchema.methods.completeMeetup = function(userId) {
 // STATIC METHODS
 // =============================================
 
-randomBookingSchema.statics.getUserHistory = function(userId, limit = 20) {
-  return this.find({
-    $or: [
-      { initiatorId: userId },
-      { acceptedUserId: userId }
-    ]
+randomBookingSchema.statics.findNearby = async function(lat, lng, maxDistance = 15) {
+  // This is a simplified version
+  // In production, use MongoDB's $geoNear or geospatial queries
+  
+  const { calculateDistance } = require('../utils/progressiveMatching');
+  
+  const allBookings = await this.find({
+    status: 'PENDING',
+    expiresAt: { $gt: new Date() },
+    startTime: { $gte: new Date() }
   })
-  .populate('initiatorId', 'firstName lastName profilePhoto questionnaire')
-  .populate('acceptedUserId', 'firstName lastName profilePhoto questionnaire')
-  .sort({ createdAt: -1 })
-  .limit(limit);
+  .populate('initiatorId', 'firstName lastName profilePhoto isVerified')
+  .lean();
+
+  const nearbyBookings = allBookings
+    .map(booking => {
+      const distance = calculateDistance(lat, lng, booking.lat, booking.lng);
+      return { ...booking, distance };
+    })
+    .filter(booking => booking.distance <= maxDistance)
+    .sort((a, b) => a.distance - b.distance);
+
+  return nearbyBookings;
 };
 
-randomBookingSchema.statics.cleanupExpired = function() {
-  return this.updateMany(
+randomBookingSchema.statics.cleanupExpired = async function() {
+  const result = await this.updateMany(
     {
       status: 'PENDING',
       expiresAt: { $lt: new Date() }
     },
     {
-      $set: { status: 'EXPIRED' }
+      status: 'EXPIRED',
+      expiredAt: new Date()
     }
   );
+
+  return result;
 };
 
 module.exports = mongoose.model('RandomBooking', randomBookingSchema);
