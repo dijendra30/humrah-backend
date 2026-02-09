@@ -1,4 +1,4 @@
-// models/User.js - UPDATED with MEMBER/COMPANION User Type System
+// models/User.js - UPDATED with MEMBER/COMPANION User Type System + LOCATION SUPPORT
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
@@ -83,19 +83,8 @@ const userSchema = new mongoose.Schema({
   },
   
   // =============================================
-  // ✅ NEW: USER TYPE SYSTEM
+  // ✅ USER TYPE SYSTEM
   // =============================================
-  /**
-   * User Type - Determines if user is a companion or member
-   * - MEMBER: Regular user looking for companions
-   * - COMPANION: User offering companionship services
-   * 
-   * This is SEPARATE from role (which is for admin access)
-   * 
-   * Auto-determined from questionnaire.becomeCompanion:
-   * - "Yes, I'm interested" → COMPANION
-   * - Anything else → MEMBER
-   */
   userType: {
     type: String,
     enum: ['MEMBER', 'COMPANION'],
@@ -119,9 +108,24 @@ const userSchema = new mongoose.Schema({
     index: true
   },
   
-  // Continue with rest of schema...
-  // [Previous User schema fields remain exactly the same]
+  // =============================================
+  // ✅ LOCATION FIELDS (Privacy-Safe)
+  // =============================================
+  last_known_lat: { 
+    type: Number, 
+    default: null
+  },
+  last_known_lng: { 
+    type: Number, 
+    default: null 
+  },
+  last_location_updated_at: { 
+    type: Date, 
+    default: null,
+    index: true
+  },
   
+  // Payment Info
   paymentInfo: {
     upiId: { type: String, default: null },
     upiName: { type: String, default: null },
@@ -209,7 +213,14 @@ const userSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 // =============================================
-// ✅ MIDDLEWARE: Auto-update userType based on questionnaire
+// ✅ INDEXES FOR PERFORMANCE
+// =============================================
+// Create geospatial index for location queries
+userSchema.index({ last_known_lat: 1, last_known_lng: 1 });
+userSchema.index({ last_location_updated_at: 1 });
+
+// =============================================
+// ✅ MIDDLEWARE: Auto-update userType
 // =============================================
 userSchema.pre('save', function(next) {
   // Update userType based on becomeCompanion answer
@@ -225,7 +236,50 @@ userSchema.pre('save', function(next) {
 });
 
 // =============================================
-// EXISTING METHODS (Keep all existing methods)
+// ✅ LOCATION METHODS
+// =============================================
+
+/**
+ * Update user location
+ * 
+ * @param {Number} lat - Latitude
+ * @param {Number} lng - Longitude
+ */
+userSchema.methods.updateLocation = function(lat, lng) {
+  this.last_known_lat = lat;
+  this.last_known_lng = lng;
+  this.last_location_updated_at = new Date();
+};
+
+/**
+ * Check if location is fresh (< 24 hours old)
+ * 
+ * @returns {Boolean} True if location is recent
+ */
+userSchema.methods.hasRecentLocation = function() {
+  if (!this.last_location_updated_at) return false;
+  
+  const hoursSinceUpdate = (Date.now() - this.last_location_updated_at.getTime()) / (1000 * 60 * 60);
+  return hoursSinceUpdate < 24;
+};
+
+/**
+ * Get location for matching (null if too old)
+ * 
+ * @returns {Object|null} Location object or null
+ */
+userSchema.methods.getLocationForMatching = function() {
+  if (!this.hasRecentLocation()) return null;
+  
+  return {
+    lat: this.last_known_lat,
+    lng: this.last_known_lng,
+    updatedAt: this.last_location_updated_at
+  };
+};
+
+// =============================================
+// ✅ USER TYPE METHODS
 // =============================================
 
 /**
@@ -242,6 +296,10 @@ userSchema.methods.isMember = function() {
   return this.userType === 'MEMBER';
 };
 
+// =============================================
+// ✅ PROFILE METHODS
+// =============================================
+
 /**
  * Get public profile (for other users to view)
  */
@@ -253,7 +311,7 @@ userSchema.methods.getPublicProfile = function() {
     profilePhoto: this.profilePhoto,
     verified: this.verified,
     isPremium: this.isPremium,
-    userType: this.userType, // ✅ NEW: Include userType
+    userType: this.userType,
     
     // Questionnaire (public fields only)
     questionnaire: {
@@ -296,7 +354,7 @@ userSchema.methods.getPrivateProfile = function() {
     isPremium: this.isPremium,
     premiumExpiresAt: this.premiumExpiresAt,
     role: this.role,
-    userType: this.userType, // ✅ NEW
+    userType: this.userType,
     
     verificationPhoto: this.verificationPhoto,
     photoVerificationStatus: this.photoVerificationStatus,
@@ -307,11 +365,20 @@ userSchema.methods.getPrivateProfile = function() {
     ratingStats: this.ratingStats,
     profileEditStats: this.profileEditStats,
     
+    // ✅ Include location info for user's own view
+    last_known_lat: this.last_known_lat,
+    last_known_lng: this.last_known_lng,
+    last_location_updated_at: this.last_location_updated_at,
+    
     createdAt: this.createdAt,
     updatedAt: this.updatedAt,
     lastActive: this.lastActive
   };
 };
+
+// =============================================
+// ✅ PASSWORD METHODS
+// =============================================
 
 /**
  * Hash password before saving
