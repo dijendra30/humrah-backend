@@ -1,4 +1,4 @@
-// routes/users.js - Complete User Routes with FCM Support
+// routes/users.js - Complete User Routes with FCM Support + LOCATION SUPPORT
 const express = require('express');
 const router = express.Router();
 
@@ -118,6 +118,65 @@ router.delete('/me', authenticate, async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Server error'
+    });
+  }
+});
+
+// ==================== LOCATION ROUTE ====================
+
+// @route   POST /api/users/location
+// @desc    Update user's last known location
+// @access  Private
+router.post('/location', authenticate, async (req, res) => {
+  try {
+    const { lat, lng, timestamp } = req.body;
+
+    // Validate input
+    if (lat === undefined || lng === undefined) {
+      return res.status(400).json({
+        success: false,
+        message: 'Latitude and longitude are required'
+      });
+    }
+
+    // Validate lat/lng ranges
+    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid latitude or longitude values'
+      });
+    }
+
+    const user = await User.findById(req.userId);
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // ✅ Update location (overwrites previous value - no history)
+    user.updateLocation(lat, lng);
+    await user.save();
+
+    console.log(`📍 Location updated for user ${user._id}: (${lat}, ${lng})`);
+
+    res.json({
+      success: true,
+      message: 'Location updated successfully',
+      location: {
+        last_known_lat: user.last_known_lat,
+        last_known_lng: user.last_known_lng,
+        last_location_updated_at: user.last_location_updated_at
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Location update error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error updating location'
     });
   }
 });
