@@ -1,0 +1,534 @@
+// routes/verification.js - Real Identity Verification System
+const express = require('express');
+const router = express.Router();
+const { auth } = require('../middleware/auth');
+const User = require('../models/User');
+const VerificationSession = require('../models/VerificationSession');
+const { cloudinary } = require('../config/cloudinary');
+const crypto = require('crypto');
+const axios = require('axios');
+const { processVerificationVideo } = require('../services/verificationProcessor');
+
+// =============================================
+// VERIFICATION INSTRUCTIONS POOL
+// =============================================
+const VERIFICATION_INSTRUCTIONS = [
+  'Turn your head slowly to the left',
+  'Turn your head slowly to the right',
+  'Blink twice',
+  'Smile naturally',
+  'Look up slightly',
+  'Nod your head once'
+];
+
+// =============================================
+// START VERIFICATION SESSION
+// =============================================
+// @route   POST /api/verification/start
+// @desc    Start a new verification session with randomized instructions
+// @access  Private
+router.post('/start', auth, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+    
+    // Check if user already verified
+    if (user.verified) {
+      return res.status(400).json({
+        success: false,
+        message: 'User is already verified'
+      });
+    }
+    
+    // Check for pending verification
+    const pendingSession = await VerificationSession.findOne({
+      userId: req.userId,
+      status: 'PENDING',
+      createdAt: { $gte: new Date(Date.now() - 10 * 60 * 1000) } // Last 10 minutes
+    });
+    
+    if (pendingSession) {
+      return res.status(400).json({
+        success: false,
+        message: 'You already have a pending verification session',
+        sessionId: pendingSession.sessionId
+      });
+    }
+    
+    // Generate unique session ID
+    const sessionId = crypto.randomBytes(16).toString('hex');
+    
+    // Randomize instructions (pick 3-4 random instructions)
+    const shuffled = [...VERIFICATION_INSTRUCTIONS].sort(() => Math.random() - 0.5);
+    const selectedInstructions = shuffled.slice(0, Math.floor(Math.random() * 2) + 3); // 3-4 instructions
+    
+    // Create verification session
+    const session = await VerificationSession.create({
+      userId: req.userId,
+      sessionId,
+      instructions: selectedInstructions,
+      status: 'PENDING',
+      createdAt: new Date(),
+      expiresAt: new Date(Date.now() + 10 * 60 * 1000) // 10 minutes
+    });
+    
+    res.json({
+      success: true,
+      sessionId: session.sessionId,
+      instructions: selectedInstructions,
+      duration: 6, // 6 seconds max
+      expiresIn: 600 // 10 minutes in seconds
+    });
+    
+  } catch (error) {
+    console.error('Start verification error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to start verification session'
+    });
+  }
+});
+
+// =============================================
+// GENERATE CLOUDINARY SIGNATURE
+// =============================================
+// @route   POST /api/verification/upload-signature
+// @desc    Generate signed upload parameters for Cloudinary
+// @access  Private
+router.post('/upload-signature', auth, async (req, res) => {
+  try {
+    const { sessionId } = req.body;
+    
+    if (!sessionId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Session ID is required'
+      });
+    }
+    
+    // Verify session exists and belongs to user
+    const session = await VerificationSession.findOne({
+      sessionId,
+      userId: req.userId,
+      status: 'PENDING'
+    });
+    
+    if (!session) {
+      return res.status(404).json({
+        success: false,
+        message: 'Invalid or expired verification session'
+      });
+    }
+    
+    // Check if session expired
+    if (new Date() > session.expiresAt) {
+      session.status = 'EXPIRED';
+      await session.save();
+      
+      return res.status(400).json({
+        success: false,
+        message: 'Verification session expired'
+      });
+    }
+    
+    const timestamp = Math.round(Date.now() / 1000);
+    const folder = `verification-temp/${sessionId}`;
+    
+    // Parameters for Cloudinary upload
+    const uploadParams = {
+      timestamp,
+      folder,
+      resource_type: 'video',
+      type: 'authenticated', // Private, not public
+      invalidate: true,
+      eager: '', // No transformations
+      eager_async: false,
+      backup: false,
+      overwrite: false
+    };
+    
+    // Generate signature
+    const stringToSign = Object.keys(uploadParams)
+      .sort()
+      .map(key => `${key}=${uploadParams[key]}`)
+      .join('&');
+    
+    const signature = crypto
+      .createHash('sha1')
+      .update(stringToSign + process.env.CLOUDINARY_API_SECRET)
+      .digest('hex');
+    
+    res.json({
+      success: true,
+      uploadParams: {
+        ...uploadParams,
+        signature,
+        api_key: process.env.CLOUDINARY_API_KEY,
+        cloud_name: process.env.CLOUDINARY_CLOUD_NAME
+      }
+    });
+    
+  } catch (error) {
+    console.error('Generate signature error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to generate upload signature'
+    });
+  }
+});
+
+// =============================================
+// PROCESS VERIFICATION VIDEO
+// =============================================
+// @route   POST /api/verification/process
+// @desc    Process uploaded verification video
+// @access  Private
+router.post('/process', auth, async (req, res) => {
+  try {
+    const { sessionId, publicId } = req.body;
+    
+    if (!sessionId || !publicId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Session ID and public ID are required'
+      });
+    }
+    
+    // Find session
+    const session = await VerificationSession.findOne({
+      sessionId,
+      userId: req.userId,
+      status: 'PENDING'
+    });
+    
+    if (!session) {
+      return res.status(404).json({
+        success: false,
+        message: 'Invalid verification session'
+      });
+    }
+    
+    // Update session with publicId
+    session.cloudinaryPublicId = publicId;
+    session.status = 'PROCESSING';
+    await session.save();
+    
+    // Process asynchronously (don't wait for user)
+    processVerificationInBackground(session._id, req.userId, publicId, sessionId);
+    
+    res.json({
+      success: true,
+      message: 'Verification video is being processed',
+      status: 'PROCESSING'
+    });
+    
+  } catch (error) {
+    console.error('Process verification error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to process verification'
+    });
+  }
+});
+
+// =============================================
+// CHECK VERIFICATION STATUS
+// =============================================
+// @route   GET /api/verification/status/:sessionId
+// @desc    Check status of verification session
+// @access  Private
+router.get('/status/:sessionId', auth, async (req, res) => {
+  try {
+    const session = await VerificationSession.findOne({
+      sessionId: req.params.sessionId,
+      userId: req.userId
+    });
+    
+    if (!session) {
+      return res.status(404).json({
+        success: false,
+        message: 'Verification session not found'
+      });
+    }
+    
+    res.json({
+      success: true,
+      status: session.status,
+      result: session.result,
+      confidence: session.confidence,
+      rejectionReason: session.rejectionReason,
+      processedAt: session.processedAt,
+      createdAt: session.createdAt
+    });
+    
+  } catch (error) {
+    console.error('Check status error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to check verification status'
+    });
+  }
+});
+
+// =============================================
+// BACKGROUND PROCESSING FUNCTION
+// =============================================
+async function processVerificationInBackground(sessionId, userId, publicId, sessionToken) {
+  try {
+    console.log(`[Verification] Starting background processing for session ${sessionToken}`);
+    
+    const session = await VerificationSession.findById(sessionId);
+    const user = await User.findById(userId);
+    
+    if (!session || !user) {
+      console.error('[Verification] Session or user not found');
+      return;
+    }
+    
+    // Call the verification processor service
+    const result = await processVerificationVideo(publicId, user, session);
+    
+    // Update session with results
+    session.status = result.decision;
+    session.result = result.decision;
+    session.confidence = result.confidence;
+    session.livenessScore = result.livenessScore;
+    session.faceMatchScore = result.faceMatchScore;
+    session.rejectionReason = result.rejectionReason;
+    session.processedAt = new Date();
+    
+    // Store embedding if approved
+    if (result.decision === 'APPROVED') {
+      session.faceEmbedding = result.faceEmbedding;
+      user.verified = true;
+      user.verificationEmbedding = result.faceEmbedding;
+      user.verifiedAt = new Date();
+      await user.save();
+    }
+    
+    await session.save();
+    
+    // Delete video from Cloudinary
+    await deleteVerificationVideo(publicId);
+    
+    console.log(`[Verification] Processing complete for session ${sessionToken}: ${result.decision}`);
+    
+    // TODO: Send push notification to user about verification result
+    
+  } catch (error) {
+    console.error('[Verification] Background processing error:', error);
+    
+    // Update session to failed state
+    try {
+      const session = await VerificationSession.findById(sessionId);
+      if (session) {
+        session.status = 'FAILED';
+        session.rejectionReason = 'Processing error occurred';
+        await session.save();
+      }
+    } catch (updateError) {
+      console.error('[Verification] Failed to update session:', updateError);
+    }
+    
+    // Still try to delete the video
+    try {
+      await deleteVerificationVideo(publicId);
+    } catch (deleteError) {
+      console.error('[Verification] Failed to delete video:', deleteError);
+    }
+  }
+}
+
+// =============================================
+// DELETE VIDEO FROM CLOUDINARY
+// =============================================
+async function deleteVerificationVideo(publicId) {
+  try {
+    await cloudinary.uploader.destroy(publicId, {
+      resource_type: 'video',
+      invalidate: true
+    });
+    console.log(`[Verification] Video deleted: ${publicId}`);
+  } catch (error) {
+    console.error('[Verification] Error deleting video:', error);
+    // Log to monitoring system - video needs manual cleanup
+  }
+}
+
+// =============================================
+// GET USER VERIFICATION HISTORY (Admin)
+// =============================================
+// @route   GET /api/verification/history/:userId
+// @desc    Get verification history for a user (Admin only)
+// @access  Private (Admin)
+router.get('/history/:userId', auth, async (req, res) => {
+  try {
+    // Check if user is admin
+    if (req.user.role !== 'SUPER_ADMIN' && req.user.role !== 'SAFETY_ADMIN') {
+      return res.status(403).json({
+        success: false,
+        message: 'Insufficient permissions'
+      });
+    }
+    
+    const sessions = await VerificationSession.find({
+      userId: req.params.userId
+    })
+    .sort({ createdAt: -1 })
+    .select('-faceEmbedding') // Don't expose embeddings
+    .limit(20);
+    
+    res.json({
+      success: true,
+      sessions
+    });
+    
+  } catch (error) {
+    console.error('Get verification history error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// =============================================
+// MANUAL REVIEW ENDPOINTS (Admin)
+// =============================================
+
+// Get pending manual reviews
+router.get('/admin/pending-reviews', auth, async (req, res) => {
+  try {
+    if (req.user.role !== 'SUPER_ADMIN' && req.user.role !== 'SAFETY_ADMIN') {
+      return res.status(403).json({
+        success: false,
+        message: 'Insufficient permissions'
+      });
+    }
+    
+    const pendingSessions = await VerificationSession.find({
+      status: 'MANUAL_REVIEW'
+    })
+    .populate('userId', 'firstName lastName email profilePhoto')
+    .sort({ createdAt: -1 })
+    .limit(50);
+    
+    res.json({
+      success: true,
+      sessions: pendingSessions
+    });
+    
+  } catch (error) {
+    console.error('Get pending reviews error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// Approve verification manually
+router.post('/admin/approve/:sessionId', auth, async (req, res) => {
+  try {
+    if (req.user.role !== 'SUPER_ADMIN' && req.user.role !== 'SAFETY_ADMIN') {
+      return res.status(403).json({
+        success: false,
+        message: 'Insufficient permissions'
+      });
+    }
+    
+    const session = await VerificationSession.findById(req.params.sessionId);
+    
+    if (!session) {
+      return res.status(404).json({
+        success: false,
+        message: 'Session not found'
+      });
+    }
+    
+    const user = await User.findById(session.userId);
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+    
+    // Update session
+    session.status = 'APPROVED';
+    session.result = 'APPROVED';
+    session.reviewedBy = req.userId;
+    session.reviewedAt = new Date();
+    await session.save();
+    
+    // Update user
+    user.verified = true;
+    user.verificationEmbedding = session.faceEmbedding;
+    user.verifiedAt = new Date();
+    await user.save();
+    
+    res.json({
+      success: true,
+      message: 'Verification approved'
+    });
+    
+  } catch (error) {
+    console.error('Approve verification error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// Reject verification manually
+router.post('/admin/reject/:sessionId', auth, async (req, res) => {
+  try {
+    if (req.user.role !== 'SUPER_ADMIN' && req.user.role !== 'SAFETY_ADMIN') {
+      return res.status(403).json({
+        success: false,
+        message: 'Insufficient permissions'
+      });
+    }
+    
+    const { reason } = req.body;
+    
+    const session = await VerificationSession.findById(req.params.sessionId);
+    
+    if (!session) {
+      return res.status(404).json({
+        success: false,
+        message: 'Session not found'
+      });
+    }
+    
+    // Update session
+    session.status = 'REJECTED';
+    session.result = 'REJECTED';
+    session.rejectionReason = reason || 'Manually rejected by admin';
+    session.reviewedBy = req.userId;
+    session.reviewedAt = new Date();
+    await session.save();
+    
+    res.json({
+      success: true,
+      message: 'Verification rejected'
+    });
+    
+  } catch (error) {
+    console.error('Reject verification error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+module.exports = router;
