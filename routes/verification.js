@@ -277,11 +277,11 @@ router.get('/status/:sessionId', auth, async (req, res) => {
 });
 
 // =============================================
-// BACKGROUND PROCESSING FUNCTION
+// BACKGROUND PROCESSING FUNCTION (UPDATED)
 // =============================================
 async function processVerificationInBackground(sessionId, userId, publicId, sessionToken) {
   try {
-    console.log(`[Verification] Starting background processing for session ${sessionToken}`);
+    console.log(`\n🎬 [Verification] Starting background processing for session ${sessionToken}`);
     
     const session = await VerificationSession.findById(sessionId);
     const user = await User.findById(userId);
@@ -291,10 +291,14 @@ async function processVerificationInBackground(sessionId, userId, publicId, sess
       return;
     }
     
-    // Call the verification processor service
+    // =============================================
+    // CALL THE VERIFICATION PROCESSOR
+    // =============================================
     const result = await processVerificationVideo(publicId, user, session);
     
-    // Update session with results
+    // =============================================
+    // UPDATE SESSION WITH RESULTS
+    // =============================================
     session.status = result.decision;
     session.result = result.decision;
     session.confidence = result.confidence;
@@ -303,26 +307,60 @@ async function processVerificationInBackground(sessionId, userId, publicId, sess
     session.rejectionReason = result.rejectionReason;
     session.processedAt = new Date();
     
-    // Store embedding if approved
+    // =============================================
+    // HANDLE APPROVAL
+    // =============================================
     if (result.decision === 'APPROVED') {
       session.faceEmbedding = result.faceEmbedding;
-      user.verified = true;
-      user.verificationEmbedding = result.faceEmbedding;
-      user.verifiedAt = new Date();
-      await user.save();
+      
+      // Mark user as verified
+      await user.markVerifiedViaVideo(result.faceEmbedding);
+      
+      console.log(`✅ [Verification] User ${user._id} APPROVED and marked as verified`);
+      
+      // TODO: Send success notification to user
+      await sendVerificationResultNotification(user, 'APPROVED');
+    }
+    
+    // =============================================
+    // HANDLE REJECTION
+    // =============================================
+    else if (result.decision === 'REJECTED') {
+      await user.recordVerificationRejection(result.rejectionReason, session.sessionId);
+      
+      console.log(`❌ [Verification] User ${user._id} REJECTED: ${result.rejectionReason}`);
+      
+      // TODO: Send rejection notification to user
+      await sendVerificationResultNotification(user, 'REJECTED', result.rejectionReason);
+    }
+    
+    // =============================================
+    // HANDLE MANUAL REVIEW
+    // =============================================
+    else if (result.decision === 'MANUAL_REVIEW') {
+      session.faceEmbedding = result.faceEmbedding; // Save for manual review
+      
+      console.log(`⚠️ [Verification] User ${user._id} needs MANUAL REVIEW`);
+      
+      // TODO: Notify admins about pending review
+      await notifyAdminsForManualReview(session, user);
     }
     
     await session.save();
     
-    // Delete video from Cloudinary
+    // =============================================
+    // DELETE VIDEO FROM CLOUDINARY (CRITICAL)
+    // =============================================
     await deleteVerificationVideo(publicId);
+    session.videoDeletedAt = new Date();
+    await session.save();
     
-    console.log(`[Verification] Processing complete for session ${sessionToken}: ${result.decision}`);
-    
-    // TODO: Send push notification to user about verification result
+    console.log(`\n✅ [Verification] Processing complete for session ${sessionToken}`);
+    console.log(`   Final Decision: ${result.decision}`);
+    console.log(`   Video Deleted: Yes`);
     
   } catch (error) {
-    console.error('[Verification] Background processing error:', error);
+    console.error('❌ [Verification] Background processing error:', error);
     
     // Update session to failed state
     try {
@@ -330,6 +368,7 @@ async function processVerificationInBackground(sessionId, userId, publicId, sess
       if (session) {
         session.status = 'FAILED';
         session.rejectionReason = 'Processing error occurred';
+        session.processedAt = new Date();
         await session.save();
       }
     } catch (updateError) {
@@ -342,22 +381,6 @@ async function processVerificationInBackground(sessionId, userId, publicId, sess
     } catch (deleteError) {
       console.error('[Verification] Failed to delete video:', deleteError);
     }
-  }
-}
-
-// =============================================
-// DELETE VIDEO FROM CLOUDINARY
-// =============================================
-async function deleteVerificationVideo(publicId) {
-  try {
-    await cloudinary.uploader.destroy(publicId, {
-      resource_type: 'video',
-      invalidate: true
-    });
-    console.log(`[Verification] Video deleted: ${publicId}`);
-  } catch (error) {
-    console.error('[Verification] Error deleting video:', error);
-    // Log to monitoring system - video needs manual cleanup
   }
 }
 
@@ -530,5 +553,95 @@ router.post('/admin/reject/:sessionId', auth, async (req, res) => {
     });
   }
 });
+// =============================================
+// NOTIFICATION HELPERS
+// =============================================
+
+/**
+ * Send verification result notification to user
+ */
+async function sendVerificationResultNotification(user, result, reason = null) {
+  try {
+    // Only send if user has FCM tokens
+    if (!user.fcmTokens || user.fcmTokens.length === 0) {
+      console.log('ℹ️ No FCM tokens for user, skipping notification');
+      return;
+    }
+    
+    const admin = require('firebase-admin');
+    
+    let title, body;
+    
+    if (result === 'APPROVED') {
+      title = '✅ Verification Approved!';
+      body = 'Your identity has been verified. You now have full access to Humrah.';
+    } else if (result === 'REJECTED') {
+      title = '❌ Verification Failed';
+      body = reason || 'Your verification was unsuccessful. Please try again.';
+    } else if (result === 'MANUAL_REVIEW') {
+      title = '⏳ Verification Under Review';
+      body = 'Your verification is being manually reviewed. You will be notified soon.';
+    }
+    
+    const message = {
+      notification: { title, body },
+      data: {
+        type: 'VERIFICATION_RESULT',
+        result: result,
+        reason: reason || ''
+      },
+      tokens: user.fcmTokens
+    };
+    
+    const response = await admin.messaging().sendEachForMulticast(message);
+    console.log(`📱 Verification notification sent: ${response.successCount}/${user.fcmTokens.length}`);
+    
+  } catch (error) {
+    console.error('❌ Failed to send verification notification:', error);
+  }
+}
+
+/**
+ * Notify admins about pending manual review
+ */
+async function notifyAdminsForManualReview(session, user) {
+  try {
+    // Find all admin users
+    const User = require('../models/User');
+    const admins = await User.find({
+      role: { $in: ['SAFETY_ADMIN', 'SUPER_ADMIN'] },
+      fcmTokens: { $exists: true, $ne: [] }
+    });
+    
+    if (admins.length === 0) {
+      console.log('ℹ️ No admins to notify');
+      return;
+    }
+    
+    const admin = require('firebase-admin');
+    
+    for (const adminUser of admins) {
+      const message = {
+        notification: {
+          title: '⚠️ Manual Verification Required',
+          body: `${user.firstName} ${user.lastName} needs manual review`
+        },
+        data: {
+          type: 'MANUAL_REVIEW_PENDING',
+          sessionId: session.sessionId,
+          userId: user._id.toString()
+        },
+        tokens: adminUser.fcmTokens
+      };
+      
+      await admin.messaging().sendEachForMulticast(message);
+    }
+    
+    console.log(`📱 Notified ${admins.length} admins about manual review`);
+    
+  } catch (error) {
+    console.error('❌ Failed to notify admins:', error);
+  }
+}
 
 module.exports = router;
