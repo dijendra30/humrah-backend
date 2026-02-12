@@ -498,6 +498,7 @@ app.use('/api/voice-call', require('./routes/voice-call'));
 app.use('/api/profile', profileRoutes);
 app.use('/api/reviews', reviewRoutes);
 app.use('/api/payment', paymentRoutes);
+app.use('/api/verification', require('./routes/verification'));
 
 // Cron jobs
 require('./cronJobs');
