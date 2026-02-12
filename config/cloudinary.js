@@ -1,4 +1,4 @@
-// config/cloudinary.js - Cloudinary Configuration (Fixed for Production)
+// config/cloudinary.js - Cloudinary Configuration (Updated with Verification Support)
 const cloudinary = require('cloudinary').v2;
 const multer = require('multer');
 const path = require('path');
@@ -13,7 +13,7 @@ cloudinary.config({
 // Configure Multer for Memory Storage (no disk writes)
 const storage = multer.memoryStorage();
 
-// Configure Multer Upload
+// Configure Multer Upload for Images
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
@@ -28,7 +28,22 @@ const upload = multer({
   }
 });
 
-// Helper function to upload buffer to Cloudinary
+// Configure Multer Upload for Videos (Verification)
+const videoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024 // 10MB limit for videos
+  },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith('video/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only video files are allowed!'), false);
+    }
+  }
+});
+
+// Helper function to upload buffer to Cloudinary (Images)
 const uploadBuffer = async (buffer, folder = 'humrah') => {
   return new Promise((resolve, reject) => {
     const uploadStream = cloudinary.uploader.upload_stream(
@@ -39,6 +54,35 @@ const uploadBuffer = async (buffer, folder = 'humrah') => {
           { width: 1000, height: 1000, crop: 'limit' },
           { quality: 'auto:good' }
         ]
+      },
+      (error, result) => {
+        if (error) {
+          reject(error);
+        } else {
+          resolve({
+            url: result.secure_url,
+            publicId: result.public_id
+          });
+        }
+      }
+    );
+    uploadStream.end(buffer);
+  });
+};
+
+// Helper function to upload verification video (Temporary, Authenticated)
+const uploadVerificationVideo = async (buffer, sessionId) => {
+  return new Promise((resolve, reject) => {
+    const uploadStream = cloudinary.uploader.upload_stream(
+      {
+        folder: `verification-temp/${sessionId}`,
+        resource_type: 'video',
+        type: 'authenticated', // Private, not public
+        invalidate: true,
+        eager: '', // No transformations
+        eager_async: false,
+        backup: false,
+        overwrite: false
       },
       (error, result) => {
         if (error) {
@@ -66,6 +110,21 @@ const deleteImage = async (publicId) => {
   }
 };
 
+// Helper function to delete video from Cloudinary
+const deleteVideo = async (publicId) => {
+  try {
+    await cloudinary.uploader.destroy(publicId, {
+      resource_type: 'video',
+      invalidate: true
+    });
+    console.log(`[Cloudinary] Video deleted: ${publicId}`);
+    return true;
+  } catch (error) {
+    console.error('[Cloudinary] Error deleting video:', error);
+    return false;
+  }
+};
+
 // Helper function to upload base64 image
 const uploadBase64 = async (base64String, folder = 'humrah') => {
   try {
@@ -87,10 +146,23 @@ const uploadBase64 = async (base64String, folder = 'humrah') => {
   }
 };
 
+// Helper function to get signed URL for authenticated resources
+const getAuthenticatedUrl = (publicId, resourceType = 'image') => {
+  return cloudinary.url(publicId, {
+    resource_type: resourceType,
+    type: 'authenticated',
+    sign_url: true
+  });
+};
+
 module.exports = {
   cloudinary,
   upload,
+  videoUpload,
   uploadBuffer,
+  uploadVerificationVideo,
   deleteImage,
-  uploadBase64
+  deleteVideo,
+  uploadBase64,
+  getAuthenticatedUrl
 };
