@@ -124,6 +124,51 @@ const userSchema = new mongoose.Schema({
     default: null,
     index: true
   },
+
+  // =============================================
+  // ✅ VIDEO VERIFICATION FIELDS (NEW)
+  // =============================================
+  
+  // Face embedding for matching
+  verificationEmbedding: {
+    type: [Number],
+    default: null
+  },
+  
+  // When user was verified
+  verifiedAt: {
+    type: Date,
+    default: null
+  },
+  
+  // Verification method used
+  verificationType: {
+    type: String,
+    enum: ['PHOTO', 'VIDEO', 'MANUAL', null],
+    default: null
+  },
+  
+  // Number of verification attempts
+  verificationAttempts: {
+    type: Number,
+    default: 0
+  },
+  
+  // Last verification attempt
+  lastVerificationAttempt: {
+    type: Date,
+    default: null
+  },
+  
+  // Verification rejection history
+  verificationRejections: {
+    type: [{
+      reason: String,
+      rejectedAt: Date,
+      sessionId: String
+    }],
+    default: []
+  },
   
   // Payment Info
   paymentInfo: {
@@ -138,6 +183,12 @@ const userSchema = new mongoose.Schema({
     upiLastUpdated: { type: Date, default: null },
     upiVerificationAttempts: { type: Number, default: 0 },
     totalEarnings: { type: Number, default: 0 },
+    verificationPhoto: { type: String, default: null },
+    verificationPhotoPublicId: { type: String, default: null },
+    photoVerificationStatus: { 
+    type: String, 
+    enum: ['not_submitted', 'pending', 'approved', 'rejected'],
+    default: 'not_submitted'},
     pendingPayout: { type: Number, default: 0 },
     completedPayouts: { type: Number, default: 0 },
     lastPayoutDate: { type: Date, default: null },
@@ -218,6 +269,63 @@ const userSchema = new mongoose.Schema({
 // Create geospatial index for location queries
 userSchema.index({ last_known_lat: 1, last_known_lng: 1 });
 userSchema.index({ last_location_updated_at: 1 });
+
+
+/**
+ * Check if user can attempt verification
+ */
+userSchema.methods.canAttemptVerification = function() {
+  // Allow if never attempted
+  if (!this.lastVerificationAttempt) return true;
+  
+  // Allow if last attempt was more than 1 hour ago
+  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+  if (this.lastVerificationAttempt < oneHourAgo) return true;
+  
+  // Allow if less than 3 attempts
+  if (this.verificationAttempts < 3) return true;
+  
+  return false;
+};
+
+/**
+ * Record verification attempt
+ */
+userSchema.methods.recordVerificationAttempt = async function() {
+  this.verificationAttempts += 1;
+  this.lastVerificationAttempt = new Date();
+  return await this.save();
+};
+
+/**
+ * Record verification rejection
+ */
+userSchema.methods.recordVerificationRejection = async function(reason, sessionId) {
+  this.verificationRejections.push({
+    reason,
+    rejectedAt: new Date(),
+    sessionId
+  });
+  
+  // Keep only last 5 rejections
+  if (this.verificationRejections.length > 5) {
+    this.verificationRejections = this.verificationRejections.slice(-5);
+  }
+  
+  return await this.save();
+};
+
+/**
+ * Mark user as verified via video
+ */
+userSchema.methods.markVerifiedViaVideo = async function(embedding) {
+  this.verified = true;
+  this.verifiedAt = new Date();
+  this.verificationType = 'VIDEO';
+  this.verificationEmbedding = embedding;
+  this.photoVerificationStatus = 'approved';
+  return await this.save();
+};
 
 // =============================================
 // ✅ MIDDLEWARE: Auto-update userType
@@ -410,3 +518,4 @@ userSchema.methods.isFullyVerified = function() {
 };
 
 module.exports = mongoose.model('User', userSchema);
+
