@@ -1,4 +1,4 @@
-// scripts/download-models.js
+// scripts/download-models.js - Auto-download Face-API Models
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
@@ -23,18 +23,31 @@ function downloadFile(url, dest) {
         const file = fs.createWriteStream(dest);
         
         https.get(url, (response) => {
-            if (response.statusCode !== 200) {
+            if (response.statusCode === 302 || response.statusCode === 301) {
+                // Follow redirect
+                https.get(response.headers.location, (redirectResponse) => {
+                    if (redirectResponse.statusCode !== 200) {
+                        reject(new Error(`Failed to download ${url}: ${redirectResponse.statusCode}`));
+                        return;
+                    }
+                    redirectResponse.pipe(file);
+                    file.on('finish', () => {
+                        file.close();
+                        console.log(`✅ Downloaded: ${path.basename(dest)}`);
+                        resolve();
+                    });
+                }).on('error', reject);
+            } else if (response.statusCode !== 200) {
                 reject(new Error(`Failed to download ${url}: ${response.statusCode}`));
                 return;
+            } else {
+                response.pipe(file);
+                file.on('finish', () => {
+                    file.close();
+                    console.log(`✅ Downloaded: ${path.basename(dest)}`);
+                    resolve();
+                });
             }
-            
-            response.pipe(file);
-            
-            file.on('finish', () => {
-                file.close();
-                console.log(`✅ Downloaded: ${path.basename(dest)}`);
-                resolve();
-            });
         }).on('error', (err) => {
             fs.unlink(dest, () => {});
             reject(err);
@@ -73,15 +86,26 @@ async function downloadModels() {
             console.log(`   - ${file} (${(size / 1024).toFixed(2)} KB)`);
         });
         
+        return true;
+        
     } catch (error) {
         console.error('\n❌ Error downloading models:', error.message);
-        process.exit(1);
+        console.error('💡 You may need to download models manually');
+        throw error;
     }
 }
 
 // Run if called directly
 if (require.main === module) {
-    downloadModels();
+    downloadModels()
+        .then(() => {
+            console.log('\n🎉 Model download complete!');
+            process.exit(0);
+        })
+        .catch((error) => {
+            console.error('\n❌ Model download failed:', error.message);
+            process.exit(1);
+        });
 }
 
 module.exports = { downloadModels };
