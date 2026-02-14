@@ -1,4 +1,4 @@
-// services/verificationProcessor.js - Video Verification Processing Engine
+// services/verificationProcessor.js - Video Verification Processing Engine (UPDATED)
 const faceapi = require('@vladmandic/face-api');
 const canvas = require('canvas');
 const { Canvas, Image, ImageData } = canvas;
@@ -14,16 +14,19 @@ const { cloudinary } = require('../config/cloudinary');
 faceapi.env.monkeyPatch({ Canvas, Image, ImageData });
 
 // =============================================
-// CONFIGURATION
+// CONFIGURATION - ✅ UPDATED FOR BETTER APPROVAL RATES
 // =============================================
 const CONFIG = {
   MODELS_PATH: path.join(__dirname, '../models/face-detection'),
   TEMP_DIR: path.join(__dirname, '../temp'),
-  FACE_MATCH_THRESHOLD: parseFloat(process.env.FACE_MATCH_THRESHOLD) || 0.60,
-  LIVENESS_THRESHOLD: parseFloat(process.env.LIVENESS_THRESHOLD) || 0.70,
-  MIN_FRAMES: 10,
+  
+  // ✅ More lenient thresholds
+  FACE_MATCH_THRESHOLD: parseFloat(process.env.FACE_MATCH_THRESHOLD) || 0.50,  // Lowered from 0.60
+  LIVENESS_THRESHOLD: parseFloat(process.env.LIVENESS_THRESHOLD) || 0.50,      // Lowered from 0.70
+  
+  MIN_FRAMES: 8,                     // Lowered from 10
   MAX_FRAMES: 20,
-  FRAME_INTERVAL_MS: 300 // Extract 1 frame every 300ms
+  FRAME_INTERVAL_MS: 300
 };
 
 // =============================================
@@ -108,14 +111,6 @@ loadModels().catch(err => {
 // =============================================
 // MAIN PROCESSING FUNCTION
 // =============================================
-/**
- * Process verification video
- * 
- * @param {String} cloudinaryPublicId - Cloudinary public ID of uploaded video
- * @param {Object} user - User object from database
- * @param {Object} session - VerificationSession object
- * @returns {Object} Processing result with decision
- */
 async function processVerificationVideo(cloudinaryPublicId, user, session) {
   const startTime = Date.now();
   let tempVideoPath = null;
@@ -124,22 +119,17 @@ async function processVerificationVideo(cloudinaryPublicId, user, session) {
   try {
     console.log(`\n🎬 [Verification] Processing session ${session.sessionId}`);
     
-    // Ensure models are loaded
     if (!modelsLoaded) {
       console.log('⚠️ Models not loaded yet, attempting to load...');
       await loadModels();
     }
     
-    // =============================================
-    // STEP 1: Download video from Cloudinary
-    // =============================================
+    // STEP 1: Download video
     console.log('📥 Step 1: Downloading video from Cloudinary...');
     tempVideoPath = await downloadVideo(cloudinaryPublicId);
     console.log(`✅ Video downloaded: ${tempVideoPath}`);
     
-    // =============================================
-    // STEP 2: Extract frames from video
-    // =============================================
+    // STEP 2: Extract frames
     console.log('🎞️ Step 2: Extracting frames from video...');
     tempFramesDir = await extractFrames(tempVideoPath);
     const framePaths = await fs.readdir(tempFramesDir);
@@ -149,9 +139,7 @@ async function processVerificationVideo(cloudinaryPublicId, user, session) {
       throw new Error(`Insufficient frames: ${framePaths.length} < ${CONFIG.MIN_FRAMES}`);
     }
     
-    // =============================================
     // STEP 3: Liveness Detection
-    // =============================================
     console.log('👁️ Step 3: Performing liveness detection...');
     const livenessResult = await detectLiveness(tempFramesDir, framePaths);
     console.log(`✅ Liveness score: ${(livenessResult.score * 100).toFixed(1)}%`);
@@ -167,9 +155,7 @@ async function processVerificationVideo(cloudinaryPublicId, user, session) {
       };
     }
     
-    // =============================================
     // STEP 4: Face Detection & Embedding
-    // =============================================
     console.log('🔍 Step 4: Detecting faces and generating embedding...');
     const faceResult = await extractBestFace(tempFramesDir, framePaths);
     
@@ -186,9 +172,7 @@ async function processVerificationVideo(cloudinaryPublicId, user, session) {
     
     console.log(`✅ Face detected, embedding generated`);
     
-    // =============================================
-    // STEP 5: Face Matching (if user has profile photo)
-    // =============================================
+    // STEP 5: Face Matching
     console.log('🎭 Step 5: Matching face with profile photo...');
     let faceMatchScore = null;
     
@@ -201,15 +185,12 @@ async function processVerificationVideo(cloudinaryPublicId, user, session) {
         console.log(`✅ Face match score: ${(faceMatchScore * 100).toFixed(1)}%`);
       } catch (error) {
         console.error('⚠️ Face matching failed:', error.message);
-        // Continue without face match if profile photo matching fails
       }
     } else {
       console.log('ℹ️ No profile photo to match against');
     }
     
-    // =============================================
     // STEP 6: Decision Logic
-    // =============================================
     console.log('⚖️ Step 6: Making decision...');
     const decision = makeDecision(livenessResult.score, faceMatchScore);
     
@@ -244,9 +225,6 @@ async function processVerificationVideo(cloudinaryPublicId, user, session) {
     };
     
   } finally {
-    // =============================================
-    // CLEANUP: Delete temporary files
-    // =============================================
     try {
       if (tempVideoPath) {
         await fs.unlink(tempVideoPath);
@@ -267,9 +245,6 @@ async function processVerificationVideo(cloudinaryPublicId, user, session) {
 // HELPER FUNCTIONS
 // =============================================
 
-/**
- * Download video from Cloudinary
- */
 async function downloadVideo(publicId) {
   try {
     console.log(`📥 [Download] Getting authenticated URL for: ${publicId}`);
@@ -283,7 +258,6 @@ async function downloadVideo(publicId) {
     
     console.log(`🌐 [Download] Downloading from Cloudinary...`);
     
-    // Create temp directory if doesn't exist
     await fs.mkdir(CONFIG.TEMP_DIR, { recursive: true });
     
     const tempPath = path.join(CONFIG.TEMP_DIR, `${Date.now()}_video.mp4`);
@@ -292,7 +266,7 @@ async function downloadVideo(publicId) {
       method: 'get',
       url: videoUrl,
       responseType: 'stream',
-      timeout: 60000 // 60 second timeout
+      timeout: 60000
     });
     
     const writer = fsSync.createWriteStream(tempPath);
@@ -314,9 +288,6 @@ async function downloadVideo(publicId) {
   }
 }
 
-/**
- * Extract frames from video
- */
 async function extractFrames(videoPath) {
   const framesDir = path.join(CONFIG.TEMP_DIR, `frames_${Date.now()}`);
   await fs.mkdir(framesDir, { recursive: true });
@@ -326,8 +297,8 @@ async function extractFrames(videoPath) {
     
     ffmpeg(videoPath)
       .outputOptions([
-        `-vf fps=1000/${CONFIG.FRAME_INTERVAL_MS}`, // Extract at interval
-        `-vframes ${CONFIG.MAX_FRAMES}` // Limit total frames
+        `-vf fps=1000/${CONFIG.FRAME_INTERVAL_MS}`,
+        `-vframes ${CONFIG.MAX_FRAMES}`
       ])
       .output(path.join(framesDir, 'frame_%03d.jpg'))
       .on('end', () => {
@@ -343,15 +314,14 @@ async function extractFrames(videoPath) {
 }
 
 /**
- * Detect liveness (anti-spoofing)
+ * ✅ UPDATED: More lenient liveness detection
  */
 async function detectLiveness(framesDir, framePaths) {
   const frames = [];
   
   console.log(`👁️ [Liveness] Analyzing ${Math.min(framePaths.length, 15)} frames...`);
   
-  // Load all frames
-  for (const framePath of framePaths.slice(0, 15)) { // Use first 15 frames
+  for (const framePath of framePaths.slice(0, 15)) {
     const fullPath = path.join(framesDir, framePath);
     const img = await canvas.loadImage(fullPath);
     const detection = await faceapi
@@ -363,7 +333,7 @@ async function detectLiveness(framesDir, framePaths) {
     }
   }
   
-  if (frames.length < 5) {
+  if (frames.length < 3) {  // ✅ Lowered from 5
     return {
       passed: false,
       score: 0,
@@ -371,32 +341,39 @@ async function detectLiveness(framesDir, framePaths) {
     };
   }
   
-  // Check 1: Blink detection (eye aspect ratio changes)
+  // Check 1: Blink detection
   const eyeAspectRatios = frames.map(f => calculateEyeAspectRatio(f.landmarks));
   const earVariance = calculateVariance(eyeAspectRatios);
-  const blinkDetected = earVariance > 0.01; // Threshold for blink
+  const blinkDetected = earVariance > 0.005;  // ✅ Lowered from 0.01
   
-  // Check 2: Head movement (yaw angle changes)
+  // Check 2: Head movement
   const yawAngles = frames.map(f => estimateYawAngle(f.landmarks));
   const yawVariance = calculateVariance(yawAngles);
-  const headMovement = yawVariance > 0.05; // Threshold for head turn
+  const headMovement = yawVariance > 0.02;  // ✅ Lowered from 0.05
   
-  // Check 3: Pixel variance (detect flat photos)
+  // Check 3: Pixel variance
   const firstFramePath = path.join(framesDir, framePaths[0]);
   const pixelVariance = await calculatePixelVariance(firstFramePath);
-  const notFlatPhoto = pixelVariance > 500; // Threshold for real face
+  const notFlatPhoto = pixelVariance > 300;  // ✅ Lowered from 500
   
-  console.log(`   Blink detected: ${blinkDetected} (variance: ${earVariance.toFixed(4)})`);
-  console.log(`   Head movement: ${headMovement} (variance: ${yawVariance.toFixed(4)})`);
-  console.log(`   Not flat photo: ${notFlatPhoto} (variance: ${pixelVariance.toFixed(2)})`);
+  console.log(`   👁️  Blink detected: ${blinkDetected} (variance: ${earVariance.toFixed(4)})`);
+  console.log(`   🔄 Head movement: ${headMovement} (variance: ${yawVariance.toFixed(4)})`);
+  console.log(`   📷 Not flat photo: ${notFlatPhoto} (variance: ${pixelVariance.toFixed(2)})`);
   
-  // Calculate liveness score
+  // ✅ More generous scoring
   let score = 0;
-  if (blinkDetected) score += 0.4;
-  if (headMovement) score += 0.4;
-  if (notFlatPhoto) score += 0.2;
+  let checksPassedCount = 0;
   
-  const passed = score >= CONFIG.LIVENESS_THRESHOLD;
+  if (blinkDetected) { score += 0.35; checksPassedCount++; }
+  if (headMovement) { score += 0.35; checksPassedCount++; }
+  if (notFlatPhoto) { score += 0.30; checksPassedCount++; }
+  
+  // ✅ Pass if ANY 2 out of 3 checks pass OR score >= 0.50
+  const passed = checksPassedCount >= 2 || score >= CONFIG.LIVENESS_THRESHOLD;
+  
+  console.log(`   ✅ Liveness checks passed: ${checksPassedCount}/3`);
+  console.log(`   📊 Final liveness score: ${(score * 100).toFixed(1)}%`);
+  console.log(`   ${passed ? '✅ PASSED' : '❌ FAILED'} liveness detection`);
   
   return {
     passed,
@@ -405,9 +382,6 @@ async function detectLiveness(framesDir, framePaths) {
   };
 }
 
-/**
- * Extract best face and generate embedding
- */
 async function extractBestFace(framesDir, framePaths) {
   let bestFace = null;
   let bestQuality = 0;
@@ -424,11 +398,9 @@ async function extractBestFace(framesDir, framePaths) {
       .withFaceDescriptors();
     
     if (detections.length === 0) continue;
-    if (detections.length > 1) continue; // Skip frames with multiple faces
+    if (detections.length > 1) continue;
     
     const detection = detections[0];
-    
-    // Calculate quality score (based on confidence and face size)
     const quality = detection.detection.score * detection.detection.box.area;
     
     if (quality > bestQuality) {
@@ -448,18 +420,14 @@ async function extractBestFace(framesDir, framePaths) {
   
   return {
     success: true,
-    embedding: Array.from(bestFace.descriptor), // Convert to array
+    embedding: Array.from(bestFace.descriptor),
     quality: bestQuality
   };
 }
 
-/**
- * Match face with profile photo
- */
 async function matchWithProfilePhoto(verificationEmbedding, profilePhotoUrl) {
   console.log(`🎭 [Match] Downloading profile photo...`);
   
-  // Download profile photo
   const response = await axios({
     method: 'get',
     url: profilePhotoUrl,
@@ -472,7 +440,6 @@ async function matchWithProfilePhoto(verificationEmbedding, profilePhotoUrl) {
   
   console.log(`🔍 [Match] Detecting face in profile photo...`);
   
-  // Detect face in profile photo
   const detection = await faceapi
     .detectSingleFace(img)
     .withFaceLandmarks()
@@ -483,8 +450,6 @@ async function matchWithProfilePhoto(verificationEmbedding, profilePhotoUrl) {
   }
   
   const profileEmbedding = Array.from(detection.descriptor);
-  
-  // Calculate cosine similarity
   const similarity = calculateCosineSimilarity(verificationEmbedding, profileEmbedding);
   
   console.log(`✅ [Match] Similarity calculated: ${(similarity * 100).toFixed(2)}%`);
@@ -493,46 +458,74 @@ async function matchWithProfilePhoto(verificationEmbedding, profilePhotoUrl) {
 }
 
 /**
- * Make final decision
+ * ✅ UPDATED: More lenient decision logic
  */
 function makeDecision(livenessScore, faceMatchScore) {
-  // If no profile photo, decide based on liveness only
+  console.log(`\n⚖️ [Decision] Making final decision...`);
+  console.log(`   Liveness Score: ${(livenessScore * 100).toFixed(1)}%`);
+  console.log(`   Face Match Score: ${faceMatchScore ? (faceMatchScore * 100).toFixed(1) + '%' : 'N/A'}`);
+  
+  // CASE 1: No profile photo - only need liveness
   if (faceMatchScore === null) {
     if (livenessScore >= CONFIG.LIVENESS_THRESHOLD) {
+      console.log(`   ✅ APPROVED - Liveness passed (${(livenessScore * 100).toFixed(1)}%)`);
       return {
         decision: 'APPROVED',
         confidence: livenessScore,
         rejectionReason: null
       };
     } else {
+      console.log(`   ❌ REJECTED - Liveness too low (${(livenessScore * 100).toFixed(1)}% < 50%)`);
       return {
         decision: 'REJECTED',
         confidence: livenessScore,
-        rejectionReason: 'Liveness check failed'
+        rejectionReason: 'Liveness check failed - please record a clearer video'
       };
     }
   }
   
-  // If profile photo exists, require both liveness AND face match
-  const combinedScore = (livenessScore * 0.5) + (faceMatchScore * 0.5);
+  // CASE 2: Has profile photo - need both liveness AND face match
+  const combinedScore = (livenessScore * 0.4) + (faceMatchScore * 0.6);
   
-  if (faceMatchScore >= 0.75 && livenessScore >= CONFIG.LIVENESS_THRESHOLD) {
+  console.log(`   Combined Score: ${(combinedScore * 100).toFixed(1)}%`);
+  
+  // ✅ APPROVE: Face match >= 65% AND liveness >= 45%
+  if (faceMatchScore >= 0.65 && livenessScore >= 0.45) {
+    console.log(`   ✅ APPROVED - Both checks passed`);
     return {
       decision: 'APPROVED',
       confidence: combinedScore,
       rejectionReason: null
     };
-  } else if (faceMatchScore >= 0.55 && faceMatchScore < 0.75) {
+  }
+  
+  // ✅ APPROVE: High face match (>= 70%) even with lower liveness
+  else if (faceMatchScore >= 0.70 && livenessScore >= 0.35) {
+    console.log(`   ✅ APPROVED - Strong face match compensates for liveness`);
+    return {
+      decision: 'APPROVED',
+      confidence: combinedScore,
+      rejectionReason: null
+    };
+  }
+  
+  // ✅ MANUAL REVIEW: Moderate scores
+  else if (faceMatchScore >= 0.50 && faceMatchScore < 0.65) {
+    console.log(`   ⏳ MANUAL REVIEW - Face match in review range`);
     return {
       decision: 'MANUAL_REVIEW',
       confidence: combinedScore,
       rejectionReason: 'Face match score requires manual review'
     };
-  } else {
+  }
+  
+  // ✅ REJECT: Low face match
+  else {
+    console.log(`   ❌ REJECTED - Face match too low`);
     return {
       decision: 'REJECTED',
       confidence: combinedScore,
-      rejectionReason: 'Face does not match profile photo'
+      rejectionReason: 'Face does not match profile photo - please record a clearer video'
     };
   }
 }
