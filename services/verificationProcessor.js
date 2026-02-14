@@ -5,6 +5,7 @@ const { Canvas, Image, ImageData } = canvas;
 const ffmpeg = require('fluent-ffmpeg');
 const sharp = require('sharp');
 const fs = require('fs').promises;
+const fsSync = require('fs');
 const path = require('path');
 const axios = require('axios');
 const { cloudinary } = require('../config/cloudinary');
@@ -35,21 +36,74 @@ async function loadModels() {
   
   try {
     console.log('📦 Loading face-api models...');
+    console.log('📁 Models path:', CONFIG.MODELS_PATH);
     
+    // Check if models directory exists
+    if (!fsSync.existsSync(CONFIG.MODELS_PATH)) {
+      console.log('📁 Creating models directory...');
+      fsSync.mkdirSync(CONFIG.MODELS_PATH, { recursive: true });
+    }
+    
+    // Check for required model files
+    const requiredFiles = [
+      'ssd_mobilenetv1_model-weights_manifest.json',
+      'face_landmark_68_model-weights_manifest.json',
+      'face_recognition_model-weights_manifest.json'
+    ];
+    
+    const missingFiles = requiredFiles.filter(file => 
+      !fsSync.existsSync(path.join(CONFIG.MODELS_PATH, file))
+    );
+    
+    if (missingFiles.length > 0) {
+      console.log('⚠️ Missing model files:', missingFiles);
+      console.log('📥 Downloading models automatically...');
+      
+      try {
+        const { downloadModels } = require('../scripts/download-models');
+        await downloadModels();
+        console.log('✅ Models downloaded successfully!');
+      } catch (downloadError) {
+        console.error('❌ Failed to download models:', downloadError.message);
+        console.error('💡 Please run manually: node scripts/download-models.js');
+        throw new Error('Models not available and auto-download failed');
+      }
+    }
+    
+    // Verify files exist after download
+    const stillMissing = requiredFiles.filter(file => 
+      !fsSync.existsSync(path.join(CONFIG.MODELS_PATH, file))
+    );
+    
+    if (stillMissing.length > 0) {
+      throw new Error(`Models still missing after download: ${stillMissing.join(', ')}`);
+    }
+    
+    // Load models
+    console.log('🔄 Loading ssdMobilenetv1...');
     await faceapi.nets.ssdMobilenetv1.loadFromDisk(CONFIG.MODELS_PATH);
+    
+    console.log('🔄 Loading faceLandmark68Net...');
     await faceapi.nets.faceLandmark68Net.loadFromDisk(CONFIG.MODELS_PATH);
+    
+    console.log('🔄 Loading faceRecognitionNet...');
     await faceapi.nets.faceRecognitionNet.loadFromDisk(CONFIG.MODELS_PATH);
     
     modelsLoaded = true;
     console.log('✅ Face-api models loaded successfully!');
+    
   } catch (error) {
     console.error('❌ Error loading models:', error);
+    console.error('⚠️ Verification system will not work until models are loaded');
+    console.error('💡 Try running: node scripts/download-models.js');
     throw new Error('Failed to load face recognition models');
   }
 }
 
 // Load models on module import
-loadModels().catch(console.error);
+loadModels().catch(err => {
+  console.error('❌ Failed to load models on startup:', err.message);
+});
 
 // =============================================
 // MAIN PROCESSING FUNCTION
@@ -70,17 +124,23 @@ async function processVerificationVideo(cloudinaryPublicId, user, session) {
   try {
     console.log(`\n🎬 [Verification] Processing session ${session.sessionId}`);
     
+    // Ensure models are loaded
+    if (!modelsLoaded) {
+      console.log('⚠️ Models not loaded yet, attempting to load...');
+      await loadModels();
+    }
+    
     // =============================================
     // STEP 1: Download video from Cloudinary
     // =============================================
-    console.log('📥 Step 1: Downloading video...');
+    console.log('📥 Step 1: Downloading video from Cloudinary...');
     tempVideoPath = await downloadVideo(cloudinaryPublicId);
     console.log(`✅ Video downloaded: ${tempVideoPath}`);
     
     // =============================================
     // STEP 2: Extract frames from video
     // =============================================
-    console.log('🎞️ Step 2: Extracting frames...');
+    console.log('🎞️ Step 2: Extracting frames from video...');
     tempFramesDir = await extractFrames(tempVideoPath);
     const framePaths = await fs.readdir(tempFramesDir);
     console.log(`✅ Extracted ${framePaths.length} frames`);
@@ -129,7 +189,7 @@ async function processVerificationVideo(cloudinaryPublicId, user, session) {
     // =============================================
     // STEP 5: Face Matching (if user has profile photo)
     // =============================================
-    console.log('🎭 Step 5: Matching face with profile...');
+    console.log('🎭 Step 5: Matching face with profile photo...');
     let faceMatchScore = null;
     
     if (user.profilePhoto) {
@@ -211,30 +271,47 @@ async function processVerificationVideo(cloudinaryPublicId, user, session) {
  * Download video from Cloudinary
  */
 async function downloadVideo(publicId) {
-  const videoUrl = cloudinary.url(publicId, {
-    resource_type: 'video',
-    type: 'authenticated',
-    sign_url: true
-  });
-  
-  // Create temp directory if doesn't exist
-  await fs.mkdir(CONFIG.TEMP_DIR, { recursive: true });
-  
-  const tempPath = path.join(CONFIG.TEMP_DIR, `${Date.now()}_video.mp4`);
-  
-  const response = await axios({
-    method: 'get',
-    url: videoUrl,
-    responseType: 'stream'
-  });
-  
-  const writer = require('fs').createWriteStream(tempPath);
-  response.data.pipe(writer);
-  
-  return new Promise((resolve, reject) => {
-    writer.on('finish', () => resolve(tempPath));
-    writer.on('error', reject);
-  });
+  try {
+    console.log(`📥 [Download] Getting authenticated URL for: ${publicId}`);
+    
+    const videoUrl = cloudinary.url(publicId, {
+      resource_type: 'video',
+      type: 'authenticated',
+      sign_url: true,
+      secure: true
+    });
+    
+    console.log(`🌐 [Download] Downloading from Cloudinary...`);
+    
+    // Create temp directory if doesn't exist
+    await fs.mkdir(CONFIG.TEMP_DIR, { recursive: true });
+    
+    const tempPath = path.join(CONFIG.TEMP_DIR, `${Date.now()}_video.mp4`);
+    
+    const response = await axios({
+      method: 'get',
+      url: videoUrl,
+      responseType: 'stream',
+      timeout: 60000 // 60 second timeout
+    });
+    
+    const writer = fsSync.createWriteStream(tempPath);
+    response.data.pipe(writer);
+    
+    return new Promise((resolve, reject) => {
+      writer.on('finish', () => {
+        console.log(`✅ [Download] Video saved to: ${tempPath}`);
+        resolve(tempPath);
+      });
+      writer.on('error', (err) => {
+        console.error(`❌ [Download] Write error:`, err);
+        reject(err);
+      });
+    });
+  } catch (error) {
+    console.error(`❌ [Download] Failed to download video:`, error.message);
+    throw error;
+  }
 }
 
 /**
@@ -245,14 +322,22 @@ async function extractFrames(videoPath) {
   await fs.mkdir(framesDir, { recursive: true });
   
   return new Promise((resolve, reject) => {
+    console.log(`🎞️ [Frames] Extracting frames to: ${framesDir}`);
+    
     ffmpeg(videoPath)
       .outputOptions([
         `-vf fps=1000/${CONFIG.FRAME_INTERVAL_MS}`, // Extract at interval
         `-vframes ${CONFIG.MAX_FRAMES}` // Limit total frames
       ])
       .output(path.join(framesDir, 'frame_%03d.jpg'))
-      .on('end', () => resolve(framesDir))
-      .on('error', reject)
+      .on('end', () => {
+        console.log(`✅ [Frames] Frame extraction complete`);
+        resolve(framesDir);
+      })
+      .on('error', (err) => {
+        console.error(`❌ [Frames] Extraction failed:`, err.message);
+        reject(err);
+      })
       .run();
   });
 }
@@ -262,6 +347,8 @@ async function extractFrames(videoPath) {
  */
 async function detectLiveness(framesDir, framePaths) {
   const frames = [];
+  
+  console.log(`👁️ [Liveness] Analyzing ${Math.min(framePaths.length, 15)} frames...`);
   
   // Load all frames
   for (const framePath of framePaths.slice(0, 15)) { // Use first 15 frames
@@ -299,6 +386,10 @@ async function detectLiveness(framesDir, framePaths) {
   const pixelVariance = await calculatePixelVariance(firstFramePath);
   const notFlatPhoto = pixelVariance > 500; // Threshold for real face
   
+  console.log(`   Blink detected: ${blinkDetected} (variance: ${earVariance.toFixed(4)})`);
+  console.log(`   Head movement: ${headMovement} (variance: ${yawVariance.toFixed(4)})`);
+  console.log(`   Not flat photo: ${notFlatPhoto} (variance: ${pixelVariance.toFixed(2)})`);
+  
   // Calculate liveness score
   let score = 0;
   if (blinkDetected) score += 0.4;
@@ -320,6 +411,8 @@ async function detectLiveness(framesDir, framePaths) {
 async function extractBestFace(framesDir, framePaths) {
   let bestFace = null;
   let bestQuality = 0;
+  
+  console.log(`🔍 [Face] Analyzing frames for best face...`);
   
   for (const framePath of framePaths) {
     const fullPath = path.join(framesDir, framePath);
@@ -351,6 +444,8 @@ async function extractBestFace(framesDir, framePaths) {
     };
   }
   
+  console.log(`✅ [Face] Best face found with quality: ${bestQuality.toFixed(2)}`);
+  
   return {
     success: true,
     embedding: Array.from(bestFace.descriptor), // Convert to array
@@ -362,15 +457,20 @@ async function extractBestFace(framesDir, framePaths) {
  * Match face with profile photo
  */
 async function matchWithProfilePhoto(verificationEmbedding, profilePhotoUrl) {
+  console.log(`🎭 [Match] Downloading profile photo...`);
+  
   // Download profile photo
   const response = await axios({
     method: 'get',
     url: profilePhotoUrl,
-    responseType: 'arraybuffer'
+    responseType: 'arraybuffer',
+    timeout: 30000
   });
   
   const buffer = Buffer.from(response.data);
   const img = await canvas.loadImage(buffer);
+  
+  console.log(`🔍 [Match] Detecting face in profile photo...`);
   
   // Detect face in profile photo
   const detection = await faceapi
@@ -386,6 +486,8 @@ async function matchWithProfilePhoto(verificationEmbedding, profilePhotoUrl) {
   
   // Calculate cosine similarity
   const similarity = calculateCosineSimilarity(verificationEmbedding, profileEmbedding);
+  
+  console.log(`✅ [Match] Similarity calculated: ${(similarity * 100).toFixed(2)}%`);
   
   return similarity;
 }
