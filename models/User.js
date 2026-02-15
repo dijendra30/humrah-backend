@@ -610,6 +610,3 @@ userSchema.methods.logVideoConsent = function(sessionId, ipAddress) {
   }
 
 module.exports = mongoose.model('User', userSchema);
-
-
-
