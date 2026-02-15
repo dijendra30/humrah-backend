@@ -471,6 +471,8 @@ connectDB();
 // =============================================
 const authRoutes = require('./routes/auth');
 const userRoutes = require('./routes/users');
+const legalRoutes = require('./routes/legal');
+const { enforceLegalAcceptance } = require('./middleware/enforceLegalAcceptance');
 const eventRoutes = require('./routes/events');
 const companionRoutes = require('./routes/companions');
 const bookingRoutes = require('./routes/bookings');
@@ -484,6 +486,7 @@ const paymentRoutes = require('./routes/payment');
 
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
+app.use('/api/legal', legalRoutes);
 app.use('/api/events', eventRoutes);
 app.use('/api/companions', companionRoutes);
 app.use('/api/bookings', bookingRoutes);
