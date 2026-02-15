@@ -82,7 +82,6 @@ const userSchema = new mongoose.Schema({
     minlength: [6, 'Password must be at least 6 characters']
   },
   
-// Legal Acceptance Tracking
 acceptedTermsVersion: {
   type: String,
   default: null
@@ -121,7 +120,7 @@ videoVerificationConsents: [{
 deletionRequestedAt: {
   type: Date,
   default: null
-}
+},
   
   // =============================================
   // ✅ USER TYPE SYSTEM
@@ -611,5 +610,6 @@ userSchema.methods.logVideoConsent = function(sessionId, ipAddress) {
   }
 
 module.exports = mongoose.model('User', userSchema);
+
 
 
