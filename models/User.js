@@ -607,6 +607,7 @@ userSchema.methods.logVideoConsent = function(sessionId, ipAddress) {
   // Keep only last 10 entries
   if (this.videoVerificationConsents.length > 10) {
     this.videoVerificationConsents = this.videoVerificationConsents.slice(-10);
-  }
+  };
 
 module.exports = mongoose.model('User', userSchema);
+
