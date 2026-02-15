@@ -1,4 +1,4 @@
-// server.js - IMPROVED CALL SIGNALING WITH USER INFO
+// server.js - UPDATED WITH LEGAL ACCEPTANCE ENFORCEMENT
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -467,12 +467,17 @@ const connectDB = async () => {
 connectDB();
 
 // =============================================
-// ROUTES
+// ✅ IMPORT MIDDLEWARE
+// =============================================
+const { authenticate } = require('./middleware/auth');
+const { enforceLegalAcceptance } = require('./middleware/enforceLegalAcceptance');
+
+// =============================================
+// ✅ ROUTES WITH LEGAL ENFORCEMENT
 // =============================================
 const authRoutes = require('./routes/auth');
 const userRoutes = require('./routes/users');
 const legalRoutes = require('./routes/legal');
-const { enforceLegalAcceptance } = require('./middleware/enforceLegalAcceptance');
 const eventRoutes = require('./routes/events');
 const companionRoutes = require('./routes/companions');
 const bookingRoutes = require('./routes/bookings');
@@ -484,24 +489,32 @@ const profileRoutes = require('./routes/profile');
 const reviewRoutes = require('./routes/reviews');
 const paymentRoutes = require('./routes/payment');
 
+// ✅ PUBLIC ROUTES (No legal enforcement)
 app.use('/api/auth', authRoutes);
-app.use('/api/users', userRoutes);
 app.use('/api/legal', legalRoutes);
-app.use('/api/events', eventRoutes);
-app.use('/api/companions', companionRoutes);
-app.use('/api/bookings', bookingRoutes);
-app.use('/api/messages', messageRoutes);
-app.use('/api/posts', postRoutes);
-app.use('/api/spotlight', spotlightRoutes);
-app.use('/api/safety', safetyReportRoutes);
-app.use('/api/admin', require('./routes/admin'));
-app.use('/api/random-booking', require('./routes/randomBooking'));
-app.use('/api/agora', require('./routes/agora'));
-app.use('/api/voice-call', require('./routes/voice-call'));
-app.use('/api/profile', profileRoutes);
-app.use('/api/reviews', reviewRoutes);
-app.use('/api/payment', paymentRoutes);
-app.use('/api/verification', require('./routes/verification'));
+
+// ✅ PROTECTED ROUTES (With legal enforcement)
+// Note: enforceLegalAcceptance is applied AFTER authenticate middleware
+app.use('/api/users', authenticate, enforceLegalAcceptance, userRoutes);
+app.use('/api/events', authenticate, enforceLegalAcceptance, eventRoutes);
+app.use('/api/companions', authenticate, enforceLegalAcceptance, companionRoutes);
+app.use('/api/bookings', authenticate, enforceLegalAcceptance, bookingRoutes);
+app.use('/api/messages', authenticate, enforceLegalAcceptance, messageRoutes);
+app.use('/api/posts', authenticate, enforceLegalAcceptance, postRoutes);
+app.use('/api/spotlight', authenticate, enforceLegalAcceptance, spotlightRoutes);
+app.use('/api/safety', authenticate, enforceLegalAcceptance, safetyReportRoutes);
+app.use('/api/profile', authenticate, enforceLegalAcceptance, profileRoutes);
+app.use('/api/reviews', authenticate, enforceLegalAcceptance, reviewRoutes);
+app.use('/api/payment', authenticate, enforceLegalAcceptance, paymentRoutes);
+app.use('/api/random-booking', authenticate, enforceLegalAcceptance, require('./routes/randomBooking'));
+app.use('/api/verification', authenticate, enforceLegalAcceptance, require('./routes/verification'));
+
+// ✅ ADMIN ROUTES (No legal enforcement needed for admins performing admin duties)
+app.use('/api/admin', authenticate, require('./routes/admin'));
+
+// ✅ CALL ROUTES (Legal enforcement applied)
+app.use('/api/agora', authenticate, enforceLegalAcceptance, require('./routes/agora'));
+app.use('/api/voice-call', authenticate, enforceLegalAcceptance, require('./routes/voice-call'));
 
 // Cron jobs
 require('./cronJobs');
@@ -537,6 +550,7 @@ server.listen(PORT, () => {
   console.log(`   - Typing indicators`);
   console.log(`   - Presence tracking (online/offline)`);
   console.log(`   - JWT authentication`);
+  console.log(`✅ Legal compliance enforcement active`);
 });
 
 // Graceful shutdown
