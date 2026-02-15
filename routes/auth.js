@@ -1,8 +1,10 @@
-// routes/auth.js - Simplified Authentication Routes (Works with Current User Model)
+// routes/auth.js - UPDATED WITH LEGAL ACCEPTANCE
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const LegalAcceptance = require('../models/LegalAcceptance');
+const LegalVersion = require('../models/LegalVersion');
 const { sendOTPEmail, sendWelcomeEmail } = require('../config/email');
 
 // Import auth middleware (use 'auth' for backward compatibility)
@@ -51,7 +53,7 @@ const generateToken = (userId, role) => {
 
 /**
  * @route   POST /api/auth/register
- * @desc    Register new user (USER role only)
+ * @desc    Register new user with legal acceptance (USER role only)
  * @access  Public
  */
 router.post('/register', async (req, res) => {
@@ -62,7 +64,8 @@ router.post('/register', async (req, res) => {
       email,
       password,
       questionnaire,
-      emailVerified
+      emailVerified,
+      legalAcceptance  // ✅ NEW: Legal acceptance data
     } = req.body;
 
     // Validation
@@ -70,6 +73,44 @@ router.post('/register', async (req, res) => {
       return res.status(400).json({
         success: false,
         message: 'All fields are required'
+      });
+    }
+
+    // ✅ VALIDATE LEGAL ACCEPTANCE
+    if (!legalAcceptance || 
+        !legalAcceptance.termsVersion || 
+        !legalAcceptance.privacyVersion ||
+        !legalAcceptance.deviceFingerprint ||
+        !legalAcceptance.platform) {
+      return res.status(400).json({
+        success: false,
+        message: 'Legal acceptance required',
+        code: 'LEGAL_ACCEPTANCE_MISSING'
+      });
+    }
+
+    // ✅ VERIFY LEGAL VERSIONS ARE CURRENT
+    const [termsDoc, privacyDoc] = await Promise.all([
+      LegalVersion.findOne({ documentType: 'TERMS' }),
+      LegalVersion.findOne({ documentType: 'PRIVACY' })
+    ]);
+    
+    if (!termsDoc || !privacyDoc) {
+      return res.status(500).json({
+        success: false,
+        message: 'Legal versions not configured'
+      });
+    }
+    
+    if (legalAcceptance.termsVersion !== termsDoc.currentVersion || 
+        legalAcceptance.privacyVersion !== privacyDoc.currentVersion) {
+      return res.status(400).json({
+        success: false,
+        message: 'Version mismatch. Please refresh and accept current versions.',
+        currentVersions: {
+          terms: termsDoc.currentVersion,
+          privacy: privacyDoc.currentVersion
+        }
       });
     }
 
@@ -82,6 +123,9 @@ router.post('/register', async (req, res) => {
       });
     }
 
+    // Get IP address
+    const ipAddress = req.ip || req.connection.remoteAddress || 'unknown';
+
     // Create user (ALWAYS with USER role)
     const user = new User({
       firstName,
@@ -90,10 +134,30 @@ router.post('/register', async (req, res) => {
       password,
       role: 'USER',
       emailVerified: emailVerified || false,
-      questionnaire: questionnaire || {}
+      questionnaire: questionnaire || {},
+      // ✅ NEW: Legal acceptance fields
+      acceptedTermsVersion: legalAcceptance.termsVersion,
+      acceptedPrivacyVersion: legalAcceptance.privacyVersion,
+      lastLegalAcceptanceDate: new Date()
     });
 
     await user.save();
+
+    // ✅ LOG LEGAL ACCEPTANCE
+    const acceptance = new LegalAcceptance({
+      userId: user._id,
+      documentType: 'BOTH',
+      termsVersion: legalAcceptance.termsVersion,
+      privacyVersion: legalAcceptance.privacyVersion,
+      acceptedAt: new Date(),
+      ipAddress,
+      deviceFingerprint: legalAcceptance.deviceFingerprint,
+      userAgent: req.get('user-agent'),
+      platform: legalAcceptance.platform,
+      appVersion: legalAcceptance.appVersion
+    });
+    
+    await acceptance.save();
 
     // Generate token
     const token = generateToken(user._id, user.role || 'USER');
@@ -134,7 +198,7 @@ router.post('/register', async (req, res) => {
 
 /**
  * @route   POST /api/auth/login
- * @desc    Login user (all roles use same endpoint)
+ * @desc    Login user and check legal acceptance (all roles use same endpoint)
  * @access  Public
  */
 router.post('/login', async (req, res) => {
@@ -201,6 +265,16 @@ router.post('/login', async (req, res) => {
       });
     }
 
+    // ✅ CHECK LEGAL ACCEPTANCE STATUS
+    let hasAcceptedCurrent = false;
+    try {
+      hasAcceptedCurrent = await user.hasAcceptedCurrentLegal();
+    } catch (legalError) {
+      console.log('⚠️ Could not check legal acceptance:', legalError.message);
+      // Continue with login, but flag for re-acceptance
+      hasAcceptedCurrent = false;
+    }
+
     // Update last active
     try {
       user.lastActive = new Date();
@@ -240,11 +314,38 @@ router.post('/login', async (req, res) => {
       userResponse.status = user.status;
     }
 
+    // ✅ GET CURRENT VERSIONS IF RE-ACCEPTANCE NEEDED
+    let currentVersions = null;
+    if (!hasAcceptedCurrent) {
+      try {
+        const [termsDoc, privacyDoc] = await Promise.all([
+          LegalVersion.findOne({ documentType: 'TERMS' }),
+          LegalVersion.findOne({ documentType: 'PRIVACY' })
+        ]);
+        
+        currentVersions = {
+          terms: {
+            version: termsDoc?.currentVersion,
+            url: termsDoc?.url
+          },
+          privacy: {
+            version: privacyDoc?.currentVersion,
+            url: privacyDoc?.url
+          }
+        };
+      } catch (versionError) {
+        console.log('⚠️ Could not fetch legal versions:', versionError.message);
+      }
+    }
+
     res.json({
       success: true,
       message: 'Login successful',
       token,
-      user: userResponse
+      user: userResponse,
+      // ✅ INCLUDE LEGAL STATUS
+      requiresLegalReacceptance: !hasAcceptedCurrent,
+      currentVersions: currentVersions
     });
 
   } catch (error) {
@@ -446,6 +547,20 @@ router.post('/create-admin', authenticate, async (req, res) => {
       });
     }
 
+    // ✅ Get current legal versions for admin creation
+    let currentTermsVersion = '1.0.0';
+    let currentPrivacyVersion = '1.0.0';
+    try {
+      const [termsDoc, privacyDoc] = await Promise.all([
+        LegalVersion.findOne({ documentType: 'TERMS' }),
+        LegalVersion.findOne({ documentType: 'PRIVACY' })
+      ]);
+      if (termsDoc) currentTermsVersion = termsDoc.currentVersion;
+      if (privacyDoc) currentPrivacyVersion = privacyDoc.currentVersion;
+    } catch (err) {
+      console.log('Could not fetch legal versions for admin creation');
+    }
+
     // Create admin user
     const admin = new User({
       firstName,
@@ -455,7 +570,11 @@ router.post('/create-admin', authenticate, async (req, res) => {
       role,
       emailVerified: true,
       verified: true,
-      adminPermissions: permissions
+      adminPermissions: permissions,
+      // ✅ Set legal acceptance for admin (auto-accepted)
+      acceptedTermsVersion: currentTermsVersion,
+      acceptedPrivacyVersion: currentPrivacyVersion,
+      lastLegalAcceptanceDate: new Date()
     });
 
     // Set status if field exists
@@ -488,8 +607,5 @@ router.post('/create-admin', authenticate, async (req, res) => {
     });
   }
 });
+
 module.exports = router;
-
-
-
-
