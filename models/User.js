@@ -82,6 +82,47 @@ const userSchema = new mongoose.Schema({
     minlength: [6, 'Password must be at least 6 characters']
   },
   
+// Legal Acceptance Tracking
+acceptedTermsVersion: {
+  type: String,
+  default: null
+},
+
+acceptedPrivacyVersion: {
+  type: String,
+  default: null
+},
+
+lastLegalAcceptanceDate: {
+  type: Date,
+  default: null
+},
+
+requiresLegalReacceptance: {
+  type: Boolean,
+  default: false
+},
+
+// Safety disclaimer acceptance log
+safetyDisclaimerAcceptances: [{
+  acceptedAt: Date,
+  bookingId: mongoose.Schema.Types.ObjectId,
+  ipAddress: String
+}],
+
+// Video verification consent log
+videoVerificationConsents: [{
+  acceptedAt: Date,
+  sessionId: String,
+  ipAddress: String
+}],
+
+// Data deletion tracking
+deletionRequestedAt: {
+  type: Date,
+  default: null
+}
+  
   // =============================================
   // ✅ USER TYPE SYSTEM
   // =============================================
@@ -517,5 +558,58 @@ userSchema.methods.isFullyVerified = function() {
   return this.emailVerified && this.photoVerificationStatus === 'approved';
 };
 
+userSchema.methods.hasAcceptedCurrentLegal = async function() {
+  const LegalVersion = mongoose.model('LegalVersion');
+  
+  const [termsDoc, privacyDoc] = await Promise.all([
+    LegalVersion.findOne({ documentType: 'TERMS' }),
+    LegalVersion.findOne({ documentType: 'PRIVACY' })
+  ]);
+  
+  if (!termsDoc || !privacyDoc) {
+    throw new Error('Legal versions not configured');
+  }
+  
+  return (
+    this.acceptedTermsVersion === termsDoc.currentVersion &&
+    this.acceptedPrivacyVersion === privacyDoc.currentVersion &&
+    !this.requiresLegalReacceptance
+  );
+};
+
+/**
+ * Log safety disclaimer acceptance
+ */
+userSchema.methods.logSafetyDisclaimer = function(bookingId, ipAddress) {
+  this.safetyDisclaimerAcceptances.push({
+    acceptedAt: new Date(),
+    bookingId,
+    ipAddress
+  });
+  
+  // Keep only last 100 entries
+  if (this.safetyDisclaimerAcceptances.length > 100) {
+    this.safetyDisclaimerAcceptances = this.safetyDisclaimerAcceptances.slice(-100);
+  }
+  
+  return this.save();
+};
+
+/**
+ * Log video consent
+ */
+userSchema.methods.logVideoConsent = function(sessionId, ipAddress) {
+  this.videoVerificationConsents.push({
+    acceptedAt: new Date(),
+    sessionId,
+    ipAddress
+  });
+  
+  // Keep only last 10 entries
+  if (this.videoVerificationConsents.length > 10) {
+    this.videoVerificationConsents = this.videoVerificationConsents.slice(-10);
+  }
+
 module.exports = mongoose.model('User', userSchema);
+
 
