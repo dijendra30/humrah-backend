@@ -253,7 +253,70 @@ router.post('/create', auth, async (req, res) => {
     });
   }
 });
+// ==================== GET ELIGIBLE BOOKINGS ====================
+router.get('/eligible', auth, async (req, res) => {
+  try {
+    console.log('');
+    console.log('📋 GET ELIGIBLE BOOKINGS');
 
+    const user = await User.findById(req.userId).select(
+      'last_known_lat last_known_lng isVerified'
+    );
+
+    // Check if user has location
+    if (!user.last_known_lat || !user.last_known_lng) {
+      return res.json({
+        success: true,
+        bookings: [],
+        message: 'Location required to view nearby bookings'
+      });
+    }
+
+    const userLat = user.last_known_lat;
+    const userLng = user.last_known_lng;
+    const MAX_DISTANCE = 15; // km
+
+    console.log('   User GPS:', userLat, userLng);
+
+    // ✅ FIND: All PENDING bookings
+    const allPendingBookings = await RandomBooking.find({
+      status: 'PENDING',
+      expiresAt: { $gt: new Date() },
+      startTime: { $gte: new Date() },
+      initiatorId: { $ne: req.userId } // Exclude own bookings
+    })
+    .populate('initiatorId', 'firstName lastName profilePhoto questionnaire verified')
+    .lean();
+
+    console.log(`   Found ${allPendingBookings.length} pending bookings`);
+
+    // ✅ FILTER: Calculate distance and filter by radius
+    const eligibleBookings = allPendingBookings
+      .map(booking => {
+        const distance = calculateDistance(
+          userLat, userLng,
+          booking.lat, booking.lng
+        );
+        return { ...booking, distance };
+      })
+      .filter(booking => booking.distance <= MAX_DISTANCE)
+      .sort((a, b) => a.distance - b.distance)
+      .slice(0, 20); // Limit to 20 bookings
+
+    console.log(`   ${eligibleBookings.length} bookings within ${MAX_DISTANCE}km`);
+
+    res.json({
+      success: true,
+      bookings: eligibleBookings
+    });
+  } catch (error) {
+    console.error('❌ Get eligible bookings error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to load bookings'
+    });
+  }
+});
 // ==================== GET NEARBY BOOKINGS (GPS-BASED) ====================
 router.get('/nearby', auth, async (req, res) => {
   try {
