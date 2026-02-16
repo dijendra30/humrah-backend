@@ -1,8 +1,3 @@
-// scripts/initLegalVersions.js
-// FULL FILE - CREATE NEW
-// RUN THIS ONCE TO INITIALIZE LEGAL VERSIONS IN DATABASE
-// Usage: node scripts/initLegalVersions.js
-
 require('dotenv').config();
 const mongoose = require('mongoose');
 const LegalVersion = require('../models/LegalVersion');
@@ -23,7 +18,7 @@ async function initializeLegalVersions() {
       const terms = new LegalVersion({
         documentType: 'TERMS',
         currentVersion: '1.0.0',
-        url: 'https://humrah.com/terms.html',
+        url: 'https://humrah.in/terms.html',
         effectiveDate: new Date('2025-01-01'),
         changeNotes: 'Initial version'
       });
@@ -38,7 +33,7 @@ async function initializeLegalVersions() {
       const privacy = new LegalVersion({
         documentType: 'PRIVACY',
         currentVersion: '1.0.0',
-        url: 'https://humrah.com/privacy.html',
+        url: 'https://humrah.in/privacy.html',
         effectiveDate: new Date('2025-01-01'),
         changeNotes: 'Initial version'
       });
@@ -51,7 +46,7 @@ async function initializeLegalVersions() {
     
     console.log('\n✅ Legal versions initialization complete!');
     console.log('\nNext steps:');
-    console.log('1. Update URLs in MongoDB if needed (currently pointing to https://humrah.com/terms.html and privacy.html)');
+    console.log('1. Update URLs in MongoDB if needed (currently pointing to https://humrah.in/terms.html and privacy.html)');
     console.log('2. Host your terms.html and privacy.html files at those URLs');
     console.log('3. Test the registration flow in your Android app');
     console.log('4. Check MongoDB for LegalAcceptance records after registration');
