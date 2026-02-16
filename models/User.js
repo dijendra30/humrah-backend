@@ -557,6 +557,7 @@ userSchema.methods.isFullyVerified = function() {
   return this.emailVerified && this.photoVerificationStatus === 'approved';
 };
 
+
 userSchema.methods.hasAcceptedCurrentLegal = async function() {
   const LegalVersion = mongoose.model('LegalVersion');
   
@@ -586,7 +587,6 @@ userSchema.methods.logSafetyDisclaimer = function(bookingId, ipAddress) {
     ipAddress
   });
   
-  // Keep only last 100 entries
   if (this.safetyDisclaimerAcceptances.length > 100) {
     this.safetyDisclaimerAcceptances = this.safetyDisclaimerAcceptances.slice(-100);
   }
@@ -604,10 +604,11 @@ userSchema.methods.logVideoConsent = function(sessionId, ipAddress) {
     ipAddress
   });
   
-  // Keep only last 10 entries
   if (this.videoVerificationConsents.length > 10) {
     this.videoVerificationConsents = this.videoVerificationConsents.slice(-10);
-  };
+  }
+  
+  return this.save();
+};
 
 module.exports = mongoose.model('User', userSchema);
-
