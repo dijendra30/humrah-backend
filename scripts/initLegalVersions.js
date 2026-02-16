@@ -1,65 +1,69 @@
 require('dotenv').config();
 const mongoose = require('mongoose');
-const LegalVersion = require('../models/LegalVersion');
 
-async function initializeLegalVersions() {
+const legalVersionSchema = new mongoose.Schema({
+  documentType: { type: String, enum: ['TERMS', 'PRIVACY'], required: true, unique: true },
+  currentVersion: { type: String, required: true },
+  url: { type: String, required: true },
+  effectiveDate: { type: Date, required: true },
+  previousVersions: [{ version: String, url: String, effectiveDate: Date, deprecatedAt: Date }],
+  updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  changeNotes: { type: String }
+}, { timestamps: true });
+
+async function init() {
   try {
-    console.log('Connecting to MongoDB...');
-    await mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/humrah');
+    const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/humrah';
+    console.log('🔄 Connecting to MongoDB...');
+    await mongoose.connect(MONGODB_URI);
+    console.log('✅ Connected!\n');
     
-    console.log('✅ Connected to MongoDB');
-    console.log('Initializing legal versions...');
+    const LegalVersion = mongoose.model('LegalVersion', legalVersionSchema);
     
-    // Check if already initialized
     const existingTerms = await LegalVersion.findOne({ documentType: 'TERMS' });
-    const existingPrivacy = await LegalVersion.findOne({ documentType: 'PRIVACY' });
-    
     if (!existingTerms) {
-      const terms = new LegalVersion({
+      await LegalVersion.create({
         documentType: 'TERMS',
         currentVersion: '1.0.0',
         url: 'https://humrah.in/terms.html',
         effectiveDate: new Date('2025-01-01'),
         changeNotes: 'Initial version'
       });
-      
-      await terms.save();
-      console.log('✅ Terms of Service initialized (v1.0.0)');
+      console.log('✅ Terms of Service created (v1.0.0)');
     } else {
-      console.log('ℹ️  Terms of Service already exists (v' + existingTerms.currentVersion + ')');
+      console.log('ℹ️  Terms already exists (v' + existingTerms.currentVersion + ')');
     }
     
+    const existingPrivacy = await LegalVersion.findOne({ documentType: 'PRIVACY' });
     if (!existingPrivacy) {
-      const privacy = new LegalVersion({
+      await LegalVersion.create({
         documentType: 'PRIVACY',
         currentVersion: '1.0.0',
         url: 'https://humrah.in/privacy.html',
         effectiveDate: new Date('2025-01-01'),
         changeNotes: 'Initial version'
       });
-      
-      await privacy.save();
-      console.log('✅ Privacy Policy initialized (v1.0.0)');
+      console.log('✅ Privacy Policy created (v1.0.0)');
     } else {
-      console.log('ℹ️  Privacy Policy already exists (v' + existingPrivacy.currentVersion + ')');
+      console.log('ℹ️  Privacy already exists (v' + existingPrivacy.currentVersion + ')');
     }
     
-    console.log('\n✅ Legal versions initialization complete!');
-    console.log('\nNext steps:');
-    console.log('1. Update URLs in MongoDB if needed (currently pointing to https://humrah.in/terms.html and privacy.html)');
-    console.log('2. Host your terms.html and privacy.html files at those URLs');
-    console.log('3. Test the registration flow in your Android app');
-    console.log('4. Check MongoDB for LegalAcceptance records after registration');
+    console.log('\n✅ DONE! Your database is ready.');
+    console.log('\n📋 Next Steps:');
+    console.log('1. Make sure https://humrah.in/terms.html exists');
+    console.log('2. Make sure https://humrah.in/privacy.html exists');
+    console.log('3. Try registering again in your Android app');
     
+    await mongoose.connection.close();
     process.exit(0);
   } catch (error) {
-    console.error('❌ Error:', error);
+    console.error('❌ Error:', error.message);
     console.error('\nTroubleshooting:');
-    console.error('- Check your MONGODB_URI in .env file');
+    console.error('- Check your MONGODB_URI in .env');
     console.error('- Make sure MongoDB is running');
-    console.error('- Verify models/LegalVersion.js exists');
     process.exit(1);
   }
 }
 
-initializeLegalVersions();
+console.log('🚀 Initializing Legal Versions...\n');
+init();
