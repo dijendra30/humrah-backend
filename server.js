@@ -6,8 +6,6 @@ const http = require('http');
 const socketIo = require('socket.io');
 const jwt = require('jsonwebtoken');
 const dotenv = require('dotenv');
-const { enforceLegalAcceptance, enforceCommunityAcceptance } = require('./middleware/enforceLegalAcceptance');
-
 dotenv.config();
 
 const app = express();
@@ -350,6 +348,8 @@ const safetyReportRoutes  = require('./routes/safetyReports');
 const profileRoutes       = require('./routes/profile');
 const reviewRoutes        = require('./routes/reviews');
 const paymentRoutes       = require('./routes/payment');
+const { enforceLegalAcceptance, enforceCommunityAcceptance } = require('./middleware/enforceLegalAcceptance');
+
 
 // =============================================
 // ✅ PUBLIC ROUTES — no auth, no legal checks
