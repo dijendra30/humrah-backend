@@ -1,4 +1,4 @@
-// server.js - UPDATED WITH LEGAL + COMMUNITY GUIDELINES ENFORCEMENT
+// server.js - UPDATED WITH LEGAL ACCEPTANCE ENFORCEMENT
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -6,18 +6,17 @@ const http = require('http');
 const socketIo = require('socket.io');
 const jwt = require('jsonwebtoken');
 const dotenv = require('dotenv');
+
 dotenv.config();
 
 const app = express();
 const server = http.createServer(app);
 
-// =============================================
-// SOCKET.IO
-// =============================================
+// ✅ Socket.IO with authentication
 const io = socketIo(server, {
   cors: {
-    origin: '*',
-    methods: ['GET', 'POST', 'PUT', 'DELETE']
+    origin: "*",
+    methods: ["GET", "POST", "PUT", "DELETE"]
   },
   transports: ['websocket', 'polling'],
   pingTimeout: 60000,
@@ -36,50 +35,71 @@ app.set('io', io);
 // IN-MEMORY PRESENCE & USER INFO TRACKING
 // =============================================
 const userPresence = new Map();
-const chatUsers   = new Map();
-const userInfo    = new Map();
+const chatUsers = new Map();
+const userInfo = new Map(); // ✅ Store user info for calls
 
 // =============================================
 // SOCKET AUTHENTICATION MIDDLEWARE
 // =============================================
 io.use((socket, next) => {
   try {
-    let token = socket.handshake.auth?.token
-      || socket.handshake.query?.token
-      || socket.handshake.headers?.authorization?.replace('Bearer ', '');
-
+    let token = socket.handshake.auth?.token;
+    
+    if (!token) {
+      token = socket.handshake.query?.token;
+    }
+    
+    if (!token) {
+      token = socket.handshake.headers?.authorization?.replace('Bearer ', '');
+    }
+    
     if (!token) {
       console.log('❌ Socket auth failed: No token provided');
       return next(new Error('Authentication error: No token provided'));
     }
-
+    
     const JWT_SECRET = process.env.JWT_SECRET || 'fallback_secret_change_in_production';
     const decoded = jwt.verify(token, JWT_SECRET);
-
-    socket.userId   = decoded.userId;
+    
+    socket.userId = decoded.userId;
     socket.userRole = decoded.role || 'USER';
-
+    
+    // ✅ Get user info from database
     const User = mongoose.model('User');
     User.findById(decoded.userId)
       .select('firstName lastName profilePhoto')
       .then(user => {
         if (user) {
-          socket.userName  = `${user.firstName} ${user.lastName || ''}`.trim();
+          socket.userName = `${user.firstName} ${user.lastName || ''}`.trim();
           socket.userPhoto = user.profilePhoto;
-          userInfo.set(socket.userId, { name: socket.userName, photo: socket.userPhoto });
+          
+          // ✅ Store in global map for quick access
+          userInfo.set(socket.userId, {
+            name: socket.userName,
+            photo: socket.userPhoto
+          });
+          
           console.log(`✅ Socket authenticated: ${socket.userName} (${socket.userId})`);
         }
       })
       .catch(err => {
-        console.error('Error fetching socket user info:', err);
+        console.error('Error fetching user info:', err);
         socket.userName = 'User';
       });
-
+    
     next();
+    
   } catch (err) {
     console.log('❌ Socket auth failed:', err.message);
-    if (err.name === 'TokenExpiredError') return next(new Error('Authentication error: Token expired'));
-    if (err.name === 'JsonWebTokenError')  return next(new Error('Authentication error: Invalid token'));
+    
+    if (err.name === 'TokenExpiredError') {
+      return next(new Error('Authentication error: Token expired'));
+    }
+    
+    if (err.name === 'JsonWebTokenError') {
+      return next(new Error('Authentication error: Invalid token'));
+    }
+    
     return next(new Error('Authentication error: ' + err.message));
   }
 });
@@ -88,11 +108,12 @@ io.use((socket, next) => {
 // SOCKET.IO CONNECTION HANDLER
 // =============================================
 io.on('connection', (socket) => {
-  const userId   = socket.userId;
+  const userId = socket.userId;
   const userName = socket.userName;
-
+  
   console.log(`✅ User connected: ${userName} (${socket.id})`);
-
+  
+  // ✅ Mark user as ONLINE
   userPresence.set(userId, {
     socketId: socket.id,
     status: 'ONLINE',
@@ -100,37 +121,54 @@ io.on('connection', (socket) => {
     name: userName,
     photo: socket.userPhoto
   });
-
-  io.emit('user-online', { userId, userName });
-
-  // ── Join Chat ────────────────────────────────────────────────────────────
+  
+  // Broadcast user online status
+  io.emit('user-online', {
+    userId,
+    userName
+  });
+  
+  // ==================== JOIN CHAT ====================
   socket.on('join-chat', async (data) => {
     try {
       const { chatId } = data;
+      
       socket.join(chatId);
       socket.chatId = chatId;
-
-      if (!chatUsers.has(chatId)) chatUsers.set(chatId, new Set());
+      
+      // Track user in room
+      if (!chatUsers.has(chatId)) {
+        chatUsers.set(chatId, new Set());
+      }
       chatUsers.get(chatId).add(socket.id);
-
+      
       console.log(`📥 ${userName} joined chat: ${chatId}`);
-      socket.to(chatId).emit('user-joined', { userId, userName });
-
-      // Deliver pending SENT messages
-      const Message           = mongoose.model('Message');
+      
+      // Notify other user in chat
+      socket.to(chatId).emit('user-joined', {
+        userId,
+        userName
+      });
+      
+      // ✅ Deliver any pending SENT messages
+      const Message = mongoose.model('Message');
       const RandomBookingChat = mongoose.model('RandomBookingChat');
+      
       const chat = await RandomBookingChat.findById(chatId);
-
       if (chat) {
-        const otherUserId = chat.participants.find(p => p.userId.toString() !== userId)?.userId;
+        const otherUserId = chat.participants.find(p => 
+          p.userId.toString() !== userId
+        )?.userId;
+        
         const pending = await Message.find({
           chatId,
           senderId: otherUserId,
           deliveryStatus: 'SENT'
         }).populate('senderId', 'firstName lastName profilePhoto');
-
+        
         if (pending.length > 0) {
           console.log(`📬 Delivering ${pending.length} pending messages to ${userName}`);
+          
           for (const msg of pending) {
             socket.emit('new-message', {
               _id: msg._id.toString(),
@@ -147,9 +185,11 @@ io.on('connection', (socket) => {
               timestamp: msg.timestamp.toISOString(),
               deliveryStatus: 'SENT'
             });
+            
             msg.deliveryStatus = 'DELIVERED';
             msg.deliveredAt = new Date();
             await msg.save();
+            
             io.to(chatId).emit('message-delivered', {
               messageId: msg._id.toString(),
               deliveredTo: userId,
@@ -158,98 +198,148 @@ io.on('connection', (socket) => {
           }
         }
       }
+      
     } catch (error) {
       console.error('Join chat error:', error);
     }
   });
-
-  // ── Leave Chat ───────────────────────────────────────────────────────────
+  
+  // ==================== LEAVE CHAT ====================
   socket.on('leave-chat', (chatId) => {
     socket.leave(chatId);
+    
     if (chatUsers.has(chatId)) {
       chatUsers.get(chatId).delete(socket.id);
-      if (chatUsers.get(chatId).size === 0) chatUsers.delete(chatId);
+      if (chatUsers.get(chatId).size === 0) {
+        chatUsers.delete(chatId);
+      }
     }
+    
     console.log(`📤 ${userName} left chat: ${chatId}`);
-    socket.to(chatId).emit('user-left', { userId, userName });
+    
+    socket.to(chatId).emit('user-left', {
+      userId,
+      userName
+    });
   });
 
-  // ── Message Delivered ────────────────────────────────────────────────────
+  // ==================== MESSAGE DELIVERED ====================
   socket.on('message-delivered', async (data) => {
     try {
       const { messageId, chatId } = data;
+      
       const Message = mongoose.model('Message');
       const message = await Message.findById(messageId);
+      
       if (message && message.deliveryStatus === 'SENT') {
         message.deliveryStatus = 'DELIVERED';
         message.deliveredAt = new Date();
         await message.save();
+        
         socket.to(chatId).emit('message-delivered', {
           messageId,
           deliveredTo: userId,
           deliveredAt: message.deliveredAt.toISOString()
         });
+        
         console.log(`✅ Message ${messageId} delivered to ${userName}`);
       }
     } catch (error) {
       console.error('Message delivered error:', error);
     }
   });
-
-  // ── Message Read ─────────────────────────────────────────────────────────
+  
+  // ==================== MESSAGE READ ====================
   socket.on('message-read', async (data) => {
     try {
       const { messageId, chatId } = data;
+      
       const Message = mongoose.model('Message');
       const message = await Message.findById(messageId);
+      
       if (message && message.deliveryStatus !== 'READ') {
         message.deliveryStatus = 'READ';
         message.readAt = new Date();
         await message.save();
+        
         socket.to(chatId).emit('message-read', {
           messageId,
           readBy: userId,
           readAt: message.readAt.toISOString()
         });
+        
         console.log(`✅ Message ${messageId} read by ${userName}`);
       }
     } catch (error) {
       console.error('Message read error:', error);
     }
   });
+  
+  // ==================== TYPING INDICATORS ====================
+  socket.on('typing-start', (data) => {
+    const { chatId } = data;
+    socket.to(chatId).emit('user-typing', {
+      userId,
+      userName,
+      isTyping: true
+    });
+  });
+  
+  socket.on('typing-stop', (data) => {
+    const { chatId } = data;
+    socket.to(chatId).emit('user-typing', {
+      userId,
+      userName,
+      isTyping: false
+    });
+  });
 
-  // ── Typing Indicators ────────────────────────────────────────────────────
-  socket.on('typing-start', ({ chatId }) =>
-    socket.to(chatId).emit('user-typing', { userId, userName, isTyping: true }));
-
-  socket.on('typing-stop', ({ chatId }) =>
-    socket.to(chatId).emit('user-typing', { userId, userName, isTyping: false }));
-
-  // ── Call Signaling ───────────────────────────────────────────────────────
+  // ==================== ✅ IMPROVED CALL SIGNALING ====================
   socket.on('initiate-call', async (data) => {
     try {
       const { chatId, callerId, calleeId, isAudioOnly } = data;
+      
       console.log(`📞 Call initiated: ${userName} (${callerId}) → ${calleeId} (audio: ${isAudioOnly})`);
-      const callerInfo = userInfo.get(callerId) || { name: userName, photo: socket.userPhoto };
+      
+      // ✅ Get caller info
+      const callerInfo = userInfo.get(callerId) || {
+        name: userName,
+        photo: socket.userPhoto
+      };
+      
+      // ✅ Send call to the other user with FULL caller info
       socket.to(chatId).emit('incoming-call', {
-        chatId, callerId,
+        chatId,
+        callerId,
         callerName: callerInfo.name,
         callerPhoto: callerInfo.photo,
         isAudioOnly,
         timestamp: new Date().toISOString()
       });
+      
+      console.log(`📞 Call sent to chat ${chatId} with caller: ${callerInfo.name}`);
+      
+      // ✅ Check if user is offline → send FCM notification
       const calleePresence = userPresence.get(calleeId);
       if (!calleePresence || calleePresence.status === 'OFFLINE') {
-        console.log(`📱 User offline — would send push notification`);
+        console.log(`📱 User offline - would send push notification`);
       }
     } catch (error) {
       console.error('Call initiation error:', error);
     }
   });
 
-  socket.on('accept-call', ({ chatId, calleeId }) => {
+  socket.on('accept-call', (data) => {
+    const { chatId, calleeId } = data;
+    
     console.log(`✅ Call accepted by: ${userName} (${calleeId})`);
-    const calleeInfo = userInfo.get(calleeId) || { name: userName, photo: socket.userPhoto };
+    
+    // ✅ Get callee info
+    const calleeInfo = userInfo.get(calleeId) || {
+      name: userName,
+      photo: socket.userPhoto
+    };
+    
     socket.to(chatId).emit('call-accepted', {
       calleeId,
       calleeName: calleeInfo.name,
@@ -258,55 +348,108 @@ io.on('connection', (socket) => {
     });
   });
 
-  socket.on('reject-call', ({ chatId, calleeId }) => {
+  socket.on('reject-call', (data) => {
+    const { chatId, calleeId } = data;
+    
     console.log(`❌ Call rejected by: ${userName} (${calleeId})`);
-    socket.to(chatId).emit('call-rejected', { calleeId, timestamp: new Date().toISOString() });
+    
+    socket.to(chatId).emit('call-rejected', {
+      calleeId,
+      timestamp: new Date().toISOString()
+    });
   });
 
-  socket.on('end-call', ({ chatId }) => {
+  socket.on('end-call', (data) => {
+    const { chatId } = data;
+    
     console.log(`📵 Call ended in chat: ${chatId} by ${userName}`);
-    socket.to(chatId).emit('call-ended', { endedBy: userId, timestamp: new Date().toISOString() });
+    
+    socket.to(chatId).emit('call-ended', {
+      endedBy: userId,
+      timestamp: new Date().toISOString()
+    });
   });
 
-  // ── WebRTC Signaling ─────────────────────────────────────────────────────
-  socket.on('webrtc-offer',          ({ chatId, offer })     => socket.to(chatId).emit('webrtc-offer',          { from: userId, offer }));
-  socket.on('webrtc-answer',         ({ chatId, answer })    => socket.to(chatId).emit('webrtc-answer',         { from: userId, answer }));
-  socket.on('webrtc-ice-candidate',  ({ chatId, candidate }) => socket.to(chatId).emit('webrtc-ice-candidate',  { from: userId, candidate }));
+  // ==================== ✅ WEBRTC SIGNALING (for peer-to-peer) ====================
+  socket.on('webrtc-offer', (data) => {
+    const { chatId, offer } = data;
+    console.log(`📡 WebRTC offer from ${userName}`);
+    socket.to(chatId).emit('webrtc-offer', {
+      from: userId,
+      offer
+    });
+  });
 
-  // ── Disconnect ───────────────────────────────────────────────────────────
+  socket.on('webrtc-answer', (data) => {
+    const { chatId, answer } = data;
+    console.log(`📡 WebRTC answer from ${userName}`);
+    socket.to(chatId).emit('webrtc-answer', {
+      from: userId,
+      answer
+    });
+  });
+
+  socket.on('webrtc-ice-candidate', (data) => {
+    const { chatId, candidate } = data;
+    socket.to(chatId).emit('webrtc-ice-candidate', {
+      from: userId,
+      candidate
+    });
+  });
+  
+  // ==================== DISCONNECT ====================
   socket.on('disconnect', () => {
     console.log(`❌ User disconnected: ${userName} (${socket.id})`);
+    
+    // ✅ Mark user as OFFLINE
     const user = userPresence.get(userId);
     if (user) {
-      user.status  = 'OFFLINE';
+      user.status = 'OFFLINE';
       user.lastSeen = new Date();
     }
-    io.emit('user-offline', { userId, userName, lastSeen: user?.lastSeen.toISOString() });
-
+    
+    // Broadcast user offline status
+    io.emit('user-offline', {
+      userId,
+      userName,
+      lastSeen: user?.lastSeen.toISOString()
+    });
+    
+    // Remove from chat rooms
     if (socket.chatId && chatUsers.has(socket.chatId)) {
       chatUsers.get(socket.chatId).delete(socket.id);
-      if (chatUsers.get(socket.chatId).size === 0) chatUsers.delete(socket.chatId);
-      socket.to(socket.chatId).emit('user-left', { userId, userName });
+      if (chatUsers.get(socket.chatId).size === 0) {
+        chatUsers.delete(socket.chatId);
+      }
+      
+      socket.to(socket.chatId).emit('user-left', {
+        userId,
+        userName
+      });
     }
   });
 });
 
 // =============================================
-// PRESENCE HELPERS
+// PRESENCE HELPER FUNCTIONS
 // =============================================
 function isUserOnline(userId) {
-  return userPresence.get(userId)?.status === 'ONLINE';
+  const presence = userPresence.get(userId);
+  return presence?.status === 'ONLINE';
 }
+
 function getUserLastSeen(userId) {
-  return userPresence.get(userId)?.lastSeen || null;
+  const presence = userPresence.get(userId);
+  return presence?.lastSeen || null;
 }
+
 function getUserInfo(userId) {
   return userInfo.get(userId) || null;
 }
 
-global.isUserOnline   = isUserOnline;
+global.isUserOnline = isUserOnline;
 global.getUserLastSeen = getUserLastSeen;
-global.getUserInfo    = getUserInfo;
+global.getUserInfo = getUserInfo;
 
 // =============================================
 // DATABASE CONNECTION
@@ -324,155 +467,81 @@ const connectDB = async () => {
 connectDB();
 
 // =============================================
-// ✅ MIDDLEWARE IMPORTS
+// ✅ IMPORT MIDDLEWARE
 // =============================================
-const { authenticate }                = require('./middleware/auth');
-const {
-  enforceLegalAcceptance,
-  enforceCommunityAcceptance
-} = require('./middleware/enforceLegalAcceptance');
+const { authenticate } = require('./middleware/auth');
+const { enforceLegalAcceptance, enforceCommunityAcceptance } = require('./middleware/enforceLegalAcceptance');
 
 // =============================================
-// ✅ ROUTE IMPORTS
+// ✅ ROUTES WITH LEGAL ENFORCEMENT
 // =============================================
-const authRoutes          = require('./routes/auth');
-const userRoutes          = require('./routes/users');
-const legalRoutes         = require('./routes/legal');
-const eventRoutes         = require('./routes/events');
-const companionRoutes     = require('./routes/companions');
-const bookingRoutes       = require('./routes/bookings');
-const messageRoutes       = require('./routes/messages');
-const postRoutes          = require('./routes/posts');
-const spotlightRoutes     = require('./routes/spotlight.route');
-const safetyReportRoutes  = require('./routes/safetyReports');
-const profileRoutes       = require('./routes/profile');
-const reviewRoutes        = require('./routes/reviews');
-const paymentRoutes       = require('./routes/payment');
+const authRoutes = require('./routes/auth');
+const userRoutes = require('./routes/users');
+const legalRoutes = require('./routes/legal');
+const eventRoutes = require('./routes/events');
+const companionRoutes = require('./routes/companions');
+const bookingRoutes = require('./routes/bookings');
+const messageRoutes = require('./routes/messages');
+const postRoutes = require('./routes/posts');
+const spotlightRoutes = require('./routes/spotlight.route');
+const safetyReportRoutes = require('./routes/safetyReports');
+const profileRoutes = require('./routes/profile');
+const reviewRoutes = require('./routes/reviews');
+const paymentRoutes = require('./routes/payment');
 
-// =============================================
-// ✅ PUBLIC ROUTES — no auth, no legal checks
-// =============================================
-app.use('/api/auth',  authRoutes);
-app.use('/api/legal', legalRoutes);   // includes /community/version + /community/accept
+// ✅ PUBLIC ROUTES (No legal enforcement)
+app.use('/api/auth', authRoutes);
+app.use('/api/legal', legalRoutes);
 
-// =============================================
 // ✅ PROTECTED ROUTES — Terms & Privacy enforced on all
-//
-// Community Guidelines are enforced on booking, chat, and profile
-// activation because those are the actions users can cause real-world
-// harm with. Other protected routes (search, spotlight, etc.) only
-// require Terms & Privacy acceptance, not community re-acceptance.
-// =============================================
+app.use('/api/users',        authenticate, enforceLegalAcceptance, userRoutes);
+app.use('/api/events',       authenticate, enforceLegalAcceptance, eventRoutes);
+app.use('/api/posts',        authenticate, enforceLegalAcceptance, postRoutes);
+app.use('/api/spotlight',    authenticate, enforceLegalAcceptance, spotlightRoutes);
+app.use('/api/safety',       authenticate, enforceLegalAcceptance, safetyReportRoutes);
+app.use('/api/profile',      authenticate, enforceLegalAcceptance, profileRoutes);
+app.use('/api/reviews',      authenticate, enforceLegalAcceptance, reviewRoutes);
+app.use('/api/verification', authenticate, enforceLegalAcceptance, require('./routes/verification'));
 
-// ── User profile & settings — Terms & Privacy only ───────────────────────
-app.use('/api/users',    authenticate, enforceLegalAcceptance, userRoutes);
-app.use('/api/profile',  authenticate, enforceLegalAcceptance, profileRoutes);
+// ✅ HIGH-RISK ROUTES — Terms & Privacy + Community Guidelines enforced
+// Users cannot book, chat, or transact without accepting Community Guidelines
+app.use('/api/companions',     authenticate, enforceLegalAcceptance, enforceCommunityAcceptance, companionRoutes);
+app.use('/api/bookings',       authenticate, enforceLegalAcceptance, enforceCommunityAcceptance, bookingRoutes);
+app.use('/api/messages',       authenticate, enforceLegalAcceptance, enforceCommunityAcceptance, messageRoutes);
+app.use('/api/payment',        authenticate, enforceLegalAcceptance, enforceCommunityAcceptance, paymentRoutes);
+app.use('/api/random-booking', authenticate, enforceLegalAcceptance, enforceCommunityAcceptance, require('./routes/randomBooking'));
 
-// ── Core social routes — Terms & Privacy only ────────────────────────────
-app.use('/api/events',    authenticate, enforceLegalAcceptance, eventRoutes);
-app.use('/api/posts',     authenticate, enforceLegalAcceptance, postRoutes);
-app.use('/api/spotlight', authenticate, enforceLegalAcceptance, spotlightRoutes);
-app.use('/api/reviews',   authenticate, enforceLegalAcceptance, reviewRoutes);
-
-// ── High-risk routes — Terms & Privacy + Community Guidelines enforced ───
-// These are routes where an unaccepted community member could cause harm.
-app.use('/api/companions',
-  authenticate,
-  enforceLegalAcceptance,
-  enforceCommunityAcceptance,   // ✅ must have accepted community guidelines
-  companionRoutes
-);
-
-app.use('/api/bookings',
-  authenticate,
-  enforceLegalAcceptance,
-  enforceCommunityAcceptance,   // ✅ cannot book without community acceptance
-  bookingRoutes
-);
-
-app.use('/api/messages',
-  authenticate,
-  enforceLegalAcceptance,
-  enforceCommunityAcceptance,   // ✅ cannot chat without community acceptance
-  messageRoutes
-);
-
-app.use('/api/random-booking',
-  authenticate,
-  enforceLegalAcceptance,
-  enforceCommunityAcceptance,   // ✅
-  require('./routes/randomBooking')
-);
-
-// ── Safety reports — Terms & Privacy only (users must be able to report) ──
-app.use('/api/safety',   authenticate, enforceLegalAcceptance, safetyReportRoutes);
-
-// ── Payment — Terms & Privacy + Community (financial transactions) ────────
-app.use('/api/payment',
-  authenticate,
-  enforceLegalAcceptance,
-  enforceCommunityAcceptance,   // ✅ cannot transact without community acceptance
-  paymentRoutes
-);
-
-// ── Calls — Terms & Privacy + Community ──────────────────────────────────
-app.use('/api/agora',
-  authenticate,
-  enforceLegalAcceptance,
-  enforceCommunityAcceptance,   // ✅
-  require('./routes/agora')
-);
-app.use('/api/voice-call',
-  authenticate,
-  enforceLegalAcceptance,
-  enforceCommunityAcceptance,   // ✅
-  require('./routes/voice-call')
-);
-
-// ── Verification — Terms & Privacy only ──────────────────────────────────
-app.use('/api/verification',
-  authenticate,
-  enforceLegalAcceptance,
-  require('./routes/verification')
-);
-
-// ── Admin routes — no legal enforcement needed for admin duties ───────────
+// ✅ ADMIN ROUTES (No legal enforcement needed for admins performing admin duties)
 app.use('/api/admin', authenticate, require('./routes/admin'));
 
-// =============================================
-// CRON JOBS
-// =============================================
+// ✅ CALL ROUTES — Terms & Privacy + Community Guidelines enforced
+app.use('/api/agora',      authenticate, enforceLegalAcceptance, enforceCommunityAcceptance, require('./routes/agora'));
+app.use('/api/voice-call', authenticate, enforceLegalAcceptance, enforceCommunityAcceptance, require('./routes/voice-call'));
+
+// Cron jobs
 require('./cronJobs');
 
-// =============================================
-// HEALTH CHECK
-// =============================================
+// Health Check
 app.get('/api/health', (req, res) => {
-  res.json({
-    status: 'OK',
+  res.json({ 
+    status: 'OK', 
     message: 'Humrah API is running',
     socketConnections: io.engine.clientsCount,
     activeChats: chatUsers.size,
-    onlineUsers: Array.from(userPresence.values()).filter(u => u.status === 'ONLINE').length,
-    communityGuidelinesVersion: process.env.COMMUNITY_GUIDELINES_VERSION || '1.0'
+    onlineUsers: Array.from(userPresence.values()).filter(u => u.status === 'ONLINE').length
   });
 });
 
-// =============================================
-// ERROR HANDLER
-// =============================================
+// Error Handler
 app.use((err, req, res, next) => {
   console.error(err.stack);
-  res.status(500).json({
-    success: false,
+  res.status(500).json({ 
+    success: false, 
     message: 'Something went wrong!',
     error: process.env.NODE_ENV === 'development' ? err.message : undefined
   });
 });
 
-// =============================================
-// START SERVER
-// =============================================
 const PORT = process.env.PORT || 3000;
 
 server.listen(PORT, () => {
@@ -484,16 +553,15 @@ server.listen(PORT, () => {
   console.log(`   - Presence tracking (online/offline)`);
   console.log(`   - JWT authentication`);
   console.log(`✅ Legal compliance enforcement active`);
-  console.log(`✅ Community Guidelines v${process.env.COMMUNITY_GUIDELINES_VERSION || '1.0'} enforcement active`);
 });
 
-// =============================================
-// GRACEFUL SHUTDOWN
-// =============================================
+// Graceful shutdown
 const gracefulShutdown = async (signal) => {
   console.log(`\n${signal} signal received: closing HTTP server`);
+  
   server.close(async () => {
     console.log('HTTP server closed');
+    
     try {
       await mongoose.connection.close();
       console.log('MongoDB connection closed');
@@ -503,6 +571,7 @@ const gracefulShutdown = async (signal) => {
       process.exit(1);
     }
   });
+  
   setTimeout(() => {
     console.error('Could not close connections in time, forcefully shutting down');
     process.exit(1);
@@ -510,7 +579,7 @@ const gracefulShutdown = async (signal) => {
 };
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 process.on('uncaughtException', (err) => {
   console.error('Uncaught Exception:', err);
