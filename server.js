@@ -348,8 +348,6 @@ const safetyReportRoutes  = require('./routes/safetyReports');
 const profileRoutes       = require('./routes/profile');
 const reviewRoutes        = require('./routes/reviews');
 const paymentRoutes       = require('./routes/payment');
-const { enforceLegalAcceptance, enforceCommunityAcceptance } = require('./middleware/enforceLegalAcceptance');
-
 
 // =============================================
 // ✅ PUBLIC ROUTES — no auth, no legal checks
