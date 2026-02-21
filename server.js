@@ -6,6 +6,7 @@ const http = require('http');
 const socketIo = require('socket.io');
 const jwt = require('jsonwebtoken');
 const dotenv = require('dotenv');
+const { enforceLegalAcceptance, enforceCommunityAcceptance } = require('./middleware/enforceLegalAcceptance');
 
 dotenv.config();
 
