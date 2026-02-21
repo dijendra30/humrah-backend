@@ -19,7 +19,8 @@
   "author": "Humrah Team",
   "license": "ISC",
   "dependencies": {
-    "@getbrevo/brevo": "^3.0.1",
+    "@bscotch/bravo": "^2.3.2",
+    "@getbrevo/brevo": "^3.0.2",
     "agora-access-token": "^2.0.4",
     "axios": "^1.6.0",
     "bcryptjs": "^2.4.3",
