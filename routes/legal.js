@@ -6,6 +6,7 @@ const { authenticate } = require('../middleware/auth');
 const LegalAcceptance = require('../models/LegalAcceptance');
 const LegalVersion = require('../models/LegalVersion');
 const User = require('../models/User');
+const LegalConfig = require('../config/legalConfig');
 
 /**
  * GET /api/legal/versions
@@ -212,6 +213,76 @@ router.post('/log-video-consent', authenticate, async (req, res) => {
     });
   }
 });
+/**
+ * POST /api/legal/community/accept
+ *
+ * Logs community guidelines acceptance.
+ * Validates JWT (via authenticate middleware).
+ * Validates that submitted version matches current configured version.
+ * Stores: acceptedCommunityVersion, communityAcceptedAt, communityAcceptedIP, communityAcceptedDevice.
+ */
+router.post('/community/accept', authenticate, async (req, res) => {
+  try {
+    const { version, deviceFingerprint } = req.body;
+
+    // ── Input validation ──────────────────────────────────────────────────
+    if (!version || typeof version !== 'string') {
+      return res.status(400).json({
+        success: false,
+        message: 'version is required'
+      });
+    }
+
+    if (!deviceFingerprint || typeof deviceFingerprint !== 'string') {
+      return res.status(400).json({
+        success: false,
+        message: 'deviceFingerprint is required'
+      });
+    }
+
+    // ── Version check ─────────────────────────────────────────────────────
+    const currentVersion = LegalConfig.currentCommunityVersion;
+    if (version !== currentVersion) {
+      return res.status(409).json({
+        success: false,
+        message: 'Community Guidelines version mismatch. Please read and accept the current version.',
+        code: 'COMMUNITY_VERSION_MISMATCH',
+        requiredVersion: currentVersion,
+        submittedVersion: version
+      });
+    }
+
+    // ── Find user ─────────────────────────────────────────────────────────
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    // ── Idempotency: already on current version ───────────────────────────
+    if (user.acceptedCommunityVersion === currentVersion) {
+      return res.json({
+        success: true,
+        message: 'Community guidelines already accepted',
+        acceptedCommunityVersion: user.acceptedCommunityVersion,
+        communityAcceptedAt: user.communityAcceptedAt
+      });
+    }
+
+    // ── Capture metadata ──────────────────────────────────────────────────
+    const ipAddress =
+      req.headers['x-forwarded-for']?.split(',')[0].trim() ||
+      req.ip ||
+      req.connection.remoteAddress ||
+      'unknown';
+
+    const now = new Date();
+
+    // ── Persist ───────────────────────────────────────────────────────────
+    user.acceptedCommunityVersion = currentVersion;
+    user.communityAcceptedAt      = now;
+    user.communityAcceptedIP      = ipAddress;
+    user.communityAcceptedDevice  = deviceFingerprint;
+    await user.save();
 
 /**
  * POST /api/legal/request-deletion
