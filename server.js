@@ -112,6 +112,11 @@ io.on('connection', (socket) => {
   const userName = socket.userName;
   
   console.log(`✅ User connected: ${userName} (${socket.id})`);
+
+  // ✅ Join user's private room for targeted server→client events
+  // (verification_status_updated and other per-user events use this room)
+  socket.join(userId);
+  console.log(`🔒 User ${userId} joined private room`);
   
   // ✅ Mark user as ONLINE
   userPresence.set(userId, {
@@ -552,6 +557,7 @@ server.listen(PORT, () => {
   console.log(`   - Typing indicators`);
   console.log(`   - Presence tracking (online/offline)`);
   console.log(`   - JWT authentication`);
+  console.log(`   - Private user rooms for verification events`);
   console.log(`✅ Legal compliance enforcement active`);
 });
 
