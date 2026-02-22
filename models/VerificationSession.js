@@ -114,6 +114,19 @@ const verificationSessionSchema = new mongoose.Schema({
     type: String,
     default: null
   },
+
+  // ✅ Manual review window — stamped when decision === 'MANUAL_REVIEW'
+  manualReviewStartedAt: {
+    type: Date,
+    default: null
+  },
+
+  // ✅ 24-hour deadline from manualReviewStartedAt; sent to Android via socket
+  reviewDeadline: {
+    type: Date,
+    default: null,
+    index: true   // useful for admin queries: find overdue reviews
+  },
   
   // Timestamps
   createdAt: {
@@ -178,6 +191,8 @@ verificationSessionSchema.methods.getClientSummary = function() {
     livenessScore: this.livenessScore,
     faceMatchScore: this.faceMatchScore,
     rejectionReason: this.rejectionReason,
+    manualReviewStartedAt: this.manualReviewStartedAt,
+    reviewDeadline: this.reviewDeadline,
     createdAt: this.createdAt,
     processedAt: this.processedAt,
     expiresAt: this.expiresAt
@@ -209,6 +224,18 @@ verificationSessionSchema.statics.findPendingReviews = async function(limit = 50
   .populate('userId', 'firstName lastName email profilePhoto')
   .sort({ createdAt: -1 })
   .limit(limit);
+};
+
+/**
+ * ✅ Find overdue manual reviews (past reviewDeadline)
+ */
+verificationSessionSchema.statics.findOverdueReviews = async function() {
+  return await this.find({
+    status: 'MANUAL_REVIEW',
+    reviewDeadline: { $lt: new Date() }
+  })
+  .populate('userId', 'firstName lastName email profilePhoto')
+  .sort({ reviewDeadline: 1 });
 };
 
 /**
