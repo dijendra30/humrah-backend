@@ -176,7 +176,9 @@ router.post('/upload-video', auth, upload.single('video'), async (req, res) => {
     await session.save();
     
     // Start processing in background (don't wait)
-    processVerificationInBackground(session._id, req.userId);
+    // ✅ Pass the app's io instance so background job can emit socket events
+    const io = req.app.get('io');
+    processVerificationInBackground(session._id, req.userId, io);
     
     res.json({
       success: true,
@@ -237,7 +239,8 @@ router.get('/status/:sessionId', auth, async (req, res) => {
 // =============================================
 // BACKGROUND PROCESSING FUNCTION
 // =============================================
-async function processVerificationInBackground(sessionId, userId) {
+// ✅ io parameter added — allows emitting real-time socket events to the user
+async function processVerificationInBackground(sessionId, userId, io) {
   try {
     console.log(`\n🎬 [Verification] Starting background processing...`);
     
@@ -287,6 +290,16 @@ async function processVerificationInBackground(sessionId, userId) {
       
       // Send success notification
       await sendVerificationResultNotification(user, 'APPROVED');
+
+      // ✅ Emit real-time socket event to user's private room
+      if (io) {
+        io.to(user._id.toString()).emit('verification_status_updated', {
+          status: 'APPROVED',
+          reviewDeadline: null,
+          rejectionReason: null
+        });
+        console.log(`🔔 [Socket] Emitted APPROVED to user ${user._id}`);
+      }
     }
     
     // =============================================
@@ -299,6 +312,16 @@ async function processVerificationInBackground(sessionId, userId) {
       
       // Send rejection notification
       await sendVerificationResultNotification(user, 'REJECTED', result.rejectionReason);
+
+      // ✅ Emit real-time socket event to user's private room
+      if (io) {
+        io.to(user._id.toString()).emit('verification_status_updated', {
+          status: 'REJECTED',
+          reviewDeadline: null,
+          rejectionReason: result.rejectionReason || 'Verification rejected'
+        });
+        console.log(`🔔 [Socket] Emitted REJECTED to user ${user._id}`);
+      }
     }
     
     // =============================================
@@ -306,11 +329,27 @@ async function processVerificationInBackground(sessionId, userId) {
     // =============================================
     else if (result.decision === 'MANUAL_REVIEW') {
       session.faceEmbedding = result.faceEmbedding;
+
+      // ✅ Stamp review window timestamps on the session
+      const now = new Date();
+      const reviewDeadline = new Date(now.getTime() + 24 * 60 * 60 * 1000); // +24 hours
+      session.manualReviewStartedAt = now;
+      session.reviewDeadline = reviewDeadline;
       
-      console.log(`⚠️ [Verification] User ${user._id} needs MANUAL REVIEW`);
+      console.log(`⚠️ [Verification] User ${user._id} needs MANUAL REVIEW (deadline: ${reviewDeadline.toISOString()})`);
       
       // Notify admins
       await notifyAdminsForManualReview(session, user);
+
+      // ✅ Emit real-time socket event to user's private room
+      if (io) {
+        io.to(user._id.toString()).emit('verification_status_updated', {
+          status: 'MANUAL_REVIEW',
+          reviewDeadline: reviewDeadline.toISOString(),
+          rejectionReason: null
+        });
+        console.log(`🔔 [Socket] Emitted MANUAL_REVIEW to user ${user._id} (deadline: ${reviewDeadline.toISOString()})`);
+      }
     }
     
     await session.save();
@@ -460,6 +499,17 @@ router.post('/admin/approve/:sessionId', auth, async (req, res) => {
     user.verificationEmbedding = session.faceEmbedding;
     user.verifiedAt = new Date();
     await user.save();
+
+    // ✅ Emit real-time socket event on admin approval
+    const io = req.app.get('io');
+    if (io) {
+      io.to(user._id.toString()).emit('verification_status_updated', {
+        status: 'APPROVED',
+        reviewDeadline: null,
+        rejectionReason: null
+      });
+      console.log(`🔔 [Socket] Admin APPROVED emitted to user ${user._id}`);
+    }
     
     res.json({
       success: true,
@@ -495,6 +545,8 @@ router.post('/admin/reject/:sessionId', auth, async (req, res) => {
         message: 'Session not found'
       });
     }
+
+    const user = await User.findById(session.userId);
     
     session.status = 'REJECTED';
     session.result = 'REJECTED';
@@ -502,6 +554,19 @@ router.post('/admin/reject/:sessionId', auth, async (req, res) => {
     session.reviewedBy = req.userId;
     session.reviewedAt = new Date();
     await session.save();
+
+    // ✅ Emit real-time socket event on admin rejection
+    if (user) {
+      const io = req.app.get('io');
+      if (io) {
+        io.to(user._id.toString()).emit('verification_status_updated', {
+          status: 'REJECTED',
+          reviewDeadline: null,
+          rejectionReason: session.rejectionReason
+        });
+        console.log(`🔔 [Socket] Admin REJECTED emitted to user ${user._id}`);
+      }
+    }
     
     res.json({
       success: true,
