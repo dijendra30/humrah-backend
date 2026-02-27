@@ -13,7 +13,7 @@
 
 const cron = require('node-cron');
 const User = require('../models/User');
-const { moderateQuestionnaire } = require('../middleware/moderation');
+const { moderateQuestionnaire, applyStrikesAndEnforce, LEVEL } = require('../middleware/moderation');
 
 let startupCleanupDone = false;
 
@@ -59,17 +59,17 @@ async function runCleanup(label = 'MANUAL') {
       user.questionnaire = { ...q, ...cleanedQuestionnaire };
       user.markModified('questionnaire');
 
-      // Record strikes
-      await user.addModerationStrike(violations, `AUTO_CLEANUP_${label}`);
+      // Apply strikes and enforcement via unified engine
+      await applyStrikesAndEnforce(user, violations, `AUTO_CLEANUP_${label}`);
 
       // Tally stats
       stats.usersFixed++;
       for (const v of violations) {
-        if (v.reason === 'auto_cleaned') {
+        if (v.level === LEVEL.AUTO_CLEAN || v.reason === 'auto_cleaned') {
           stats.fieldsCleaned++;
         } else {
           stats.fieldsWiped++;
-          stats.usersFlagged++;
+          if (v.level >= LEVEL.MODERATE) stats.usersFlagged++;
         }
       }
 
