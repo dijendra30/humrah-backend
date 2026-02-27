@@ -261,27 +261,38 @@ deletionRequestedAt: {
   },
 
   // =============================================
-  // ✅ MODERATION FLAGS
-  // Auto-set when profile text violates rules.
-  // isFlagged = red flag in admin dashboard.
-  // 3 hard-block strikes = auto-suspend.
+  // ✅ TIERED MODERATION FLAGS  v2
+  // Level 0 = auto-clean (no strike)
+  // Level 1 = soft block (no strike, warn only)
+  // Level 2 = moderate  (1 strike)
+  // Level 3 = severe    (1 strike + immediate suspension)
+  // Strikes expire after 30 days; full reset after 90 days clean.
   // =============================================
   moderationFlags: {
-    isFlagged:       { type: Boolean, default: false, index: true },
-    strikeCount:     { type: Number,  default: 0 },
+    isFlagged:         { type: Boolean, default: false, index: true },
+
+    // Active strike count (recomputed from violations, kept here for fast queries)
+    strikeCount:       { type: Number,  default: 0 },
+
+    // Full violation history (capped at 100 entries)
     violations: [{
-      field:         String,
-      reason:        String,
-      originalValue: String,
-      cleanedValue:  String,
-      categories:    [String],
-      detectedAt:    { type: Date, default: Date.now },
-      route:         String,
+      field:           String,           // 'bio' | 'goodMeetupMeaning' | 'vibeQuote' | 'message'
+      level:           { type: Number, default: 0 }, // 0-3 maps to LEVEL enum
+      reason:          String,           // e.g. 'severe_content', 'auto_cleaned', 'ai_flagged'
+      originalValue:   String,
+      cleanedValue:    String,           // set only for auto_cleaned
+      categories:      [String],         // OpenAI category names if ai_flagged
+      detectedAt:      { type: Date, default: Date.now },
+      route:           String,           // which API route caught it
     }],
-    lastViolationAt:  { type: Date,    default: null },
-    autoSuspendedAt:  { type: Date,    default: null },
-    reviewedByAdmin:  { type: Boolean, default: false },
-    adminReviewNote:  { type: String,  default: null },
+
+    lastViolationAt:   { type: Date,    default: null },
+    autoSuspendedAt:   { type: Date,    default: null },  // set when auto-suspended
+
+    // Admin review fields
+    reviewedByAdmin:   { type: Boolean, default: false },
+    adminReviewNote:   { type: String,  default: null },
+    lastReviewedAt:    { type: Date,    default: null },
   },
   
   profilePhoto: { type: String, default: null },
@@ -645,50 +656,10 @@ userSchema.methods.logVideoConsent = function(sessionId, ipAddress) {
 // 3 hard-block strikes → account auto-suspended.
 // =============================================
 userSchema.methods.addModerationStrike = async function(violations, route) {
-  if (!this.moderationFlags) {
-    this.moderationFlags = { isFlagged: false, strikeCount: 0, violations: [] };
-  }
-
-  let hardViolations = 0;
-
-  for (const v of violations) {
-    this.moderationFlags.violations.push({
-      field:         v.field,
-      reason:        v.reason,
-      originalValue: v.originalValue ? v.originalValue.substring(0, 300) : '',
-      cleanedValue:  v.cleanedValue  ? v.cleanedValue.substring(0, 300)  : '',
-      categories:    v.categories || [],
-      detectedAt:    new Date(),
-      route:         route || 'unknown',
-    });
-    if (v.reason !== 'auto_cleaned') hardViolations++;
-  }
-
-  // Keep only last 50 violations
-  if (this.moderationFlags.violations.length > 50) {
-    this.moderationFlags.violations = this.moderationFlags.violations.slice(-50);
-  }
-
-  if (hardViolations > 0) {
-    this.moderationFlags.isFlagged       = true;
-    this.moderationFlags.strikeCount    += hardViolations;
-    this.moderationFlags.lastViolationAt = new Date();
-
-    // Auto-suspend at 3 strikes
-    if (this.moderationFlags.strikeCount >= 3 && this.status === 'ACTIVE') {
-      this.status                          = 'SUSPENDED';
-      this.moderationFlags.autoSuspendedAt = new Date();
-      if (!this.suspensionInfo) this.suspensionInfo = {};
-      this.suspensionInfo.isSuspended      = true;
-      this.suspensionInfo.suspensionReason = 'Repeated community guideline violations (auto-detected)';
-      this.suspensionInfo.suspendedAt      = new Date();
-      this.suspensionInfo.suspendedUntil   = null;
-      console.log(`[MODERATION] 🚨 User ${this._id} AUTO-SUSPENDED after ${this.moderationFlags.strikeCount} strikes`);
-    }
-  }
-
-  this.markModified('moderationFlags');
-  return this.save();
+  // Deprecated: use applyStrikesAndEnforce from middleware/moderation.js
+  // Kept for backward compatibility — delegates to the same logic
+  const { applyStrikesAndEnforce } = require('./middleware/moderation');
+  return applyStrikesAndEnforce(this, violations, route);
 };
 
 module.exports = mongoose.model('User', userSchema);
