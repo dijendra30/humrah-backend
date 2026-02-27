@@ -48,37 +48,64 @@ const authenticate = async (req, res, next) => {
       });
     }
 
-    // Check if account is active
+    // Check account status — return structured data for Android to parse
     if (user.status && user.status !== 'ACTIVE') {
+      if (user.status === 'SUSPENDED') {
+        const suspInfo = user.suspensionInfo || {};
+        const until = suspInfo.suspendedUntil;
+        return res.status(403).json({
+          success: false,
+          message: 'Account is suspended',
+          suspensionInfo: {
+            reason:       suspInfo.suspensionReason || 'Community guideline violation',
+            until:        until ? until.toISOString() : 'indefinite',
+            restrictions: suspInfo.restrictions || [],
+            strikeCount:  user.moderationFlags?.strikeCount || 0,
+          }
+        });
+      }
+
+      if (user.status === 'BANNED') {
+        const banInfo = user.banInfo || {};
+        return res.status(403).json({
+          success: false,
+          message: 'Account is banned',
+          banInfo: {
+            reason:    banInfo.banReason    || 'Repeated community guideline violations',
+            permanent: banInfo.isPermanent !== false,
+          }
+        });
+      }
+
+      // Other statuses (PENDING_VERIFICATION etc.)
       return res.status(403).json({
         success: false,
-        message: `Account is ${user.status.toLowerCase()}`,
-        status: user.status
+        message: 'Your account is currently inactive. Please contact support.',
+        status: user.status,
       });
     }
 
-    // Check if suspended
-    if (user.suspensionInfo?.isSuspended) {
+    // Legacy: also check suspensionInfo directly (in case status field is stale)
+    if (user.suspensionInfo?.isSuspended && user.status !== 'SUSPENDED') {
       const until = user.suspensionInfo.suspendedUntil;
       return res.status(403).json({
         success: false,
         message: 'Account is suspended',
         suspensionInfo: {
-          reason: user.suspensionInfo.suspensionReason,
-          until: until ? until.toISOString() : 'indefinite',
-          restrictions: user.suspensionInfo.restrictions
+          reason:       user.suspensionInfo.suspensionReason || 'Community guideline violation',
+          until:        until ? until.toISOString() : 'indefinite',
+          restrictions: user.suspensionInfo.restrictions || [],
         }
       });
     }
 
-    // Check if banned
-    if (user.banInfo?.isBanned) {
+    if (user.banInfo?.isBanned && user.status !== 'BANNED') {
       return res.status(403).json({
         success: false,
         message: 'Account is banned',
         banInfo: {
-          reason: user.banInfo.banReason,
-          permanent: user.banInfo.isPermanent
+          reason:    user.banInfo.banReason    || 'Repeated community guideline violations',
+          permanent: user.banInfo.isPermanent !== false,
         }
       });
     }
