@@ -1,639 +1,694 @@
-// routes/users.js - Complete User Routes with FCM Support + LOCATION SUPPORT
-const express = require('express');
-const router = express.Router();
+// models/User.js - UPDATED with MEMBER/COMPANION User Type System + LOCATION SUPPORT
+const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
 
-// ✅ Import middleware
-const { authenticate, authorize, adminOnly, superAdminOnly, auditLog } = require('../middleware/auth');
+// Questionnaire schema (existing, no changes)
+const questionnaireSchema = new mongoose.Schema({
+  name: String,
+  city: String,
+  languagePreference: String,
+  hangoutPreferences: [String],
+  availableTimes: [String],
+  meetupPreference: String,
+  lookingForOnHumrah: [String],
+  vibeWords: [String],
+  publicPlacesOnly: String,
+  ageGroup: String,
+  state: String,
+  area: String,
+  bio: String,
+  goodMeetupMeaning: String,
+  vibeQuote: String,
+  comfortActivity: [String],
+  relaxActivity: [String],
+  musicPreference: [String],
+  budgetComfort: String,
+  comfortZones: [String],
+  hangoutFrequency: String,
+  becomeCompanion: String,
+  openFor: [String],
+  availability: String,
+  price: String,
+  tagline: String,
+  verifyIdentity: String,
+  understandGuidelines: String,
+  mood: String,
+  personalityType: String,
+  gender: String,
+  dateOfBirth: String,
+  language: String,
+  interests: [String],
+  hobbies: [String],
+  movieGenre: String,
+  favoriteFood: String,
+  travelPreference: String,
+  petPreference: String,
+  fitnessLevel: String,
+  smokingStatus: String,
+  drinkingStatus: String,
+  relationshipStatus: String,
+  lookingFor: String,
+  connectAndEarn: String,
+  profession: String,
+  education: String,
+  income: String
+}, { _id: false });
 
-const User = require('../models/User');
-const { upload, uploadBuffer, uploadBase64, deleteImage } = require('../config/cloudinary');
-const { moderateQuestionnaire } = require('../middleware/moderation');
+const userSchema = new mongoose.Schema({
+  // Basic Information
+  firstName: {
+    type: String,
+    required: [true, 'First name is required'],
+    trim: true
+  },
+  lastName: {
+    type: String,
+    required: [true, 'Last name is required'],
+    trim: true
+  },
+  email: {
+    type: String,
+    required: [true, 'Email is required'],
+    unique: true,
+    lowercase: true,
+    trim: true,
+    match: [/^\S+@\S+\.\S+$/, 'Please provide a valid email']
+  },
+  password: {
+    type: String,
+    required: function () {
+      return !this.googleId && !this.facebookId;
+    },
+    minlength: [6, 'Password must be at least 6 characters']
+  },
+  
+acceptedTermsVersion: {
+  type: String,
+  default: null
+},
 
-// ==================== USER PROFILE ROUTES ====================
+acceptedPrivacyVersion: {
+  type: String,
+  default: null
+},
 
-// @route   PUT /api/users/me
-// @desc    Update user profile
-// @access  Private
-router.put('/me', authenticate, async (req, res) => {
-  try {
-    const updates = req.body;
-    const allowedUpdates = ['firstName', 'lastName', 'profilePhoto', 'questionnaire'];
+lastLegalAcceptanceDate: {
+  type: Date,
+  default: null
+},
 
-    const filteredUpdates = {};
-    Object.keys(updates).forEach(key => {
-      if (allowedUpdates.includes(key)) filteredUpdates[key] = updates[key];
-    });
+requiresLegalReacceptance: {
+  type: Boolean,
+  default: false
+},
 
-    // ── Moderate questionnaire text fields if present ──────────
-    if (filteredUpdates.questionnaire && typeof filteredUpdates.questionnaire === 'object') {
-      const { cleanedQuestionnaire, violations, errors } = await moderateQuestionnaire(filteredUpdates.questionnaire);
+// Safety disclaimer acceptance log
+safetyDisclaimerAcceptances: [{
+  acceptedAt: Date,
+  bookingId: mongoose.Schema.Types.ObjectId,
+  ipAddress: String
+}],
 
-      if (violations.length > 0) {
-        const user = await User.findById(req.userId);
-        if (user) await user.addModerationStrike(violations, 'PUT /api/users/me');
-      }
+// Video verification consent log
+videoVerificationConsents: [{
+  acceptedAt: Date,
+  sessionId: String,
+  ipAddress: String
+}],
 
-      if (errors.length > 0) {
-        return res.status(422).json({
-          success: false,
-          code: 'MODERATION_FAILED',
-          message: "Some fields contain content that isn't allowed.",
-          errors,
-        });
-      }
+// Data deletion tracking
+deletionRequestedAt: {
+  type: Date,
+  default: null
+},
+  
+  // =============================================
+  // ✅ USER TYPE SYSTEM
+  // =============================================
+  userType: {
+    type: String,
+    enum: ['MEMBER', 'COMPANION'],
+    default: 'MEMBER',
+    index: true
+  },
+  
+  // Role & Status (Admin Access)
+  role: {
+    type: String,
+    enum: ['USER', 'SAFETY_ADMIN', 'SUPER_ADMIN'],
+    default: 'USER',
+    required: true,
+    index: true
+  },
+  
+  status: {
+    type: String,
+    enum: ['ACTIVE', 'SUSPENDED', 'BANNED', 'PENDING_VERIFICATION'],
+    default: 'ACTIVE',
+    index: true
+  },
+  
+  // =============================================
+  // ✅ LOCATION FIELDS (Privacy-Safe)
+  // =============================================
+  last_known_lat: { 
+    type: Number, 
+    default: null
+  },
+  last_known_lng: { 
+    type: Number, 
+    default: null 
+  },
+  last_location_updated_at: { 
+    type: Date, 
+    default: null,
+    index: true
+  },
 
-      filteredUpdates.questionnaire = cleanedQuestionnaire;
+  // =============================================
+  // ✅ VIDEO VERIFICATION FIELDS (NEW)
+  // =============================================
+  
+  // Face embedding for matching
+  verificationEmbedding: {
+    type: [Number],
+    default: null
+  },
+  
+  // When user was verified
+  verifiedAt: {
+    type: Date,
+    default: null
+  },
+  
+  // Verification method used
+  verificationType: {
+    type: String,
+    enum: ['PHOTO', 'VIDEO', 'MANUAL', null],
+    default: null
+  },
+  
+  // Number of verification attempts
+  verificationAttempts: {
+    type: Number,
+    default: 0
+  },
+  
+  // Last verification attempt
+  lastVerificationAttempt: {
+    type: Date,
+    default: null
+  },
+  
+  // Verification rejection history
+  verificationRejections: {
+    type: [{
+      reason: String,
+      rejectedAt: Date,
+      sessionId: String
+    }],
+    default: []
+  },
+  
+  // Payment Info
+  paymentInfo: {
+    upiId: { type: String, default: null },
+    upiName: { type: String, default: null },
+    upiStatus: {
+      type: String,
+      enum: ['not_set', 'pending_verification', 'verified', 'failed'],
+      default: 'not_set'
+    },
+    upiVerifiedAt: { type: Date, default: null },
+    upiLastUpdated: { type: Date, default: null },
+    upiVerificationAttempts: { type: Number, default: 0 },
+    totalEarnings: { type: Number, default: 0 },
+    verificationPhoto: { type: String, default: null },
+    verificationPhotoPublicId: { type: String, default: null },
+    photoVerificationStatus: { 
+    type: String, 
+    enum: ['not_submitted', 'pending', 'approved', 'rejected'],
+    default: 'not_submitted'},
+    pendingPayout: { type: Number, default: 0 },
+    completedPayouts: { type: Number, default: 0 },
+    lastPayoutDate: { type: Date, default: null },
+    bankAccount: {
+      accountNumber: String,
+      ifscCode: String,
+      accountHolderName: String,
+      isVerified: { type: Boolean, default: false }
     }
-
-    const user = await User.findByIdAndUpdate(
-      req.userId,
-      filteredUpdates,
-      { new: true, runValidators: true }
-    ).select('-password');
-
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found' });
+  },
+  
+  ratingStats: {
+    averageRating: { type: Number, default: 0, min: 0, max: 5 },
+    totalRatings: { type: Number, default: 0 },
+    completedBookings: { type: Number, default: 0 },
+    starDistribution: {
+      five: { type: Number, default: 0 },
+      four: { type: Number, default: 0 },
+      three: { type: Number, default: 0 },
+      two: { type: Number, default: 0 },
+      one: { type: Number, default: 0 }
     }
+  },
+  
+  profileEditStats: {
+    lastPhotoUpdate: { type: Date, default: null },
+    lastBioUpdate: { type: Date, default: null },
+    lastAgeGroupUpdate: { type: Date, default: null },
+    totalEdits: { type: Number, default: 0 }
+  },
 
-    res.json({ success: true, message: 'Profile updated successfully', user });
+  // =============================================
+  // ✅ MODERATION FLAGS
+  // Auto-set when profile text violates rules.
+  // isFlagged = red flag in admin dashboard.
+  // 3 hard-block strikes = auto-suspend.
+  // =============================================
+  moderationFlags: {
+    isFlagged:       { type: Boolean, default: false, index: true },
+    strikeCount:     { type: Number,  default: 0 },
+    violations: [{
+      field:         String,
+      reason:        String,
+      originalValue: String,
+      cleanedValue:  String,
+      categories:    [String],
+      detectedAt:    { type: Date, default: Date.now },
+      route:         String,
+    }],
+    lastViolationAt:  { type: Date,    default: null },
+    autoSuspendedAt:  { type: Date,    default: null },
+    reviewedByAdmin:  { type: Boolean, default: false },
+    adminReviewNote:  { type: String,  default: null },
+  },
+  
+  profilePhoto: { type: String, default: null },
+  profilePhotoPublicId: { type: String, default: null },
+  
+  questionnaire: {
+    type: questionnaireSchema,
+    default: {}
+  },
+  
+  verified: { type: Boolean, default: false },
+  emailVerified: { type: Boolean, default: false },
+  
+  verificationPhoto: { type: String, default: null },
+  verificationPhotoPublicId: { type: String, default: null },
+  photoVerificationStatus: { 
+    type: String, 
+    enum: ['not_submitted', 'pending', 'approved', 'rejected'],
+    default: 'not_submitted'
+  },
+  verificationPhotoSubmittedAt: { type: Date, default: null },
+  photoVerifiedAt: { type: Date, default: null },
+  photoVerifiedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  photoRejectionReason: { type: String, default: null },
+  
+  emailVerificationOTP: { type: String, default: null },
+  emailVerificationExpires: { type: Date, default: null },
+  
+  googleId: String,
+  facebookId: String,
+  
+  fcmTokens: {
+    type: [String],
+    default: []
+  },
+  
+  isPremium: { type: Boolean, default: false },
+  premiumExpiresAt: { type: Date, default: null },
+  
+  lastActive: { type: Date, default: Date.now },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+  
+}, { timestamps: true });
 
-  } catch (error) {
-    console.error('Update profile error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
+// =============================================
+// ✅ INDEXES FOR PERFORMANCE
+// =============================================
+// Create geospatial index for location queries
+userSchema.index({ last_known_lat: 1, last_known_lng: 1 });
+userSchema.index({ 'moderationFlags.isFlagged': 1 });
+userSchema.index({ 'moderationFlags.strikeCount': 1 });
+userSchema.index({ last_location_updated_at: 1 });
+
+
+/**
+ * Check if user can attempt verification
+ */
+userSchema.methods.canAttemptVerification = function() {
+  // Allow if never attempted
+  if (!this.lastVerificationAttempt) return true;
+  
+  // Allow if last attempt was more than 1 hour ago
+  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+  if (this.lastVerificationAttempt < oneHourAgo) return true;
+  
+  // Allow if less than 3 attempts
+  if (this.verificationAttempts < 3) return true;
+  
+  return false;
+};
+
+/**
+ * Record verification attempt
+ */
+userSchema.methods.recordVerificationAttempt = async function() {
+  this.verificationAttempts += 1;
+  this.lastVerificationAttempt = new Date();
+  return await this.save();
+};
+
+/**
+ * Record verification rejection
+ */
+userSchema.methods.recordVerificationRejection = async function(reason, sessionId) {
+  this.verificationRejections.push({
+    reason,
+    rejectedAt: new Date(),
+    sessionId
+  });
+  
+  // Keep only last 5 rejections
+  if (this.verificationRejections.length > 5) {
+    this.verificationRejections = this.verificationRejections.slice(-5);
   }
-});
+  
+  return await this.save();
+};
 
-// @route   GET /api/users/:id
-// @desc    Get user by ID
-// @access  Private
-router.get('/:id', authenticate, async (req, res) => {
-  try {
-    const user = await User.findById(req.params.id).select('-password');
-    
-    if (!user) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'User not found' 
-      });
-    }
+/**
+ * Mark user as verified via video
+ */
+userSchema.methods.markVerifiedViaVideo = async function(embedding) {
+  this.verified = true;
+  this.verifiedAt = new Date();
+  this.verificationType = 'VIDEO';
+  this.verificationEmbedding = embedding;
+  this.photoVerificationStatus = 'approved';
+  return await this.save();
+};
 
-    res.json({
-      success: true,
-      user
-    });
-
-  } catch (error) {
-    console.error('Get user error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error' 
-    });
-  }
-});
-
-// @route   DELETE /api/users/me
-// @desc    Delete user account
-// @access  Private
-router.delete('/me', authenticate, async (req, res) => {
-  try {
-    const user = await User.findById(req.userId);
-    
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
-    }
-
-    // Delete profile photo if exists
-    if (user.profilePhotoPublicId) {
-      await deleteImage(user.profilePhotoPublicId);
-    }
-
-    // Delete verification photo if exists
-    if (user.verificationPhotoPublicId) {
-      await deleteImage(user.verificationPhotoPublicId);
-    }
-
-    await User.findByIdAndDelete(req.userId);
-
-    res.json({
-      success: true,
-      message: 'Account deleted successfully'
-    });
-
-  } catch (error) {
-    console.error('Delete account error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error'
-    });
-  }
-});
-
-// ==================== LOCATION ROUTE ====================
-
-// @route   POST /api/users/location
-// @desc    Update user's last known location
-// @access  Private
-router.post('/location', authenticate, async (req, res) => {
-  try {
-    const { lat, lng, timestamp } = req.body;
-
-    // Validate input
-    if (lat === undefined || lng === undefined) {
-      return res.status(400).json({
-        success: false,
-        message: 'Latitude and longitude are required'
-      });
-    }
-
-    // Validate lat/lng ranges
-    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid latitude or longitude values'
-      });
-    }
-
-    const user = await User.findById(req.userId);
-    
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
-    }
-
-    // ✅ Update location (overwrites previous value - no history)
-    user.updateLocation(lat, lng);
-    await user.save();
-
-    console.log(`📍 Location updated for user ${user._id}: (${lat}, ${lng})`);
-
-    res.json({
-      success: true,
-      message: 'Location updated successfully',
-      location: {
-        last_known_lat: user.last_known_lat,
-        last_known_lng: user.last_known_lng,
-        last_location_updated_at: user.last_location_updated_at
-      }
-    });
-
-  } catch (error) {
-    console.error('❌ Location update error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error updating location'
-    });
-  }
-});
-
-// ==================== FCM TOKEN MANAGEMENT ====================
-
-// @route   POST /api/users/fcm-token
-// @desc    Register FCM token for push notifications
-// @access  Private
-router.post('/fcm-token', authenticate, async (req, res) => {
-  try {
-    const { fcmToken } = req.body;
-
-    if (!fcmToken) {
-      return res.status(400).json({
-        success: false,
-        message: 'FCM token is required'
-      });
-    }
-
-    const user = await User.findById(req.userId);
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
-    }
-
-    // ✅ Initialize fcmTokens array if it doesn't exist
-    if (!user.fcmTokens) {
-      user.fcmTokens = [];
-    }
-
-    // ✅ Check if token already exists
-    const tokenExists = user.fcmTokens.includes(fcmToken);
-
-    if (!tokenExists) {
-      // Add token (keep max 5 tokens per user - for multiple devices)
-      user.fcmTokens.push(fcmToken);
-
-      // Keep only last 5 tokens
-      if (user.fcmTokens.length > 5) {
-        user.fcmTokens = user.fcmTokens.slice(-5);
-      }
-
-      await user.save();
-      console.log(`✅ FCM token registered for user ${user._id}`);
+// =============================================
+// ✅ MIDDLEWARE: Auto-update userType
+// =============================================
+userSchema.pre('save', function(next) {
+  // Update userType based on becomeCompanion answer
+  if (this.questionnaire && this.questionnaire.becomeCompanion) {
+    if (this.questionnaire.becomeCompanion === "Yes, I'm interested") {
+      this.userType = 'COMPANION';
     } else {
-      console.log(`ℹ️ FCM token already registered for user ${user._id}`);
+      this.userType = 'MEMBER';
     }
-
-    res.json({
-      success: true,
-      message: 'FCM token registered successfully'
-    });
-
-  } catch (error) {
-    console.error('❌ FCM token registration error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to register FCM token'
-    });
   }
+  
+  next();
 });
 
-// @route   DELETE /api/users/fcm-token
-// @desc    Remove FCM token (for logout)
-// @access  Private
-router.delete('/fcm-token', authenticate, async (req, res) => {
-  try {
-    const { fcmToken } = req.body;
+// =============================================
+// ✅ LOCATION METHODS
+// =============================================
 
-    if (!fcmToken) {
-      return res.status(400).json({
-        success: false,
-        message: 'FCM token is required'
-      });
-    }
+/**
+ * Update user location
+ * 
+ * @param {Number} lat - Latitude
+ * @param {Number} lng - Longitude
+ */
+userSchema.methods.updateLocation = function(lat, lng) {
+  this.last_known_lat = lat;
+  this.last_known_lng = lng;
+  this.last_location_updated_at = new Date();
+};
 
-    const user = await User.findById(req.userId);
+/**
+ * Check if location is fresh (< 24 hours old)
+ * 
+ * @returns {Boolean} True if location is recent
+ */
+userSchema.methods.hasRecentLocation = function() {
+  if (!this.last_location_updated_at) return false;
+  
+  const hoursSinceUpdate = (Date.now() - this.last_location_updated_at.getTime()) / (1000 * 60 * 60);
+  return hoursSinceUpdate < 24;
+};
 
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
-    }
+/**
+ * Get location for matching (null if too old)
+ * 
+ * @returns {Object|null} Location object or null
+ */
+userSchema.methods.getLocationForMatching = function() {
+  if (!this.hasRecentLocation()) return null;
+  
+  return {
+    lat: this.last_known_lat,
+    lng: this.last_known_lng,
+    updatedAt: this.last_location_updated_at
+  };
+};
 
-    if (user.fcmTokens) {
-      user.fcmTokens = user.fcmTokens.filter(token => token !== fcmToken);
-      await user.save();
-      console.log(`✅ FCM token removed for user ${user._id}`);
-    }
+// =============================================
+// ✅ USER TYPE METHODS
+// =============================================
 
-    res.json({
-      success: true,
-      message: 'FCM token removed successfully'
-    });
+/**
+ * Check if user is a companion
+ */
+userSchema.methods.isCompanion = function() {
+  return this.userType === 'COMPANION';
+};
 
-  } catch (error) {
-    console.error('❌ FCM token removal error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to remove FCM token'
-    });
-  }
-});
+/**
+ * Check if user is a member
+ */
+userSchema.methods.isMember = function() {
+  return this.userType === 'MEMBER';
+};
 
-// ==================== PHOTO UPLOAD ROUTES ====================
+// =============================================
+// ✅ PROFILE METHODS
+// =============================================
 
-// @route   POST /api/users/upload-profile-photo
-// @desc    Upload profile photo from gallery/camera (multipart/form-data)
-// @access  Private
-router.post('/upload-profile-photo', authenticate, upload.single('photo'), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({
-        success: false,
-        message: 'No photo uploaded'
-      });
-    }
-
-    const user = await User.findById(req.userId);
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
-    }
-
-    // Delete old profile photo if exists
-    if (user.profilePhotoPublicId) {
-      await deleteImage(user.profilePhotoPublicId);
-    }
-
-    // Upload buffer to Cloudinary
-    const uploadResult = await uploadBuffer(req.file.buffer, 'humrah/profiles');
-
-    // Update user with new photo
-    user.profilePhoto = uploadResult.url;
-    user.profilePhotoPublicId = uploadResult.publicId;
-    await user.save();
-
-    res.json({
-      success: true,
-      message: 'Profile photo uploaded successfully',
-      profilePhoto: user.profilePhoto
-    });
-
-  } catch (error) {
-    console.error('Upload profile photo error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error uploading photo'
-    });
-  }
-});
-
-// @route   POST /api/users/upload-profile-photo-base64
-// @desc    Upload profile photo as base64 (from camera or gallery)
-// @access  Private
-router.post('/upload-profile-photo-base64', authenticate, async (req, res) => {
-  try {
-    const { photoBase64 } = req.body;
-
-    if (!photoBase64) {
-      return res.status(400).json({
-        success: false,
-        message: 'No photo data provided'
-      });
-    }
-
-    const user = await User.findById(req.userId);
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
-    }
-
-    // Delete old profile photo if exists
-    if (user.profilePhotoPublicId) {
-      await deleteImage(user.profilePhotoPublicId);
-    }
-
-    // Upload to Cloudinary
-    const uploadResult = await uploadBase64(photoBase64, 'humrah/profiles');
-
-    // Update user
-    user.profilePhoto = uploadResult.url;
-    user.profilePhotoPublicId = uploadResult.publicId;
-    await user.save();
-
-    res.json({
-      success: true,
-      message: 'Profile photo uploaded successfully',
-      profilePhoto: user.profilePhoto
-    });
-
-  } catch (error) {
-    console.error('Upload profile photo error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error uploading photo'
-    });
-  }
-});
-
-// @route   POST /api/users/submit-verification-photo
-// @desc    Submit photo for manual verification
-// @access  Private
-router.post('/submit-verification-photo', authenticate, upload.single('photo'), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({
-        success: false,
-        message: 'No photo uploaded'
-      });
-    }
-
-    const user = await User.findById(req.userId);
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
-    }
-
-    // Delete old verification photo if exists
-    if (user.verificationPhotoPublicId) {
-      await deleteImage(user.verificationPhotoPublicId);
-    }
-
-    // Upload buffer to Cloudinary
-    const uploadResult = await uploadBuffer(req.file.buffer, 'humrah/verification');
-
-    // Update user with verification photo
-    user.verificationPhoto = uploadResult.url;
-    user.verificationPhotoPublicId = uploadResult.publicId;
-    user.verificationPhotoSubmittedAt = new Date();
-    user.photoVerificationStatus = 'pending';
-    await user.save();
-
-    res.json({
-      success: true,
-      message: 'Verification photo submitted successfully. Our team will review it soon.',
-      verificationPhoto: user.verificationPhoto,
-      photoVerificationStatus: user.photoVerificationStatus
-    });
-
-  } catch (error) {
-    console.error('Submit verification photo error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error'
-    });
-  }
-});
-
-// @route   POST /api/users/submit-verification-photo-base64
-// @desc    Submit verification photo as base64
-// @access  Private
-router.post('/submit-verification-photo-base64', authenticate, async (req, res) => {
-  try {
-    const { photoBase64 } = req.body;
-
-    if (!photoBase64) {
-      return res.status(400).json({
-        success: false,
-        message: 'No photo data provided'
-      });
-    }
-
-    const user = await User.findById(req.userId);
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
-    }
-
-    // Delete old verification photo if exists
-    if (user.verificationPhotoPublicId) {
-      await deleteImage(user.verificationPhotoPublicId);
-    }
-
-    // Upload to Cloudinary
-    const uploadResult = await uploadBase64(photoBase64, 'humrah/verification');
-
-    // Update user
-    user.verificationPhoto = uploadResult.url;
-    user.verificationPhotoPublicId = uploadResult.publicId;
-    user.verificationPhotoSubmittedAt = new Date();
-    user.photoVerificationStatus = 'pending';
-    await user.save();
-
-    res.json({
-      success: true,
-      message: 'Verification photo submitted successfully. Our team will review it soon.',
-      verificationPhoto: user.verificationPhoto,
-      photoVerificationStatus: user.photoVerificationStatus
-    });
-
-  } catch (error) {
-    console.error('Submit verification photo error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error'
-    });
-  }
-});
-
-// ==================== QUESTIONNAIRE ROUTES ====================
-
-// @route   PUT /api/users/me/questionnaire
-// @desc    Merge & update questionnaire safely (multi-step onboarding)
-// @access  Private
-router.put('/me/questionnaire', authenticate, async (req, res) => {
-  try {
-    const { questionnaire } = req.body;
-
-    if (!questionnaire || typeof questionnaire !== 'object') {
-      return res.status(400).json({ success: false, message: 'Questionnaire data is required' });
-    }
-
-    const user = await User.findById(req.userId);
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found' });
-    }
-
-    // ── Full moderation pipeline ───────────────────────────────
-    const { cleanedQuestionnaire, violations, errors } = await moderateQuestionnaire(questionnaire);
-
-    // Log every violation to the user's moderation record (strikes + flag)
-    if (violations.length > 0) {
-      await user.addModerationStrike(violations, 'PUT /api/users/me/questionnaire');
-    }
-
-    // If there were hard-block violations, reject the request
-    if (errors.length > 0) {
-      return res.status(422).json({
-        success: false,
-        code: 'MODERATION_FAILED',
-        message: "Some fields contain content that isn't allowed. Please keep your profile genuine.",
-        errors, // [{ field, code, message }] shown inline in Android under each input
-      });
-    }
-
-    // ── Merge cleaned questionnaire ────────────────────────────
-    user.questionnaire = {
-      ...(user.questionnaire?.toObject?.() || user.questionnaire || {}),
-      ...cleanedQuestionnaire,
-    };
-
-    user.markModified('questionnaire');
-    await user.save();
-
-    res.json({ success: true, message: 'Questionnaire saved successfully', user });
-
-  } catch (error) {
-    console.error('Save questionnaire error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// ==================== ADMIN ROUTES ====================
-
-// @route   PUT /api/users/:userId/verify-photo
-// @desc    Admin: Approve or reject user's verification photo
-// @access  Private (Admin only)
-router.put(
-  '/:userId/verify-photo',
-  authenticate,
-  adminOnly,
-  auditLog('VERIFY_USER_PHOTO', 'USER'),
-  async (req, res) => {
-    try {
-      const { userId } = req.params;
-      const { approved } = req.body;
-
-      const user = await User.findById(userId);
-      if (!user) {
-        return res.status(404).json({
-          success: false,
-          message: 'User not found'
-        });
-      }
-
-      if (!user.verificationPhoto) {
-        return res.status(400).json({
-          success: false,
-          message: 'No verification photo to review'
-        });
-      }
-
-      // Update verification status
-      user.photoVerificationStatus = approved ? 'approved' : 'rejected';
-      user.photoVerifiedAt = new Date();
-      user.photoVerifiedBy = req.userId;
-      user.verified = user.isFullyVerified();
-      await user.save();
-
-      res.json({
-        success: true,
-        message: `Photo verification ${approved ? 'approved' : 'rejected'} successfully`,
-        user: {
-          id: user._id,
-          photoVerificationStatus: user.photoVerificationStatus,
-          verified: user.verified,
-          photoVerifiedAt: user.photoVerifiedAt
-        }
-      });
-
-    } catch (error) {
-      console.error('Verify photo error:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Server error'
-      });
-    }
-  }
-);
-
-// @route   GET /api/users/admin/pending-verifications
-// @desc    Admin: Get all users pending photo verification
-// @access  Private (Admin only)
-router.get('/admin/pending-verifications', authenticate, adminOnly, async (req, res) => {
-  try {
-    const users = await User.find({
-      photoVerificationStatus: 'pending',
-      verificationPhoto: { $ne: null }
+/**
+ * Get public profile (for other users to view)
+ */
+userSchema.methods.getPublicProfile = function() {
+  return {
+    _id: this._id,
+    firstName: this.firstName,
+    lastName: this.lastName,
+    profilePhoto: this.profilePhoto,
+    verified: this.verified,
+    isPremium: this.isPremium,
+    userType: this.userType,
+    
+    // Questionnaire (public fields only)
+    questionnaire: {
+      city: this.questionnaire?.city,
+      interests: this.questionnaire?.interests,
+      ageGroup: this.questionnaire?.ageGroup,
+      state: this.questionnaire?.state,
+      area: this.questionnaire?.area,
+      bio: this.questionnaire?.bio,
+      
+      // ✅ Companion fields (only if user is companion)
+      ...(this.userType === 'COMPANION' && {
+        becomeCompanion: this.questionnaire?.becomeCompanion,
+        openFor: this.questionnaire?.openFor,
+        availability: this.questionnaire?.availability,
+        price: this.questionnaire?.price,
+        tagline: this.questionnaire?.tagline
+      })
+    },
+    
+    // ✅ Rating stats (only for companions)
+    ...(this.userType === 'COMPANION' && {
+      ratingStats: this.ratingStats
     })
-    .select('firstName lastName email verificationPhoto verificationPhotoSubmittedAt')
-    .sort({ verificationPhotoSubmittedAt: -1 });
+  };
+};
 
-    res.json({
-      success: true,
-      count: users.length,
-      users
-    });
+/**
+ * Get private profile (for user's own view)
+ */
+userSchema.methods.getPrivateProfile = function() {
+  return {
+    _id: this._id,
+    firstName: this.firstName,
+    lastName: this.lastName,
+    email: this.email,
+    profilePhoto: this.profilePhoto,
+    verified: this.verified,
+    emailVerified: this.emailVerified,
+    isPremium: this.isPremium,
+    premiumExpiresAt: this.premiumExpiresAt,
+    role: this.role,
+    userType: this.userType,
+    
+    verificationPhoto: this.verificationPhoto,
+    photoVerificationStatus: this.photoVerificationStatus,
+    
+    questionnaire: this.questionnaire,
+    
+    paymentInfo: this.paymentInfo,
+    ratingStats: this.ratingStats,
+    profileEditStats: this.profileEditStats,
+    
+    // ✅ Include location info for user's own view
+    last_known_lat: this.last_known_lat,
+    last_known_lng: this.last_known_lng,
+    last_location_updated_at: this.last_location_updated_at,
+    
+    createdAt: this.createdAt,
+    updatedAt: this.updatedAt,
+    lastActive: this.lastActive
+  };
+};
 
+// =============================================
+// ✅ PASSWORD METHODS
+// =============================================
+
+/**
+ * Hash password before saving
+ */
+userSchema.pre('save', async function (next) {
+  if (!this.isModified('password')) return next();
+  
+  try {
+    const salt = await bcrypt.genSalt(10);
+    this.password = await bcrypt.hash(this.password, salt);
+    next();
   } catch (error) {
-    console.error('Get pending verifications error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error'
-    });
+    next(error);
   }
 });
 
-module.exports = router;
+/**
+ * Compare password for login
+ */
+userSchema.methods.comparePassword = async function (candidatePassword) {
+  return await bcrypt.compare(candidatePassword, this.password);
+};
+
+/**
+ * Check if user is fully verified
+ */
+userSchema.methods.isFullyVerified = function() {
+  return this.emailVerified && this.photoVerificationStatus === 'approved';
+};
+
+
+userSchema.methods.hasAcceptedCurrentLegal = async function() {
+  const LegalVersion = mongoose.model('LegalVersion');
+  
+  const [termsDoc, privacyDoc] = await Promise.all([
+    LegalVersion.findOne({ documentType: 'TERMS' }),
+    LegalVersion.findOne({ documentType: 'PRIVACY' })
+  ]);
+  
+  if (!termsDoc || !privacyDoc) {
+    throw new Error('Legal versions not configured');
+  }
+  
+  return (
+    this.acceptedTermsVersion === termsDoc.currentVersion &&
+    this.acceptedPrivacyVersion === privacyDoc.currentVersion &&
+    !this.requiresLegalReacceptance
+  );
+};
+
+/**
+ * Log safety disclaimer acceptance
+ */
+userSchema.methods.logSafetyDisclaimer = function(bookingId, ipAddress) {
+  this.safetyDisclaimerAcceptances.push({
+    acceptedAt: new Date(),
+    bookingId,
+    ipAddress
+  });
+  
+  if (this.safetyDisclaimerAcceptances.length > 100) {
+    this.safetyDisclaimerAcceptances = this.safetyDisclaimerAcceptances.slice(-100);
+  }
+  
+  return this.save();
+};
+
+/**
+ * Log video consent
+ */
+userSchema.methods.logVideoConsent = function(sessionId, ipAddress) {
+  this.videoVerificationConsents.push({
+    acceptedAt: new Date(),
+    sessionId,
+    ipAddress
+  });
+  
+  if (this.videoVerificationConsents.length > 10) {
+    this.videoVerificationConsents = this.videoVerificationConsents.slice(-10);
+  }
+  
+  return this.save();
+};
+
+
+// =============================================
+// ✅ MODERATION STRIKE METHOD
+// Called automatically on every violation.
+// auto-clean violations are logged but don't count as strikes.
+// 3 hard-block strikes → account auto-suspended.
+// =============================================
+userSchema.methods.addModerationStrike = async function(violations, route) {
+  if (!this.moderationFlags) {
+    this.moderationFlags = { isFlagged: false, strikeCount: 0, violations: [] };
+  }
+
+  let hardViolations = 0;
+
+  for (const v of violations) {
+    this.moderationFlags.violations.push({
+      field:         v.field,
+      reason:        v.reason,
+      originalValue: v.originalValue ? v.originalValue.substring(0, 300) : '',
+      cleanedValue:  v.cleanedValue  ? v.cleanedValue.substring(0, 300)  : '',
+      categories:    v.categories || [],
+      detectedAt:    new Date(),
+      route:         route || 'unknown',
+    });
+    if (v.reason !== 'auto_cleaned') hardViolations++;
+  }
+
+  // Keep only last 50 violations
+  if (this.moderationFlags.violations.length > 50) {
+    this.moderationFlags.violations = this.moderationFlags.violations.slice(-50);
+  }
+
+  if (hardViolations > 0) {
+    this.moderationFlags.isFlagged       = true;
+    this.moderationFlags.strikeCount    += hardViolations;
+    this.moderationFlags.lastViolationAt = new Date();
+
+    // Auto-suspend at 3 strikes
+    if (this.moderationFlags.strikeCount >= 3 && this.status === 'ACTIVE') {
+      this.status                          = 'SUSPENDED';
+      this.moderationFlags.autoSuspendedAt = new Date();
+      if (!this.suspensionInfo) this.suspensionInfo = {};
+      this.suspensionInfo.isSuspended      = true;
+      this.suspensionInfo.suspensionReason = 'Repeated community guideline violations (auto-detected)';
+      this.suspensionInfo.suspendedAt      = new Date();
+      this.suspensionInfo.suspendedUntil   = null;
+      console.log(`[MODERATION] 🚨 User ${this._id} AUTO-SUSPENDED after ${this.moderationFlags.strikeCount} strikes`);
+    }
+  }
+
+  this.markModified('moderationFlags');
+  return this.save();
+};
+
+module.exports = mongoose.model('User', userSchema);
