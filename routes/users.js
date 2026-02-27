@@ -7,7 +7,7 @@ const { authenticate, authorize, adminOnly, superAdminOnly, auditLog } = require
 
 const User = require('../models/User');
 const { upload, uploadBuffer, uploadBase64, deleteImage } = require('../config/cloudinary');
-const { moderateQuestionnaire } = require('../middleware/moderation');
+const { moderateQuestionnaire, applyStrikesAndEnforce, buildModerationResponse, buildAutoCleanSuccessResponse, LEVEL } = require('../middleware/moderation');
 
 // ==================== USER PROFILE ROUTES ====================
 
@@ -517,21 +517,19 @@ router.put('/me/questionnaire', authenticate, async (req, res) => {
     }
 
     // ── Full moderation pipeline ───────────────────────────────
-    const { cleanedQuestionnaire, violations, errors } = await moderateQuestionnaire(questionnaire);
+    const { cleanedQuestionnaire, violations, errors, autoCleanedFields } = await moderateQuestionnaire(questionnaire);
 
-    // Log every violation to the user's moderation record (strikes + flag)
+    // Apply strikes and enforce consequences (suspension, ban, etc.)
+    let enforcement = { enforced: false, action: null, message: null, suspendUntil: null };
     if (violations.length > 0) {
-      await user.addModerationStrike(violations, 'PUT /api/users/me/questionnaire');
+      enforcement = await applyStrikesAndEnforce(user, violations, 'PUT /api/users/me/questionnaire');
     }
 
-    // If there were hard-block violations, reject the request
+    // Reject if any field had SOFT/MODERATE/SEVERE violations
     if (errors.length > 0) {
-      return res.status(422).json({
-        success: false,
-        code: 'MODERATION_FAILED',
-        message: "Some fields contain content that isn't allowed. Please keep your profile genuine.",
-        errors, // [{ field, code, message }] shown inline in Android under each input
-      });
+      return res.status(422).json(
+        buildModerationResponse(errors, enforcement, autoCleanedFields)
+      );
     }
 
     // ── Merge cleaned questionnaire ────────────────────────────
@@ -543,7 +541,8 @@ router.put('/me/questionnaire', authenticate, async (req, res) => {
     user.markModified('questionnaire');
     await user.save();
 
-    res.json({ success: true, message: 'Questionnaire saved successfully', user });
+    const successResponse = buildAutoCleanSuccessResponse(autoCleanedFields || []);
+    res.json({ ...successResponse, message: 'Questionnaire saved successfully', user });
 
   } catch (error) {
     console.error('Save questionnaire error:', error);
