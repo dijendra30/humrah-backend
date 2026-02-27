@@ -112,11 +112,6 @@ io.on('connection', (socket) => {
   const userName = socket.userName;
   
   console.log(`✅ User connected: ${userName} (${socket.id})`);
-
-  // ✅ Join user's private room for targeted server→client events
-  // (verification_status_updated and other per-user events use this room)
-  socket.join(userId);
-  console.log(`🔒 User ${userId} joined private room`);
   
   // ✅ Mark user as ONLINE
   userPresence.set(userId, {
@@ -463,6 +458,11 @@ const connectDB = async () => {
   try {
     await mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/humrah');
     console.log('✅ MongoDB Connected');
+
+    // ── Auto-moderation: clean existing dirty profiles on every deploy ──
+    await runStartupCleanup();   // scans all users 5s after DB connect
+    scheduleDailyCleanup();      // daily cron at 3:00 AM IST
+
   } catch (err) {
     console.error('❌ MongoDB Connection Error:', err);
     process.exit(1);
@@ -474,8 +474,10 @@ connectDB();
 // =============================================
 // ✅ IMPORT MIDDLEWARE
 // =============================================
-const { authenticate } = require('./middleware/auth');
-const { enforceLegalAcceptance, enforceCommunityAcceptance } = require('./middleware/enforceLegalAcceptance');
+const { authenticate, adminOnly } = require('./middleware/auth');
+const { enforceLegalAcceptance } = require('./middleware/enforceLegalAcceptance');
+const { runStartupCleanup, scheduleDailyCleanup } = require('./utils/autoModerationCleanup');
+const moderationRoutes = require('./routes/moderation');
 
 // =============================================
 // ✅ ROUTES WITH LEGAL ENFORCEMENT
@@ -498,30 +500,29 @@ const paymentRoutes = require('./routes/payment');
 app.use('/api/auth', authRoutes);
 app.use('/api/legal', legalRoutes);
 
-// ✅ PROTECTED ROUTES — Terms & Privacy enforced on all
-app.use('/api/users',        authenticate, enforceLegalAcceptance, userRoutes);
-app.use('/api/events',       authenticate, enforceLegalAcceptance, eventRoutes);
-app.use('/api/posts',        authenticate, enforceLegalAcceptance, postRoutes);
-app.use('/api/spotlight',    authenticate, enforceLegalAcceptance, spotlightRoutes);
-app.use('/api/safety',       authenticate, enforceLegalAcceptance, safetyReportRoutes);
-app.use('/api/profile',      authenticate, enforceLegalAcceptance, profileRoutes);
-app.use('/api/reviews',      authenticate, enforceLegalAcceptance, reviewRoutes);
+// ✅ PROTECTED ROUTES (With legal enforcement)
+// Note: enforceLegalAcceptance is applied AFTER authenticate middleware
+app.use('/api/users', authenticate, enforceLegalAcceptance, userRoutes);
+app.use('/api/events', authenticate, enforceLegalAcceptance, eventRoutes);
+app.use('/api/companions', authenticate, enforceLegalAcceptance, companionRoutes);
+app.use('/api/bookings', authenticate, enforceLegalAcceptance, bookingRoutes);
+app.use('/api/messages', authenticate, enforceLegalAcceptance, messageRoutes);
+app.use('/api/posts', authenticate, enforceLegalAcceptance, postRoutes);
+app.use('/api/spotlight', authenticate, enforceLegalAcceptance, spotlightRoutes);
+app.use('/api/safety', authenticate, enforceLegalAcceptance, safetyReportRoutes);
+app.use('/api/profile', authenticate, enforceLegalAcceptance, profileRoutes);
+app.use('/api/reviews', authenticate, enforceLegalAcceptance, reviewRoutes);
+app.use('/api/payment', authenticate, enforceLegalAcceptance, paymentRoutes);
+app.use('/api/random-booking', authenticate, enforceLegalAcceptance, require('./routes/randomBooking'));
 app.use('/api/verification', authenticate, enforceLegalAcceptance, require('./routes/verification'));
-
-// ✅ HIGH-RISK ROUTES — Terms & Privacy + Community Guidelines enforced
-// Users cannot book, chat, or transact without accepting Community Guidelines
-app.use('/api/companions',     authenticate, enforceLegalAcceptance, enforceCommunityAcceptance, companionRoutes);
-app.use('/api/bookings',       authenticate, enforceLegalAcceptance, enforceCommunityAcceptance, bookingRoutes);
-app.use('/api/messages',       authenticate, enforceLegalAcceptance, enforceCommunityAcceptance, messageRoutes);
-app.use('/api/payment',        authenticate, enforceLegalAcceptance, enforceCommunityAcceptance, paymentRoutes);
-app.use('/api/random-booking', authenticate, enforceLegalAcceptance, enforceCommunityAcceptance, require('./routes/randomBooking'));
 
 // ✅ ADMIN ROUTES (No legal enforcement needed for admins performing admin duties)
 app.use('/api/admin', authenticate, require('./routes/admin'));
+app.use('/api/moderation', authenticate, adminOnly, moderationRoutes);
 
-// ✅ CALL ROUTES — Terms & Privacy + Community Guidelines enforced
-app.use('/api/agora',      authenticate, enforceLegalAcceptance, enforceCommunityAcceptance, require('./routes/agora'));
-app.use('/api/voice-call', authenticate, enforceLegalAcceptance, enforceCommunityAcceptance, require('./routes/voice-call'));
+// ✅ CALL ROUTES (Legal enforcement applied)
+app.use('/api/agora', authenticate, enforceLegalAcceptance, require('./routes/agora'));
+app.use('/api/voice-call', authenticate, enforceLegalAcceptance, require('./routes/voice-call'));
 
 // Cron jobs
 require('./cronJobs');
@@ -557,8 +558,8 @@ server.listen(PORT, () => {
   console.log(`   - Typing indicators`);
   console.log(`   - Presence tracking (online/offline)`);
   console.log(`   - JWT authentication`);
-  console.log(`   - Private user rooms for verification events`);
   console.log(`✅ Legal compliance enforcement active`);
+  console.log(`✅ Auto-moderation system active (startup scan + 3AM IST daily cron)`);
 });
 
 // Graceful shutdown
