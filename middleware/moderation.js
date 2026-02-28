@@ -1,23 +1,28 @@
-// middleware/moderation.js  v2
+// middleware/moderation.js  v3
 // ─────────────────────────────────────────────────────────────────────────────
-// TIERED MODERATION ENGINE
-// Used by: routes/users.js  routes/profile.js  routes/messages.js
+// HUMRAH MODERATION ENGINE — Production-Ready 5-Level System
 //
-// TIER SYSTEM:
-//   LEVEL 0 – Auto-Clean   → strip silently, no strike, warn user in response
-//   LEVEL 1 – Soft Block   → reject + warn, NO strike
-//   LEVEL 2 – Moderate     → reject + 1 strike, temp restriction at 2 strikes
-//   LEVEL 3 – Severe       → reject + 1 strike + immediate 7-day suspension
+// LEVEL 0 — Clean          → Save normally, no logging
+// LEVEL 1 — Minor Soft     → Warn, allow/soft-block, NO strike; 3 repeats = 1 strike
+// LEVEL 2 — Policy         → Block + strike + escalating cooldowns/suspensions
+// LEVEL 3 — Harassment     → Block + direct suspension, escalating
+// LEVEL 4 — Zero Tolerance → Immediate 7-day; confirmed severe = permanent ban
 //
-// STRIKE ESCALATION:
-//   1 strike  → Warning
-//   2 strikes → 24-hour chat restriction
-//   3 strikes → 7-day account suspension
-//   4 strikes → Permanent ban
+// STRIKE SYSTEM:
+//   Strikes expire after 90 days of clean behavior (full reset)
+//   Per-category offense counters drive escalation independently:
+//     L2 offenses: 1st → 24h edit lock | 2nd → 3d suspend | 3rd → 7d suspend | 5 total → ban
+//     L3 offenses: 1st → 3d suspend    | 2nd → 7d suspend  | 3rd → ban
+//     L4 offenses: 1st → 7d suspend    | confirmed severe  → permanent ban
 //
-// EXPIRY:
-//   Strikes expire individually after 30 days
-//   All strikes fully reset after 90 days clean activity
+// COOLDOWN LOCKS (fit punishment to violation):
+//   profile_edit  — cannot edit bio/profile fields
+//   chat          — cannot send messages
+//   companion     — companion mode suspended
+//   earnings      — payouts frozen
+//
+// USER MESSAGES: Professional. Neutral. Firm.
+//   Never: "You are toxic."  Always: "Your content violates our community guidelines."
 // ─────────────────────────────────────────────────────────────────────────────
 
 'use strict';
@@ -30,64 +35,71 @@ const axios = require('axios');
 
 const MODERATED_TEXT_FIELDS = ['bio', 'goodMeetupMeaning', 'vibeQuote'];
 const MIN_LENGTH_FOR_AI     = 15;
+const CLEAN_RESET_DAYS      = 90;
+const CLEAN_RESET_MS        = CLEAN_RESET_DAYS * 24 * 60 * 60 * 1000;
 
 const LEVEL = Object.freeze({
-  AUTO_CLEAN : 0,
-  SOFT       : 1,
-  MODERATE   : 2,
-  SEVERE     : 3,
+  CLEAN     : 0,
+  SOFT      : 1,
+  POLICY    : 2,
+  HARASSMENT: 3,
+  ZERO_TOL  : 4,
 });
 
-// Strike count → enforcement rule
-const STRIKE_RULES = Object.freeze({
-  1: { action: 'warning',  duration: null, message: 'This is a warning. Further violations may restrict your account.' },
-  2: { action: 'restrict', duration: 24,   message: 'Your chat access has been restricted for 24 hours.' },
-  3: { action: 'suspend',  duration: 168,  message: 'Your account has been suspended for 7 days.' },
-  4: { action: 'ban',      duration: null, message: 'Your account has been permanently banned.' },
+// ── L2 Policy escalation by offense count ─────────────────────────────────────
+const L2_ESCALATION = Object.freeze({
+  1: { action: 'cooldown', restrictions: ['profile_edit'],                                       durationHours: 24,   message: 'Your profile editing has been locked for 24 hours due to a policy violation.' },
+  2: { action: 'suspend',  restrictions: ['chat', 'profile_edit', 'companion'],                  durationHours: 72,   message: 'Your account has been suspended for 3 days due to a repeat policy violation.' },
+  3: { action: 'suspend',  restrictions: ['chat', 'profile_edit', 'companion', 'earnings'],      durationHours: 168,  message: 'Your account has been suspended for 7 days due to repeated policy violations.' },
 });
 
-const STRIKE_EXPIRY_DAYS = 30;
-const CLEAN_RESET_DAYS   = 90;
+// ── L3 Harassment escalation by offense count ─────────────────────────────────
+const L3_ESCALATION = Object.freeze({
+  1: { action: 'suspend',  restrictions: ['chat', 'profile_edit'],                               durationHours: 72,   message: 'Your account has been suspended for 3 days due to a harassment violation.' },
+  2: { action: 'suspend',  restrictions: ['chat', 'profile_edit', 'companion', 'earnings'],      durationHours: 168,  message: 'Your account has been suspended for 7 days due to repeated harassment.' },
+  3: { action: 'ban',      restrictions: [],                                                      durationHours: null, message: 'Your account has been permanently banned due to repeated harassment violations.' },
+});
 
-// OpenAI category → violation level
+// ── L4 Zero Tolerance — always immediate ──────────────────────────────────────
+const L4_IMMEDIATE = Object.freeze({
+  initial:   { action: 'suspend', restrictions: ['chat', 'profile_edit', 'companion', 'earnings'], durationHours: 168,  message: 'Your account has been suspended for 7 days. This content violates our zero-tolerance policy.' },
+  confirmed: { action: 'ban',     restrictions: [],                                                 durationHours: null, message: 'Your account has been permanently banned for a severe zero-tolerance violation.' },
+});
+
+// ── OpenAI category → violation level ─────────────────────────────────────────
 const AI_CATEGORY_LEVEL = {
-  'sexual/minors':          LEVEL.SEVERE,
-  'hate/threatening':       LEVEL.SEVERE,
-  'harassment/threatening': LEVEL.SEVERE,
-  'self-harm/intent':       LEVEL.SEVERE,
-  'self-harm/instructions': LEVEL.SEVERE,
-  'violence/graphic':       LEVEL.SEVERE,
-  'sexual':                 LEVEL.MODERATE,
-  'hate':                   LEVEL.MODERATE,
-  'harassment':             LEVEL.MODERATE,
-  'self-harm':              LEVEL.MODERATE,
-  'violence':               LEVEL.MODERATE,
+  'sexual/minors':          LEVEL.ZERO_TOL,
+  'hate':                   LEVEL.ZERO_TOL,
+  'hate/threatening':       LEVEL.ZERO_TOL,
+  'violence/graphic':       LEVEL.ZERO_TOL,
+  'harassment/threatening': LEVEL.HARASSMENT,
+  'harassment':             LEVEL.HARASSMENT,
+  'self-harm/intent':       LEVEL.HARASSMENT,
+  'self-harm/instructions': LEVEL.HARASSMENT,
+  'sexual':                 LEVEL.POLICY,
+  'self-harm':              LEVEL.POLICY,
+  'violence':               LEVEL.POLICY,
 };
 
 const OPENAI_THRESHOLDS = {
-  'sexual':                  0.4,
+  'sexual':                  0.40,
   'sexual/minors':           0.01,
-  'harassment':              0.5,
-  'harassment/threatening':  0.3,
-  'hate':                    0.25,   // lowered: subtle hate often scores 0.2-0.35
-  'hate/threatening':        0.2,
-  'violence':                0.7,
-  'violence/graphic':        0.4,
-  'self-harm':               0.3,
-  'self-harm/intent':        0.1,
-  'self-harm/instructions':  0.1,
+  'harassment':              0.45,
+  'harassment/threatening':  0.25,
+  'hate':                    0.20,
+  'hate/threatening':        0.15,
+  'violence':                0.65,
+  'violence/graphic':        0.35,
+  'self-harm':               0.30,
+  'self-harm/intent':        0.10,
+  'self-harm/instructions':  0.10,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // LAYER 1 — TEXT NORMALIZATION
-// Collapses "w h a t s a p p", leet speak, unicode tricks before regex runs.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const LEET_MAP = {
-  '@':'a','4':'a','3':'e','1':'i','!':'i',
-  '0':'o','5':'s','$':'s','7':'t','+':'t',
-  '8':'b','6':'g','9':'g',
-};
+const LEET_MAP = { '@':'a','4':'a','3':'e','1':'i','!':'i','0':'o','5':'s','$':'s','7':'t','+':'t','8':'b','6':'g','9':'g' };
 
 function normalizeText(text) {
   let t = text.toLowerCase();
@@ -102,12 +114,11 @@ function normalizeText(text) {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // LAYER 2A — LEVEL 0: AUTO-CLEAN PATTERNS
-// Strip silently, save the cleaned version. No strike. Warn user.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const AUTO_CLEAN_PATTERNS = [
   /(?:(?:\+|00)?91[\s\-.]?)?[6-9]\d{9}/g,
-  /\b[6-9](?:[\s.\-]{1,3}\d){9}\b/g,
+  /\b[6-9]([\s.\-]{1,3}\d){9}\b/g,
   /\b(whatsapp|whats\s*app|watsapp|wa\.me|telegram|t\.me|instagram|insta|snapchat|snap)\b/gi,
   /\b(upi|paytm|gpay|google\s*pay|phonepe|bhim|@okaxis|@oksbi|@ybl|@paytm)\b/gi,
   /[₹$€£]\s*\d+/g,
@@ -126,130 +137,134 @@ function autoCleanText(text) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// LAYER 2B — LEVEL 1: SOFT BLOCK PATTERNS
-// Reject + warn. NO strike. Not severe enough to count against user.
+// LAYER 2B — LEVEL 1: SOFT / MINOR PATTERNS
+// Mild rudeness, borderline tone, light non-targeted profanity.
+// No immediate strike. 3 soft offenses = 1 strike (tracked in DB).
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const SOFT_BLOCK_PATTERNS = [
-  /\b(hot\s*guy|hot\s*girl|sexy\s*(?:time|fun|vibes?)|flirt(y|ing)?)\b/i,
-  /\b(looking\s*for\s*(fun|timepass|tp|good\s*time))\b/i,
+const SOFT_PATTERNS = [
+  /\b(no\s+idiots?|don'?t\s+be\s+boring|boring\s+people\s+stay\s+away)\b/i,
+  /\b(losers?\s+(not\s+welcome|stay\s+away)|only\s+serious\s+people)\b/i,
+  /\b(hot\s*guy|hot\s*girl|sexy\s*(?:time|fun|vibes?)|flirt(?:y|ing)?)\b/i,
+  /\b(looking\s*for\s*(?:fun|timepass|tp|good\s*time))\b/i,
   /\b(no\s*strings|casual\s*(?:meet|fun|hangout|relation))\b/i,
-  /\b(open\s*minded\s*(guy|girl|person|meet))\b/i,
+  /\b(open\s*minded\s*(?:guy|girl|person|meet))\b/i,
+  /\b(wtf|damn|crap|bloody\s+hell|shut\s+up)\b/i,
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// LAYER 2B-HATE — LEVEL 2: HATE SPEECH PATTERNS (regex-first, before OpenAI)
-// Catches explicit racial/religious/caste hatred that OpenAI often under-scores.
-// Scores around 0.2-0.35 on OpenAI hate — below the 0.4 threshold.
-// These patterns are unambiguous enough to hard-block at regex level.
+// LAYER 2C — LEVEL 2: POLICY VIOLATION PATTERNS
+// Solicitation, contact-sharing, booking/pricing.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const HATE_SPEECH_PATTERNS = [
-  // ── Racial hatred ──────────────────────────────────────────────────────────
+const POLICY_PATTERNS_ORIGINAL = [
+  /\b(call\s*me|text\s*me|dm\s*me|message\s*me|contact\s*me)\b/i,
+  /\b(reach\s*(?:me|out)|hit\s*me\s*up|ping\s*me|slide\s*in(?:to)?\s*(?:my|the))\b/i,
+  /\b(my\s*(?:number|no\.?|num|contact|handle|id)\s*(?:is|:))/i,
+  /\b(find\s*me\s*on|add\s*me\s*on|follow\s*me\s*on)\b/i,
+  /\b(hookup|hook\s*up|nsa|fwb|friends?\s*with\s*benefits)\b/i,
+  /\b(paid\s*(?:service|meet|session|companion|friend)|rate\s*card)\b/i,
+  /\b(sugar\s*(?:daddy|mama|baby)|adult\s*(?:service|fun|meet))\b/i,
+  /\b(available\s*for\s*(?:hire|booking)|book\s*me|hire\s*me|dm\s*me\s*for\s*rates?)\b/i,
+];
+
+const POLICY_PATTERNS_NORMALIZED = [
+  /whatsapp/, /telegram/, /instagram/, /snapchat/,
+  /[6-9]\d{9}/, /\b\d{10,}\b/,
+];
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LAYER 2D — LEVEL 3: HARASSMENT PATTERNS
+// Targeted threats, personal attacks, abuse toward a person.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const HARASSMENT_PATTERNS = [
+  /\b(i\s*will\s*(?:find|hurt|kill|destroy|ruin)\s*you)\b/i,
+  /\b(you'?re?\s*(?:worthless|pathetic|disgusting|a\s*loser|garbage|trash|scum))\b/i,
+  /\b(go\s*(?:kill\s*yourself|die|hang\s*yourself))\b/i,
+  /\b(i\s*know\s*where\s*you\s*(?:live|are|work))\b/i,
+  /\b(watch\s*your\s*back|you\s*(?:will|won'?t)\s*get\s*away)\b/i,
+  /\b(you\s*are\s*(?:a\s*)?(?:bitch|whore|slut|bastard|asshole|idiot|moron))\b/i,
+  /\b(nobody\s*(?:likes|loves|cares\s*about)\s*you)\b/i,
+];
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LAYER 2E — LEVEL 4: ZERO TOLERANCE PATTERNS
+// Hate speech / CSA / extremism / sexual exploitation / violence incitement.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const ZERO_TOL_PATTERNS = [
+  // Racial hate
   /\bhate\s+(black|white|brown|asian|african|arab|jewish|muslim|hindu|sikh|christian)\s+(people|person|men|women|girls|guys|community)\b/i,
   /\b(black|white|brown|asian|african|arab|jewish|muslim|hindu|sikh)\s+people\s+(are|r)\s+(not\s+welcome|not\s+allowed|disgusting|dirty|inferior|ugly|stupid|criminals?|terrorists?|filthy)\b/i,
   /\bno\s+(black|white|brown|asian|african|arab|jewish|muslim|hindu|sikh|dalit|lower\s*caste)\s+(people|person|allowed|welcome|here|pls|please)\b/i,
   /\bonly\s+(fair|light\s*skin|white|upper\s*caste|hindu|muslim)\s+(people|person|allowed|welcome|connect)\b/i,
   /\b(blacks?|whiteys?|brownies?)\s+(not\s+welcome|stay\s+away|don'?t\s+connect|please\s+don'?t)\b/i,
-
-  // ── Caste discrimination (India-specific) ──────────────────────────────────
+  /\balways\s+(be\s+)?happy\s+with\s+(white|fair|light)\b/i,
+  /\bno\s+(minorities|untouchables?|refugees?|foreigners?|outsiders?)\b/i,
+  // Caste discrimination
   /\b(upper|lower)\s+caste\s+(only|not\s+welcome|stay\s+away|preferred|not\s+allowed)\b/i,
   /\b(brahmin|kshatriya|vaishya|shudra|dalit|obc|sc|st)\s+(only|not\s+welcome|not\s+allowed|stay\s+away)\b/i,
   /\bno\s+(dalit|sc|st|obc|lower\s*caste)\b/i,
   /\bcasteist\b/i,
-
-  // ── Religious hatred ───────────────────────────────────────────────────────
+  // Religious hate
   /\bhate\s+(muslim|hindu|christian|sikh|jewish|buddhist|jain|parsi)s?\b/i,
-  /\b(muslims?|hindus?|christians?|sikhs?|jews?)\s+(not\s+welcome|not\s+allowed|stay\s+away|are\s+(terrorists?|criminals?|evil|bad\s+people))\b/i,
-
-  // ── Skin tone discrimination ───────────────────────────────────────────────
+  /\b(muslims?|hindus?|christians?|sikhs?|jews?)\s+(not\s+welcome|not\s+allowed|stay\s+away|are\s+(?:terrorists?|criminals?|evil|bad\s+people))\b/i,
+  // Skin tone discrimination
   /\b(only|prefer|no)\s+(fair|dark|dusky|wheatish)\s+(skin|people|girls|guys|person)\b/i,
   /\b(dark\s*skin|black\s*skin)\s+(not\s+welcome|stay\s+away|not\s+my\s+type|disgusting)\b/i,
-  /\balways\s+(be\s+)?happy\s+with\s+(white|fair|light)\b/i,   // exactly what was in the screenshot
-
-  // ── Generic exclusion language ─────────────────────────────────────────────
-  /\b(connect\s+me\s+only|only\s+connect)\s+(if\s+you\s+are|if)\s+(fair|light|white|upper\s*caste|hindu|brahmin|non\s*muslim)\b/i,
-  /\bno\s+(minorities|untouchables?|refugees?|foreigners?|outsiders?)\b/i,
-];
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// LAYER 2C — LEVEL 2: MODERATE BLOCK PATTERNS
-// Reject + 1 strike. Solicitation, explicit contact-sharing.
-// ═══════════════════════════════════════════════════════════════════════════════
-
-const MODERATE_BLOCK_ORIGINAL = [
-  /\b(call\s*me|text\s*me|dm\s*me|message\s*me|contact\s*me)\b/i,
-  /\b(reach\s*(me|out)|hit\s*me\s*up|ping\s*me|slide\s*in(to)?\s*(my|the))\b/i,
-  /\b(my\s*(number|no\.?|num|contact|handle|id)\s*(?:is|:))/i,
-  /\b(find\s*me\s*on|add\s*me\s*on|follow\s*me\s*on)\b/i,
-  /\b(hookup|hook\s*up|nsa|fwb|friends?\s*with\s*benefits)\b/i,
-  /\b(paid\s*(service|meet|session|companion|friend)|rate\s*card)\b/i,
-  /\b(sugar\s*(daddy|mama|baby)|adult\s*(service|fun|meet))\b/i,
-  /\b(available\s*for\s*(hire|booking)|book\s*me|hire\s*me)\b/i,
-];
-
-const MODERATE_BLOCK_NORMALIZED = [
-  /whatsapp/, /telegram/, /instagram/, /snapchat/,
-  /[6-9]\d{9}/,
-  /\b\d{10,}\b/,
-];
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// LAYER 2D — LEVEL 3: SEVERE BLOCK PATTERNS
-// Reject + 1 strike + immediate 7-day suspension.
-// ═══════════════════════════════════════════════════════════════════════════════
-
-const SEVERE_BLOCK_ORIGINAL = [
+  // Sexual exploitation
   /\bfor\s*sex\b/i,
   /\bsex\s*(available|meet|chat|friend|partner|service|work)\b/i,
   /\bavailable\s*for\s*sex\b/i,
   /\b(playboy|play\s*boy|gigolo|call\s*girl|escort)\b/i,
   /\bone\s*night\s*stand\b/i,
-  /\b(kill\s*(my)?self|want\s*to\s*die|end\s*(my\s*)?life|commit\s*suicide)\b/i,
-  /\b(i\s*will\s*kill|i\s*will\s*hurt|i\s*will\s*find\s*you)\b/i,
-  /\b(rape|molestation|child\s*(sex|abuse|porn))\b/i,
+  // CSA
+  /\b(child\s*(?:sex|abuse|porn)|minor\s*(?:sex|exploit)|csa)\b/i,
+  /\b(rape|molestation)\b/i,
+  // Extremism / violence incitement
+  /\b(join\s*(?:this|our|the)\s*(?:jihad|extremist|terrorist|isis|al.?qaeda))\b/i,
+  /\b(let'?s\s*(?:hurt|attack|bomb|kill)\s*(?:them|those|the))\b/i,
+  /\b(kill\s*all\s*(?:muslims?|hindus?|christians?|jews?|blacks?|whites?))\b/i,
+  /\b(suicide\s*bomb|blow\s*up|mass\s*shooting)\b/i,
+  // Severe self-harm
+  /\b(kill\s*(?:my)?self|want\s*to\s*die|end\s*(?:my\s*)?life|commit\s*suicide)\b/i,
 ];
 
-const SEVERE_BLOCK_NORMALIZED = [
+const ZERO_TOL_NORMALIZED = [
   /playboy/, /gigolo/, /callgirl/, /escort/,
   /forsex/, /sexavailable/, /availableforsex/,
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// LAYER 3 — OPENAI MODERATION (single batched call)
+// OPENAI MODERATION LAYER
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function checkWithOpenAI(fieldTexts) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     if (process.env.NODE_ENV === 'production')
-      console.error('[MODERATION] ❌ OPENAI_API_KEY missing — AI layer disabled');
-    return { safe: true, flaggedCategories: [], maxLevel: LEVEL.AUTO_CLEAN };
+      console.error('[MODERATION] OPENAI_API_KEY missing — AI layer disabled');
+    return { safe: true, flaggedCategories: [], maxLevel: LEVEL.CLEAN };
   }
 
-  const input = Object.entries(fieldTexts)
-    .map(([f, t]) => `[${f}]: ${t}`)
-    .join('\n---\n');
+  const input = Object.entries(fieldTexts).map(([f, t]) => `[${f}]: ${t}`).join('\n---\n');
 
   try {
     const res = await axios.post(
       'https://api.openai.com/v1/moderations',
       { input },
-      {
-        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-        timeout: 6000,
-      }
+      { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 6000 }
     );
 
-    const result   = res.data.results[0];
-    const scores   = result.category_scores;
-    const flagged  = [];
-    let   maxLevel = LEVEL.AUTO_CLEAN;
+    const scores  = res.data.results[0].category_scores;
+    const flagged = [];
+    let maxLevel  = LEVEL.CLEAN;
 
     for (const [cat, threshold] of Object.entries(OPENAI_THRESHOLDS)) {
       if ((scores[cat] ?? 0) >= threshold) {
         flagged.push(cat);
-        const catLevel = AI_CATEGORY_LEVEL[cat] ?? LEVEL.MODERATE;
+        const catLevel = AI_CATEGORY_LEVEL[cat] ?? LEVEL.POLICY;
         if (catLevel > maxLevel) maxLevel = catLevel;
       }
     }
@@ -257,130 +272,148 @@ async function checkWithOpenAI(fieldTexts) {
 
   } catch (err) {
     const status = err.response?.status;
-    if (status === 401) console.error('[MODERATION] ❌ Invalid OPENAI_API_KEY');
-    else if (status === 429) console.warn('[MODERATION] ⚠️ OpenAI rate limit — skipping AI layer');
+    if (status === 401) console.error('[MODERATION] Invalid OPENAI_API_KEY');
+    else if (status === 429) console.warn('[MODERATION] OpenAI rate limit — skipping AI layer');
     else console.error('[MODERATION] OpenAI unavailable (fail-open):', err.message);
-    return { safe: true, flaggedCategories: [], maxLevel: LEVEL.AUTO_CLEAN };
+    return { safe: true, flaggedCategories: [], maxLevel: LEVEL.CLEAN };
   }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// REGEX CLASSIFIER — returns highest level found for a single text
+// REGEX CLASSIFIER
 // ═══════════════════════════════════════════════════════════════════════════════
 
 function classifyText(original, normalized) {
-  for (const p of SEVERE_BLOCK_ORIGINAL)    { if (p.test(original))   return { level: LEVEL.SEVERE,   reason: 'severe_content'   }; }
-  for (const p of SEVERE_BLOCK_NORMALIZED)   { if (p.test(normalized))  return { level: LEVEL.SEVERE,   reason: 'severe_bypass'    }; }
-  for (const p of HATE_SPEECH_PATTERNS)      { if (p.test(original))   return { level: LEVEL.SEVERE,   reason: 'hate_speech'      }; }
-  for (const p of MODERATE_BLOCK_ORIGINAL)   { if (p.test(original))   return { level: LEVEL.MODERATE,  reason: 'moderate_solicitation' }; }
-  for (const p of MODERATE_BLOCK_NORMALIZED) { if (p.test(normalized))  return { level: LEVEL.MODERATE,  reason: 'moderate_bypass'  }; }
-  for (const p of SOFT_BLOCK_PATTERNS)       { if (p.test(original))   return { level: LEVEL.SOFT,      reason: 'soft_suggestive'  }; }
-  return { level: LEVEL.AUTO_CLEAN, reason: null };
+  for (const p of ZERO_TOL_PATTERNS)         { if (p.test(original))   return { level: LEVEL.ZERO_TOL,   reason: 'zero_tolerance'        }; }
+  for (const p of ZERO_TOL_NORMALIZED)        { if (p.test(normalized))  return { level: LEVEL.ZERO_TOL,   reason: 'zero_tolerance_bypass' }; }
+  for (const p of HARASSMENT_PATTERNS)        { if (p.test(original))   return { level: LEVEL.HARASSMENT,  reason: 'targeted_harassment'   }; }
+  for (const p of POLICY_PATTERNS_ORIGINAL)   { if (p.test(original))   return { level: LEVEL.POLICY,      reason: 'policy_solicitation'   }; }
+  for (const p of POLICY_PATTERNS_NORMALIZED) { if (p.test(normalized))  return { level: LEVEL.POLICY,      reason: 'policy_bypass'         }; }
+  for (const p of SOFT_PATTERNS)              { if (p.test(original))   return { level: LEVEL.SOFT,        reason: 'minor_violation'       }; }
+  return { level: LEVEL.CLEAN, reason: null };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// USER-FACING MESSAGES
+// USER-FACING MESSAGES — Professional. Neutral. Firm.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 function getUserMessage(level, reason, aiCategories = []) {
   switch (level) {
-    case LEVEL.AUTO_CLEAN:
-      return 'Some contact information was automatically removed from your text.';
+    case LEVEL.CLEAN:
+      return 'Some contact information was automatically removed from your profile.';
+
     case LEVEL.SOFT:
-      return 'Please keep your content genuine and appropriate. Suggestive phrases are not allowed.';
-    case LEVEL.MODERATE:
-      if (reason?.includes('solicitation') || reason?.includes('bypass'))
-        return "Contact-sharing and solicitation patterns aren't allowed on Humrah.";
-      if (aiCategories.some(c => c.startsWith('harassment')))
-        return 'Harassment is not tolerated. Please keep interactions respectful.';
-      return 'This content violates our community guidelines.';
-    case LEVEL.SEVERE:
-      if (reason === 'hate_speech')
-        return 'Discriminatory content based on race, religion, caste, or skin colour is not allowed on Humrah.';
-      if (aiCategories.some(c => c.startsWith('sexual')))   return 'Sexual content is strictly not allowed on Humrah.';
-      if (aiCategories.some(c => c.startsWith('self-harm')))return "This content isn't allowed. Please reach out for support if you're struggling.";
-      if (aiCategories.some(c => c.startsWith('hate')))     return 'Hate speech is not tolerated on Humrah.';
-      return 'This content severely violates our community guidelines and has been flagged for review.';
+      return 'Your content has been flagged for inappropriate tone. Please keep your profile respectful and welcoming to all users.';
+
+    case LEVEL.POLICY:
+      if (aiCategories.some(c => c.startsWith('sexual')))
+        return 'Your content violates our community guidelines. Sexual content is not permitted on Humrah.';
+      return 'Your content violates our community guidelines. Please avoid contact-sharing or solicitation.';
+
+    case LEVEL.HARASSMENT:
+      if (aiCategories.some(c => c.startsWith('self-harm')))
+        return 'Your content violates our community guidelines. Content that may endanger wellbeing is not permitted.';
+      return 'Your content violates our community guidelines. Threatening or abusive content directed at others is not permitted.';
+
+    case LEVEL.ZERO_TOL:
+      if (aiCategories.some(c => c.includes('minors')))
+        return 'Your content violates our zero-tolerance policy regarding the safety of minors.';
+      if (aiCategories.some(c => c.startsWith('hate')))
+        return 'Your content violates our zero-tolerance policy. Hate speech is strictly prohibited on Humrah.';
+      return 'Your content violates our zero-tolerance policy. Discriminatory, exploitative, or extremist content is strictly prohibited on Humrah.';
+
     default:
-      return "This content doesn't meet our community guidelines.";
+      return 'Your content violates our community guidelines. Please review our policies before resubmitting.';
   }
 }
 
 function getAndroidCode(level) {
-  return (['AUTO_CLEAN', 'SOFT_BLOCK', 'MODERATE_BLOCK', 'SEVERE_BLOCK'])[level] || 'UNKNOWN';
+  return ([ 'AUTO_CLEAN', 'SOFT_BLOCK', 'POLICY_BLOCK', 'HARASSMENT_BLOCK', 'ZERO_TOL_BLOCK' ])[level] || 'UNKNOWN';
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// STRIKE ENGINE
+// OFFENSE COUNTER
+// Per-category counts — each level escalates independently.
+// Full reset after 90 days clean.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/**
- * Count active (non-expired) strikes.
- * Skips auto_clean and soft violations — they never count as strikes.
- * Returns 0 if user has been clean for CLEAN_RESET_DAYS.
- */
-function getActiveStrikeCount(moderationFlags) {
-  if (!moderationFlags) return 0;
+function getOffenseCounts(moderationFlags) {
+  if (!moderationFlags) return { total: 0, l2: 0, l3: 0, l4: 0, soft: 0 };
 
-  const now          = Date.now();
-  const expiryMs     = STRIKE_EXPIRY_DAYS * 24 * 60 * 60 * 1000;
-  const cleanResetMs = CLEAN_RESET_DAYS   * 24 * 60 * 60 * 1000;
+  const now = Date.now();
 
   if (moderationFlags.lastViolationAt) {
-    const sinceViolation = now - new Date(moderationFlags.lastViolationAt).getTime();
-    if (sinceViolation > cleanResetMs) return 0;  // full reset
+    const sinceLast = now - new Date(moderationFlags.lastViolationAt).getTime();
+    if (sinceLast > CLEAN_RESET_MS) return { total: 0, l2: 0, l3: 0, l4: 0, soft: 0 };
   }
 
-  return (moderationFlags.violations || []).filter(v => {
-    if (!v.level || v.level <= LEVEL.SOFT) return false;     // soft/clean = no strike
+  const counts = { total: 0, l2: 0, l3: 0, l4: 0, soft: 0 };
+  for (const v of (moderationFlags.violations || [])) {
     const age = now - new Date(v.detectedAt).getTime();
-    return age <= expiryMs;
-  }).length;
+    if (age > CLEAN_RESET_MS) continue;
+    if (v.level === LEVEL.SOFT)       counts.soft++;
+    if (v.level === LEVEL.POLICY)   { counts.l2++;  counts.total++; }
+    if (v.level === LEVEL.HARASSMENT){ counts.l3++;  counts.total++; }
+    if (v.level === LEVEL.ZERO_TOL) { counts.l4++;  counts.total++; }
+  }
+  return counts;
 }
 
-function resolveStrikeAction(newStrikeCount) {
-  const rule = STRIKE_RULES[Math.min(newStrikeCount, 4)];
-  if (!rule) return null;
-  return {
-    action:       rule.action,
-    suspendUntil: rule.duration ? new Date(Date.now() + rule.duration * 60 * 60 * 1000) : null,
-    message:      rule.message,
-  };
+// ═══════════════════════════════════════════════════════════════════════════════
+// ENFORCEMENT RESOLVER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function resolveEnforcement(violationLevel, { newL2Count, newL3Count, newL4Count, totalStrikes }) {
+  // 5+ total strikes across any category → permanent ban
+  if (totalStrikes >= 5) {
+    return { action: 'ban', restrictions: [], durationHours: null, message: 'Your account has been permanently banned due to repeated community guideline violations.' };
+  }
+
+  if (violationLevel === LEVEL.ZERO_TOL) {
+    return newL4Count >= 2 ? L4_IMMEDIATE.confirmed : L4_IMMEDIATE.initial;
+  }
+
+  if (violationLevel === LEVEL.HARASSMENT) {
+    return L3_ESCALATION[Math.min(newL3Count, 3)] || L3_ESCALATION[3];
+  }
+
+  if (violationLevel === LEVEL.POLICY) {
+    return L2_ESCALATION[Math.min(newL2Count, 3)] || L2_ESCALATION[3];
+  }
+
+  return null;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // PIPELINE: moderateQuestionnaire
-// Profile text fields: bio, goodMeetupMeaning, vibeQuote
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function moderateQuestionnaire(questionnaire) {
-  const errors           = [];      // fields to reject (shown to user)
-  const violations       = [];      // all issues for DB logging
-  const autoCleanedFields = [];     // fields where only auto-clean happened
-  const cleaned          = { ...questionnaire };
-  const textsForAI       = {};
-  let   maxLevel         = LEVEL.AUTO_CLEAN;
+  const errors            = [];
+  const violations        = [];
+  const autoCleanedFields = [];
+  const cleaned           = { ...questionnaire };
+  const textsForAI        = {};
+  let   maxLevel          = LEVEL.CLEAN;
 
   for (const field of MODERATED_TEXT_FIELDS) {
     const raw = questionnaire[field];
     if (!raw || typeof raw !== 'string') continue;
-    const trimmed = raw.trim();
+    const trimmed    = raw.trim();
     if (!trimmed) continue;
 
-    const normalized  = normalizeText(trimmed);
-    const { level: regexLevel, reason } = classifyText(trimmed, normalized);
+    const normalized           = normalizeText(trimmed);
+    const { level, reason }    = classifyText(trimmed, normalized);
 
-    if (regexLevel >= LEVEL.MODERATE) {
-      // Hard reject — wipe field, record violation
+    if (level >= LEVEL.POLICY) {
       cleaned[field] = '';
-      if (regexLevel > maxLevel) maxLevel = regexLevel;
-      violations.push({ field, level: regexLevel, reason, originalValue: trimmed });
-      errors.push({ field, code: getAndroidCode(regexLevel), level: regexLevel, message: getUserMessage(regexLevel, reason) });
+      if (level > maxLevel) maxLevel = level;
+      violations.push({ field, level, reason, originalValue: trimmed });
+      errors.push({ field, code: getAndroidCode(level), level, message: getUserMessage(level, reason) });
       continue;
     }
 
-    if (regexLevel === LEVEL.SOFT) {
-      // Soft reject — don't save, no strike, warn only
+    if (level === LEVEL.SOFT) {
       cleaned[field] = '';
       if (LEVEL.SOFT > maxLevel) maxLevel = LEVEL.SOFT;
       violations.push({ field, level: LEVEL.SOFT, reason, originalValue: trimmed });
@@ -388,21 +421,18 @@ async function moderateQuestionnaire(questionnaire) {
       continue;
     }
 
-    // Auto-clean pass
     const autoCleaned = autoCleanText(trimmed);
     if (autoCleaned !== trimmed) {
-      violations.push({ field, level: LEVEL.AUTO_CLEAN, reason: 'auto_cleaned', originalValue: trimmed, cleanedValue: autoCleaned });
+      violations.push({ field, level: LEVEL.CLEAN, reason: 'auto_cleaned', originalValue: trimmed, cleanedValue: autoCleaned });
       autoCleanedFields.push(field);
     }
     cleaned[field] = autoCleaned;
 
-    // Queue for AI if long enough and not already rejected
     if (normalizeText(autoCleaned).length >= MIN_LENGTH_FOR_AI) {
       textsForAI[field] = normalizeText(autoCleaned);
     }
   }
 
-  // Single batched OpenAI call for all surviving fields
   if (Object.keys(textsForAI).length > 0) {
     const ai = await checkWithOpenAI(textsForAI);
     if (!ai.safe) {
@@ -421,196 +451,201 @@ async function moderateQuestionnaire(questionnaire) {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // PIPELINE: moderateChatMessage
-// Used by message route. Returns result — route handles optimistic UI via socket.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function moderateChatMessage(messageText) {
   const empty = { allowed: true, cleanedText: '', level: -1, reason: null, autoCleanOnly: false, violations: [], userMessage: null };
   if (!messageText || typeof messageText !== 'string') return empty;
 
-  const trimmed     = messageText.trim();
-  const normalized  = normalizeText(trimmed);
-  const autoCleaned = autoCleanText(trimmed);
+  const trimmed           = messageText.trim();
+  const normalized        = normalizeText(trimmed);
+  const { level, reason } = classifyText(trimmed, normalized);
 
-  const { level: regexLevel, reason } = classifyText(trimmed, normalized);
-
-  // Hard reject (MODERATE or SEVERE)
-  if (regexLevel >= LEVEL.MODERATE) {
-    return {
-      allowed: false, cleanedText: '', level: regexLevel, reason,
-      autoCleanOnly: false,
-      violations: [{ level: regexLevel, reason, originalValue: trimmed }],
-      userMessage: getUserMessage(regexLevel, reason),
-    };
+  if (level >= LEVEL.POLICY) {
+    return { allowed: false, cleanedText: '', level, reason, autoCleanOnly: false,
+      violations: [{ level, reason, originalValue: trimmed }],
+      userMessage: getUserMessage(level, reason) };
   }
 
-  // Soft reject
-  if (regexLevel === LEVEL.SOFT) {
-    return {
-      allowed: false, cleanedText: '', level: LEVEL.SOFT, reason,
-      autoCleanOnly: false,
+  if (level === LEVEL.SOFT) {
+    return { allowed: false, cleanedText: '', level: LEVEL.SOFT, reason, autoCleanOnly: false,
       violations: [{ level: LEVEL.SOFT, reason, originalValue: trimmed }],
-      userMessage: getUserMessage(LEVEL.SOFT, reason),
-    };
+      userMessage: getUserMessage(LEVEL.SOFT, reason) };
   }
 
-  // AI check on auto-cleaned text
+  const autoCleaned  = autoCleanText(trimmed);
   const cleanedForAI = normalizeText(autoCleaned);
   if (cleanedForAI.length >= MIN_LENGTH_FOR_AI) {
     const ai = await checkWithOpenAI({ message: cleanedForAI });
     if (!ai.safe) {
-      return {
-        allowed: false, cleanedText: '', level: ai.maxLevel, reason: 'ai_flagged',
-        autoCleanOnly: false,
+      return { allowed: false, cleanedText: '', level: ai.maxLevel, reason: 'ai_flagged', autoCleanOnly: false,
         violations: [{ level: ai.maxLevel, reason: 'ai_flagged', categories: ai.flaggedCategories, originalValue: trimmed }],
-        userMessage: getUserMessage(ai.maxLevel, 'ai_flagged', ai.flaggedCategories),
-      };
+        userMessage: getUserMessage(ai.maxLevel, 'ai_flagged', ai.flaggedCategories) };
     }
   }
 
-  // Passed — return auto-cleaned text
   const wasModified = autoCleaned !== trimmed;
   return {
     allowed:       true,
     cleanedText:   autoCleaned,
-    level:         wasModified ? LEVEL.AUTO_CLEAN : -1,
+    level:         wasModified ? LEVEL.CLEAN : -1,
     reason:        wasModified ? 'auto_cleaned' : null,
     autoCleanOnly: wasModified,
-    violations:    wasModified ? [{ level: LEVEL.AUTO_CLEAN, reason: 'auto_cleaned', originalValue: trimmed, cleanedValue: autoCleaned }] : [],
-    userMessage:   wasModified ? getUserMessage(LEVEL.AUTO_CLEAN) : null,
+    violations:    wasModified ? [{ level: LEVEL.CLEAN, reason: 'auto_cleaned', originalValue: trimmed, cleanedValue: autoCleaned }] : [],
+    userMessage:   wasModified ? getUserMessage(LEVEL.CLEAN) : null,
   };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // STRIKE ENFORCER: applyStrikesAndEnforce
-// Call after any moderation pipeline. Mutates user, saves, returns action taken.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function applyStrikesAndEnforce(user, violations, route) {
-  if (!violations?.length) return { enforced: false, action: null, message: null, suspendUntil: null };
+  if (!violations?.length) return { enforced: false, action: null, message: null, suspendUntil: null, restrictions: [] };
 
-  if (!user.moderationFlags) user.moderationFlags = { isFlagged: false, strikeCount: 0, violations: [] };
+  if (!user.moderationFlags) {
+    user.moderationFlags = { isFlagged: false, strikeCount: 0, violations: [] };
+  }
 
-  // Log all violations to history
+  // Log all violations
   for (const v of violations) {
     user.moderationFlags.violations.push({
-      field:         v.field || 'message',
+      field:         v.field         || 'message',
       level:         v.level,
       reason:        v.reason,
       originalValue: v.originalValue ? v.originalValue.substring(0, 300) : '',
       cleanedValue:  v.cleanedValue  ? v.cleanedValue.substring(0, 300)  : '',
-      categories:    v.categories || [],
+      categories:    v.categories    || [],
       detectedAt:    new Date(),
-      route:         route || 'unknown',
+      route:         route           || 'unknown',
     });
   }
-  if (user.moderationFlags.violations.length > 100) {
-    user.moderationFlags.violations = user.moderationFlags.violations.slice(-100);
+  if (user.moderationFlags.violations.length > 200) {
+    user.moderationFlags.violations = user.moderationFlags.violations.slice(-200);
   }
+  user.moderationFlags.lastViolationAt = new Date();
 
-  const strikeViolations = violations.filter(v => v.level >= LEVEL.MODERATE);
   const softViolations   = violations.filter(v => v.level === LEVEL.SOFT);
+  const strikeViolations = violations.filter(v => v.level >= LEVEL.POLICY);
 
   let enforced     = false;
   let action       = null;
   let message      = null;
   let suspendUntil = null;
+  let restrictions = [];
 
-  if (strikeViolations.length > 0) {
-    const hasSevere      = strikeViolations.some(v => v.level === LEVEL.SEVERE);
-    const currentStrikes = getActiveStrikeCount(user.moderationFlags);
-    const newStrikeCount = currentStrikes + strikeViolations.length;
+  // ── SOFT only — no immediate strike, track repeat count ────────────────────
+  if (softViolations.length > 0 && strikeViolations.length === 0) {
+    const counts     = getOffenseCounts(user.moderationFlags);
+    const softCount  = counts.soft;
 
-    if (hasSevere && user.status === 'ACTIVE') {
-      // Severe = immediate 7-day suspension, bypass normal escalation
-      suspendUntil = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-      action = 'suspend'; message = STRIKE_RULES[3].message; enforced = true;
-      user.status = 'SUSPENDED';
+    user.moderationFlags.isFlagged = true;
+
+    if (softCount > 0 && softCount % 3 === 0) {
+      // Every 3 soft offenses → apply L2 offense #1 cooldown
+      const enf = L2_ESCALATION[1];
+      action       = enf.action;
+      message      = 'You have received multiple minor violations. Your profile editing has been locked for 24 hours.';
+      restrictions = enf.restrictions;
+      suspendUntil = new Date(Date.now() + enf.durationHours * 60 * 60 * 1000);
+      enforced     = true;
       user.suspensionInfo = {
-        isSuspended: true, suspensionReason: 'Severe content violation (auto-detected)',
-        suspendedAt: new Date(), suspendedUntil: suspendUntil,
-        restrictions: ['chat', 'booking', 'profile_edit'],
+        isSuspended:           false,
+        suspensionReason:      'Repeated minor violations (auto-detected)',
+        suspendedAt:           new Date(),
+        suspendedUntil:        suspendUntil,
+        restrictions,
+        chatRestrictedUntil:   null,
       };
-      console.log(`[MODERATION] 🚨 SEVERE — User ${user._id} auto-suspended 7 days`);
-
+      console.log(`[MODERATION] User ${user._id} — ${softCount} soft offenses → 24h profile_edit lock`);
     } else {
-      const enforcement = resolveStrikeAction(newStrikeCount);
-      if (enforcement) {
-        action = enforcement.action; message = enforcement.message; enforced = true;
+      action   = 'warning';
+      message  = getUserMessage(LEVEL.SOFT);
+      enforced = true;
+      console.log(`[MODERATION] User ${user._id} — soft warning (${softCount} total soft)`);
+    }
 
-        if (enforcement.action === 'restrict') {
-          // Chat-only restriction — account stays ACTIVE
-          suspendUntil = enforcement.suspendUntil;
-          if (!user.suspensionInfo) user.suspensionInfo = {};
-          user.suspensionInfo.restrictions          = ['chat'];
-          user.suspensionInfo.chatRestrictedUntil   = suspendUntil;
-          console.log(`[MODERATION] ⚠️ User ${user._id} chat-restricted 24h`);
+    user.moderationFlags.strikeCount = getOffenseCounts(user.moderationFlags).total;
+    user.markModified('moderationFlags');
+    await user.save();
+    return { enforced, action, message, suspendUntil, restrictions };
+  }
 
-        } else if (enforcement.action === 'suspend') {
-          suspendUntil = enforcement.suspendUntil;
-          user.status = 'SUSPENDED';
-          user.suspensionInfo = {
-            isSuspended: true, suspensionReason: 'Repeated violations (auto-detected)',
-            suspendedAt: new Date(), suspendedUntil: suspendUntil,
-            restrictions: ['chat', 'booking', 'profile_edit'],
-          };
-          console.log(`[MODERATION] 🔴 User ${user._id} suspended (strike ${newStrikeCount})`);
+  // ── POLICY / HARASSMENT / ZERO_TOL ────────────────────────────────────────
+  if (strikeViolations.length > 0) {
+    const counts           = getOffenseCounts(user.moderationFlags);
+    const maxViolationLevel = Math.max(...strikeViolations.map(v => v.level));
 
-        } else if (enforcement.action === 'ban') {
-          user.status = 'BANNED';
-          user.banInfo = { isBanned: true, banReason: 'Exceeded violation limit (auto-detected)', bannedAt: new Date(), isPermanent: true };
-          console.log(`[MODERATION] 🚫 User ${user._id} PERMANENTLY BANNED (strike ${newStrikeCount})`);
-        }
+    const enf = resolveEnforcement(maxViolationLevel, {
+      newL2Count:   counts.l2,
+      newL3Count:   counts.l3,
+      newL4Count:   counts.l4,
+      totalStrikes: counts.total,
+    });
+
+    if (enf) {
+      action       = enf.action;
+      message      = enf.message;
+      restrictions = enf.restrictions || [];
+      enforced     = true;
+
+      if (enf.action === 'ban') {
+        user.status  = 'BANNED';
+        user.banInfo = { isBanned: true, banReason: 'Repeated community guideline violations (auto-detected)', bannedAt: new Date(), isPermanent: true };
+        console.log(`[MODERATION] User ${user._id} PERMANENTLY BANNED (${counts.total} strikes, L${maxViolationLevel})`);
+
+      } else if (enf.action === 'suspend') {
+        suspendUntil = new Date(Date.now() + enf.durationHours * 60 * 60 * 1000);
+        user.status  = 'SUSPENDED';
+        user.suspensionInfo = {
+          isSuspended:     true,
+          suspensionReason: `Level ${maxViolationLevel} violation (auto-detected)`,
+          suspendedAt:     new Date(),
+          suspendedUntil:  suspendUntil,
+          restrictions,
+        };
+        const days = enf.durationHours / 24;
+        console.log(`[MODERATION] User ${user._id} suspended ${days}d (L${maxViolationLevel})`);
+
+      } else if (enf.action === 'cooldown') {
+        // Profile edit lock only — account remains ACTIVE
+        suspendUntil = new Date(Date.now() + enf.durationHours * 60 * 60 * 1000);
+        if (!user.suspensionInfo) user.suspensionInfo = {};
+        user.suspensionInfo.restrictions             = restrictions;
+        user.suspensionInfo.profileEditLockedUntil   = suspendUntil;
+        console.log(`[MODERATION] User ${user._id} profile_edit locked 24h (L2 offense #${counts.l2})`);
       }
     }
 
-    user.moderationFlags.isFlagged       = true;
-    user.moderationFlags.strikeCount     = newStrikeCount;
-    user.moderationFlags.lastViolationAt = new Date();
-
-  } else if (softViolations.length > 0) {
-    user.moderationFlags.isFlagged       = true;
-    user.moderationFlags.lastViolationAt = new Date();
-    action = 'warning'; message = getUserMessage(LEVEL.SOFT); enforced = true;
+    user.moderationFlags.isFlagged   = true;
+    user.moderationFlags.strikeCount = counts.total;
   }
 
   user.markModified('moderationFlags');
   await user.save();
-
-  return { enforced, action, message, suspendUntil };
+  return { enforced, action, message, suspendUntil, restrictions };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // RESPONSE BUILDERS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/**
- * 422 rejection response — Android reads errors[] and enforcement{}
- * Example Android handling:
- *   if (code == 422 && body.code == "MODERATION_FAILED") {
- *     body.errors.forEach { showErrorUnderField(it.field, it.message) }
- *     if (body.enforcement?.action == "suspend") showSuspendedDialog(body.enforcement.message)
- *   }
- */
 function buildModerationResponse(errors, enforcement, autoCleanWarnings = []) {
   return {
     success:  false,
     code:     'MODERATION_FAILED',
-    message:  'Some content violates our community guidelines.',
+    message:  'Your content violates our community guidelines.',
     errors,
-    enforcement: enforcement.enforced ? {
+    enforcement: enforcement?.enforced ? {
       action:       enforcement.action,
       message:      enforcement.message,
       suspendUntil: enforcement.suspendUntil?.toISOString() || null,
+      restrictions: enforcement.restrictions || [],
     } : null,
     autoCleanWarnings,
   };
 }
 
-/**
- * 200 success but with auto-clean warnings.
- * Android shows inline hint: "Some contact info was removed"
- */
 function buildAutoCleanSuccessResponse(autoCleanedFields) {
   return {
     success:  true,
@@ -630,7 +665,7 @@ module.exports = {
   moderateQuestionnaire,
   moderateChatMessage,
   applyStrikesAndEnforce,
-  getActiveStrikeCount,
+  getOffenseCounts,
   buildModerationResponse,
   buildAutoCleanSuccessResponse,
   LEVEL,
