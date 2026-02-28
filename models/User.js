@@ -102,6 +102,12 @@ requiresLegalReacceptance: {
   default: false
 },
 
+// ── Community Guidelines acceptance ──────────────────────────────────────────
+acceptedCommunityVersion: { type: String,  default: null },
+communityAcceptedAt:      { type: Date,    default: null },
+communityAcceptedDevice:  { type: String,  default: null },
+communityAcceptedIP:      { type: String,  default: null },  // ← was missing
+
 // Safety disclaimer acceptance log
 safetyDisclaimerAcceptances: [{
   acceptedAt: Date,
