@@ -69,8 +69,8 @@ const OPENAI_THRESHOLDS = {
   'sexual/minors':           0.01,
   'harassment':              0.5,
   'harassment/threatening':  0.3,
-  'hate':                    0.4,
-  'hate/threatening':        0.3,
+  'hate':                    0.25,   // lowered: subtle hate often scores 0.2-0.35
+  'hate/threatening':        0.2,
   'violence':                0.7,
   'violence/graphic':        0.4,
   'self-harm':               0.3,
@@ -135,6 +135,41 @@ const SOFT_BLOCK_PATTERNS = [
   /\b(looking\s*for\s*(fun|timepass|tp|good\s*time))\b/i,
   /\b(no\s*strings|casual\s*(?:meet|fun|hangout|relation))\b/i,
   /\b(open\s*minded\s*(guy|girl|person|meet))\b/i,
+];
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LAYER 2B-HATE — LEVEL 2: HATE SPEECH PATTERNS (regex-first, before OpenAI)
+// Catches explicit racial/religious/caste hatred that OpenAI often under-scores.
+// Scores around 0.2-0.35 on OpenAI hate — below the 0.4 threshold.
+// These patterns are unambiguous enough to hard-block at regex level.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const HATE_SPEECH_PATTERNS = [
+  // ── Racial hatred ──────────────────────────────────────────────────────────
+  /\bhate\s+(black|white|brown|asian|african|arab|jewish|muslim|hindu|sikh|christian)\s+(people|person|men|women|girls|guys|community)\b/i,
+  /\b(black|white|brown|asian|african|arab|jewish|muslim|hindu|sikh)\s+people\s+(are|r)\s+(not\s+welcome|not\s+allowed|disgusting|dirty|inferior|ugly|stupid|criminals?|terrorists?|filthy)\b/i,
+  /\bno\s+(black|white|brown|asian|african|arab|jewish|muslim|hindu|sikh|dalit|lower\s*caste)\s+(people|person|allowed|welcome|here|pls|please)\b/i,
+  /\bonly\s+(fair|light\s*skin|white|upper\s*caste|hindu|muslim)\s+(people|person|allowed|welcome|connect)\b/i,
+  /\b(blacks?|whiteys?|brownies?)\s+(not\s+welcome|stay\s+away|don'?t\s+connect|please\s+don'?t)\b/i,
+
+  // ── Caste discrimination (India-specific) ──────────────────────────────────
+  /\b(upper|lower)\s+caste\s+(only|not\s+welcome|stay\s+away|preferred|not\s+allowed)\b/i,
+  /\b(brahmin|kshatriya|vaishya|shudra|dalit|obc|sc|st)\s+(only|not\s+welcome|not\s+allowed|stay\s+away)\b/i,
+  /\bno\s+(dalit|sc|st|obc|lower\s*caste)\b/i,
+  /\bcasteist\b/i,
+
+  // ── Religious hatred ───────────────────────────────────────────────────────
+  /\bhate\s+(muslim|hindu|christian|sikh|jewish|buddhist|jain|parsi)s?\b/i,
+  /\b(muslims?|hindus?|christians?|sikhs?|jews?)\s+(not\s+welcome|not\s+allowed|stay\s+away|are\s+(terrorists?|criminals?|evil|bad\s+people))\b/i,
+
+  // ── Skin tone discrimination ───────────────────────────────────────────────
+  /\b(only|prefer|no)\s+(fair|dark|dusky|wheatish)\s+(skin|people|girls|guys|person)\b/i,
+  /\b(dark\s*skin|black\s*skin)\s+(not\s+welcome|stay\s+away|not\s+my\s+type|disgusting)\b/i,
+  /\balways\s+(be\s+)?happy\s+with\s+(white|fair|light)\b/i,   // exactly what was in the screenshot
+
+  // ── Generic exclusion language ─────────────────────────────────────────────
+  /\b(connect\s+me\s+only|only\s+connect)\s+(if\s+you\s+are|if)\s+(fair|light|white|upper\s*caste|hindu|brahmin|non\s*muslim)\b/i,
+  /\bno\s+(minorities|untouchables?|refugees?|foreigners?|outsiders?)\b/i,
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -234,11 +269,12 @@ async function checkWithOpenAI(fieldTexts) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 function classifyText(original, normalized) {
-  for (const p of SEVERE_BLOCK_ORIGINAL)   { if (p.test(original))   return { level: LEVEL.SEVERE,   reason: 'severe_content'  }; }
-  for (const p of SEVERE_BLOCK_NORMALIZED)  { if (p.test(normalized))  return { level: LEVEL.SEVERE,   reason: 'severe_bypass'   }; }
-  for (const p of MODERATE_BLOCK_ORIGINAL)  { if (p.test(original))   return { level: LEVEL.MODERATE,  reason: 'moderate_solicitation' }; }
-  for (const p of MODERATE_BLOCK_NORMALIZED){ if (p.test(normalized))  return { level: LEVEL.MODERATE,  reason: 'moderate_bypass' }; }
-  for (const p of SOFT_BLOCK_PATTERNS)      { if (p.test(original))   return { level: LEVEL.SOFT,      reason: 'soft_suggestive' }; }
+  for (const p of SEVERE_BLOCK_ORIGINAL)    { if (p.test(original))   return { level: LEVEL.SEVERE,   reason: 'severe_content'   }; }
+  for (const p of SEVERE_BLOCK_NORMALIZED)   { if (p.test(normalized))  return { level: LEVEL.SEVERE,   reason: 'severe_bypass'    }; }
+  for (const p of HATE_SPEECH_PATTERNS)      { if (p.test(original))   return { level: LEVEL.SEVERE,   reason: 'hate_speech'      }; }
+  for (const p of MODERATE_BLOCK_ORIGINAL)   { if (p.test(original))   return { level: LEVEL.MODERATE,  reason: 'moderate_solicitation' }; }
+  for (const p of MODERATE_BLOCK_NORMALIZED) { if (p.test(normalized))  return { level: LEVEL.MODERATE,  reason: 'moderate_bypass'  }; }
+  for (const p of SOFT_BLOCK_PATTERNS)       { if (p.test(original))   return { level: LEVEL.SOFT,      reason: 'soft_suggestive'  }; }
   return { level: LEVEL.AUTO_CLEAN, reason: null };
 }
 
@@ -259,6 +295,8 @@ function getUserMessage(level, reason, aiCategories = []) {
         return 'Harassment is not tolerated. Please keep interactions respectful.';
       return 'This content violates our community guidelines.';
     case LEVEL.SEVERE:
+      if (reason === 'hate_speech')
+        return 'Discriminatory content based on race, religion, caste, or skin colour is not allowed on Humrah.';
       if (aiCategories.some(c => c.startsWith('sexual')))   return 'Sexual content is strictly not allowed on Humrah.';
       if (aiCategories.some(c => c.startsWith('self-harm')))return "This content isn't allowed. Please reach out for support if you're struggling.";
       if (aiCategories.some(c => c.startsWith('hate')))     return 'Hate speech is not tolerated on Humrah.';
