@@ -1,4 +1,4 @@
-// routes/legal.js - UPDATED WITH COMMUNITY GUIDELINES ACCEPTANCE
+// routes/legal.js
 const express = require('express');
 const router = express.Router();
 const { authenticate } = require('../middleware/auth');
@@ -6,9 +6,21 @@ const LegalAcceptance = require('../models/LegalAcceptance');
 const LegalVersion = require('../models/LegalVersion');
 const User = require('../models/User');
 
+// ── IP resolution helper ──────────────────────────────────────────────────────
+// Cloudflare sets CF-Connecting-IP to the real client IP.
+// Fall back to X-Forwarded-For (Nginx/other proxies), then req.ip.
+function resolveClientIP(req) {
+  return (
+    req.headers['cf-connecting-ip'] ||
+    req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
+    req.ip ||
+    req.connection?.remoteAddress ||
+    'unknown'
+  );
+}
+
 // =============================================
 // GET /api/legal/versions
-// Get current Terms & Privacy versions — PUBLIC, no auth
 // =============================================
 router.get('/versions', async (req, res) => {
   try {
@@ -18,25 +30,14 @@ router.get('/versions', async (req, res) => {
     ]);
 
     if (!terms || !privacy) {
-      return res.status(500).json({
-        success: false,
-        message: 'Legal versions not configured'
-      });
+      return res.status(500).json({ success: false, message: 'Legal versions not configured' });
     }
 
     res.json({
       success: true,
       versions: {
-        terms: {
-          version: terms.currentVersion,
-          url: terms.url,
-          effectiveDate: terms.effectiveDate
-        },
-        privacy: {
-          version: privacy.currentVersion,
-          url: privacy.url,
-          effectiveDate: privacy.effectiveDate
-        }
+        terms:   { version: terms.currentVersion,   url: terms.url,   effectiveDate: terms.effectiveDate },
+        privacy: { version: privacy.currentVersion, url: privacy.url, effectiveDate: privacy.effectiveDate }
       }
     });
   } catch (error) {
@@ -47,20 +48,17 @@ router.get('/versions', async (req, res) => {
 
 // =============================================
 // GET /api/legal/community/version
-// Get current community guidelines version — PUBLIC, no auth
-// Android reads this on launch to know what version to send
 // =============================================
 router.get('/community/version', (req, res) => {
   res.json({
     success: true,
     version: process.env.COMMUNITY_GUIDELINES_VERSION || '1.0',
-    url: process.env.COMMUNITY_GUIDELINES_URL || 'https://humrah.in/community.html'
+    url:     process.env.COMMUNITY_GUIDELINES_URL     || 'https://humrah.in/community.html'
   });
 });
 
 // =============================================
 // POST /api/legal/accept
-// Record Terms & Privacy acceptance — requires auth
 // =============================================
 router.post('/accept', authenticate, async (req, res) => {
   try {
@@ -86,17 +84,11 @@ router.post('/accept', authenticate, async (req, res) => {
       return res.status(400).json({
         success: false,
         message: 'Version mismatch. Please refresh and accept current versions.',
-        currentVersions: {
-          terms: termsDoc.currentVersion,
-          privacy: privacyDoc.currentVersion
-        }
+        currentVersions: { terms: termsDoc.currentVersion, privacy: privacyDoc.currentVersion }
       });
     }
 
-    const ipAddress = req.headers['x-forwarded-for']?.split(',')[0].trim()
-      || req.ip
-      || req.connection.remoteAddress
-      || 'unknown';
+    const ipAddress = resolveClientIP(req);  // ← uses CF header
 
     const acceptance = new LegalAcceptance({
       userId: req.userId,
@@ -113,8 +105,8 @@ router.post('/accept', authenticate, async (req, res) => {
     await acceptance.save();
 
     await User.findByIdAndUpdate(req.userId, {
-      acceptedTermsVersion: termsVersion,
-      acceptedPrivacyVersion: privacyVersion,
+      acceptedTermsVersion:    termsVersion,
+      acceptedPrivacyVersion:  privacyVersion,
       lastLegalAcceptanceDate: new Date(),
       requiresLegalReacceptance: false
     });
@@ -123,8 +115,8 @@ router.post('/accept', authenticate, async (req, res) => {
       success: true,
       message: 'Legal acceptance recorded',
       acceptance: {
-        acceptedAt: acceptance.acceptedAt,
-        termsVersion: acceptance.termsVersion,
+        acceptedAt:     acceptance.acceptedAt,
+        termsVersion:   acceptance.termsVersion,
         privacyVersion: acceptance.privacyVersion
       }
     });
@@ -136,79 +128,57 @@ router.post('/accept', authenticate, async (req, res) => {
 
 // =============================================
 // POST /api/legal/community/accept
-// Record Community Guidelines acceptance — requires auth
-//
-// Body:  { version: "1.0", deviceFingerprint: "android_id_here" }
-// Steps:
-//   1. Validates JWT via authenticate middleware
-//   2. Validates submitted version matches COMMUNITY_GUIDELINES_VERSION env var
-//   3. Idempotent — returns 200 if user already accepted current version
-//   4. Writes acceptedCommunityVersion, communityAcceptedAt, IP, device to user doc
 // =============================================
 router.post('/community/accept', authenticate, async (req, res) => {
   try {
     const { version, deviceFingerprint } = req.body;
 
-    // ── Input validation ──────────────────────────────────────────────────
     if (!version || typeof version !== 'string' || !version.trim()) {
-      return res.status(400).json({
-        success: false,
-        message: 'version is required'
-      });
+      return res.status(400).json({ success: false, message: 'version is required' });
     }
-
     if (!deviceFingerprint || typeof deviceFingerprint !== 'string' || !deviceFingerprint.trim()) {
-      return res.status(400).json({
-        success: false,
-        message: 'deviceFingerprint is required'
-      });
+      return res.status(400).json({ success: false, message: 'deviceFingerprint is required' });
     }
 
-    // ── Version check against server config ───────────────────────────────
     const currentVersion = process.env.COMMUNITY_GUIDELINES_VERSION || '1.0';
-
     if (version !== currentVersion) {
       return res.status(409).json({
         success: false,
         message: 'Community Guidelines version mismatch. Please read and accept the current version.',
         code: 'COMMUNITY_VERSION_MISMATCH',
-        requiredVersion: currentVersion,
+        requiredVersion:  currentVersion,
         submittedVersion: version
       });
     }
 
-    // ── Load user ─────────────────────────────────────────────────────────
     const user = await User.findById(req.userId);
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
 
-    // ── Idempotency — already on current version ──────────────────────────
+    // Idempotent — already accepted current version
     if (user.acceptedCommunityVersion === currentVersion) {
       return res.json({
         success: true,
         message: 'Community guidelines already accepted at current version',
         acceptedCommunityVersion: user.acceptedCommunityVersion,
-        communityAcceptedAt: user.communityAcceptedAt
+        communityAcceptedAt:      user.communityAcceptedAt,
+        communityAcceptedIP:      user.communityAcceptedIP
       });
     }
 
-    // ── Capture real IP (supports proxies / Cloudflare / Nginx) ──────────
-    const ipAddress = req.headers['x-forwarded-for']?.split(',')[0].trim()
-      || req.ip
-      || req.connection.remoteAddress
-      || 'unknown';
+    const ipAddress = resolveClientIP(req);  // ← uses CF-Connecting-IP, the real IP
 
-    // ── Persist via model method ──────────────────────────────────────────
     await user.acceptCommunityGuidelines(version, ipAddress, deviceFingerprint);
 
-    console.log(`✅ Community guidelines v${version} accepted by user ${req.userId} from ${ipAddress}`);
+    console.log(`✅ Community guidelines v${version} accepted by ${req.userId} from ${ipAddress}`);
 
     res.json({
       success: true,
-      message: 'Community guidelines acceptance recorded',
+      message:                  'Community guidelines acceptance recorded',
       acceptedCommunityVersion: currentVersion,
-      communityAcceptedAt: user.communityAcceptedAt
+      communityAcceptedAt:      user.communityAcceptedAt,
+      communityAcceptedIP:      ipAddress
     });
 
   } catch (error) {
@@ -219,7 +189,6 @@ router.post('/community/accept', authenticate, async (req, res) => {
 
 // =============================================
 // POST /api/legal/log-safety-disclaimer
-// Log safety disclaimer for a booking — requires auth
 // =============================================
 router.post('/log-safety-disclaimer', authenticate, async (req, res) => {
   try {
@@ -233,13 +202,9 @@ router.post('/log-safety-disclaimer', authenticate, async (req, res) => {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
 
-    const ipAddress = req.headers['x-forwarded-for']?.split(',')[0].trim()
-      || req.ip
-      || 'unknown';
-
-    await user.logSafetyDisclaimer(bookingId, ipAddress);
-
+    await user.logSafetyDisclaimer(bookingId, resolveClientIP(req));
     res.json({ success: true, message: 'Safety disclaimer logged' });
+
   } catch (error) {
     console.error('[POST /api/legal/log-safety-disclaimer]', error);
     res.status(500).json({ success: false, message: 'Failed to log safety disclaimer' });
@@ -248,7 +213,6 @@ router.post('/log-safety-disclaimer', authenticate, async (req, res) => {
 
 // =============================================
 // POST /api/legal/log-video-consent
-// Log video verification consent — requires auth
 // =============================================
 router.post('/log-video-consent', authenticate, async (req, res) => {
   try {
@@ -262,13 +226,9 @@ router.post('/log-video-consent', authenticate, async (req, res) => {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
 
-    const ipAddress = req.headers['x-forwarded-for']?.split(',')[0].trim()
-      || req.ip
-      || 'unknown';
-
-    await user.logVideoConsent(sessionId, ipAddress);
-
+    await user.logVideoConsent(sessionId, resolveClientIP(req));
     res.json({ success: true, message: 'Video consent logged' });
+
   } catch (error) {
     console.error('[POST /api/legal/log-video-consent]', error);
     res.status(500).json({ success: false, message: 'Failed to log video consent' });
@@ -277,7 +237,6 @@ router.post('/log-video-consent', authenticate, async (req, res) => {
 
 // =============================================
 // POST /api/legal/request-deletion
-// GDPR — request account & data deletion — requires auth
 // =============================================
 router.post('/request-deletion', authenticate, async (req, res) => {
   try {
@@ -292,8 +251,6 @@ router.post('/request-deletion', authenticate, async (req, res) => {
 
     const deletionDate = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
-    // TODO: Queue a deletion job and send email confirmation
-
     res.json({
       success: true,
       message: 'Deletion request received. Your data will be permanently deleted within 30 days as required by GDPR.',
@@ -307,7 +264,6 @@ router.post('/request-deletion', authenticate, async (req, res) => {
 
 // =============================================
 // GET /api/legal/my-acceptances
-// User's Terms & Privacy acceptance history — requires auth
 // =============================================
 router.get('/my-acceptances', authenticate, async (req, res) => {
   try {
@@ -318,11 +274,11 @@ router.get('/my-acceptances', authenticate, async (req, res) => {
     res.json({
       success: true,
       acceptances: acceptances.map(a => ({
-        documentType: a.documentType,
-        termsVersion: a.termsVersion,
+        documentType:   a.documentType,
+        termsVersion:   a.termsVersion,
         privacyVersion: a.privacyVersion,
-        acceptedAt: a.acceptedAt,
-        platform: a.platform
+        acceptedAt:     a.acceptedAt,
+        platform:       a.platform
       }))
     });
   } catch (error) {
