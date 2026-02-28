@@ -621,6 +621,19 @@ userSchema.methods.hasAcceptedCurrentLegal = async function() {
 };
 
 /**
+ * Record community guidelines acceptance.
+ * Called by POST /api/legal/community/accept in routes/legal.js.
+ * Saves version, timestamp, IP address, and device fingerprint atomically.
+ */
+userSchema.methods.acceptCommunityGuidelines = async function(version, ipAddress, deviceFingerprint) {
+  this.acceptedCommunityVersion = version;
+  this.communityAcceptedAt      = new Date();
+  this.communityAcceptedIP      = ipAddress     || null;
+  this.communityAcceptedDevice  = deviceFingerprint || null;
+  return this.save();
+};
+
+/**
  * Log safety disclaimer acceptance
  */
 userSchema.methods.logSafetyDisclaimer = function(bookingId, ipAddress) {
