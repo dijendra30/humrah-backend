@@ -265,6 +265,33 @@ deletionRequestedAt: {
     lastAgeGroupUpdate: { type: Date, default: null },
     totalEdits: { type: Number, default: 0 }
   },
+  imageStrikeCount: {
+  type: Number,
+  default: 0,
+  min: 0,
+  max: 3
+},
+
+imagePostBlockedUntil: {
+  type: Date,
+  default: null   // null = not currently blocked
+},
+
+lastImageViolationAt: {
+  type: Date,
+  default: null
+},
+
+imageModerationLog: [
+  {
+    createdAt:     { type: Date, default: Date.now },
+    action:        { type: String },        // 'ALLOWED' | 'BLOCKED' | 'EXTREME_CONTENT'
+    blockReason:   { type: String },        // 'adult' | 'violence' | 'racy' | null
+    strikeCount:   { type: Number },
+    safeSearch:    { type: mongoose.Schema.Types.Mixed }, // raw Vision scores
+    imagePublicId: { type: String, default: null }
+  }
+],
 
   // =============================================
   // ✅ TIERED MODERATION FLAGS  v2
@@ -343,6 +370,12 @@ deletionRequestedAt: {
   updatedAt: { type: Date, default: Date.now }
   
 }, { timestamps: true });
+
+// Check if user is currently blocked from uploading images
+userSchema.methods.isImagePostBlocked = function () {
+  if (!this.imagePostBlockedUntil) return false;
+  return new Date() < new Date(this.imagePostBlockedUntil);
+};
 
 // =============================================
 // ✅ INDEXES FOR PERFORMANCE
@@ -682,3 +715,4 @@ userSchema.methods.addModerationStrike = async function(violations, route) {
 };
 
 module.exports = mongoose.model('User', userSchema);
+
