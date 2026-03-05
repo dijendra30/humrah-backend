@@ -180,45 +180,43 @@ randomBookingChatSchema.methods.deleteChat = async function() {
 randomBookingChatSchema.statics.createForBooking = async function(booking) {
   const existing = await this.findOne({ bookingId: booking._id });
   if (existing) return existing;
-  
-  // Create encryption key
+
   const EncryptionKey = mongoose.model('EncryptionKey');
   const keyId = crypto.randomBytes(32).toString('hex');
   const encryptionKey = crypto.randomBytes(32).toString('base64');
-  
+
+  // ✅ FIXED: use startTime instead of booking.date
+  const chatExpiresAt = new Date(booking.startTime.getTime() + 24 * 60 * 60 * 1000);
+
   await EncryptionKey.create({
     keyId,
     key: encryptionKey,
     createdFor: 'RANDOM_BOOKING',
-    expiresAt: new Date(booking.date.getTime() + 24 * 60 * 60 * 1000)
+    expiresAt: chatExpiresAt
   });
-  
-  // Create chat
+
   const chat = await this.create({
     bookingId: booking._id,
     participants: [
       { userId: booking.initiatorId, role: 'INITIATOR' },
-      { userId: booking.acceptedUserId, role: 'ACCEPTER' }
+      { userId: booking.acceptorId, role: 'ACCEPTER' }  // ✅ FIXED: acceptorId not acceptedUserId
     ],
     encryptionKeyId: keyId,
-    expiresAt: new Date(booking.date.getTime() + 24 * 60 * 60 * 1000)
+    expiresAt: chatExpiresAt  // ✅ FIXED: use startTime-based expiry
   });
-  
-  // ✅ FIXED: Create system message with initiator as sender
-  // System messages should come from one of the participants
+
   const Message = mongoose.model('Message');
   await Message.create({
     chatId: chat._id,
-    senderId: booking.initiatorId,  // ✅ Use initiator, not null
-    senderRole: 'USER',              // ✅ Use USER, not SYSTEM
+    senderId: booking.initiatorId,
+    senderRole: 'USER',
     content: '🎉 You\'re matched!\nYou can now chat and plan your meetup.\nThis conversation will disappear after today.',
     messageType: 'TEXT',
-    isSystemMessage: true            // ✅ Add this flag if your Message model supports it
+    isSystemMessage: true
   });
-  
+
   return chat;
 };
-
 randomBookingChatSchema.statics.findForUser = function(userId) {
   return this.find({
     'participants.userId': userId,
