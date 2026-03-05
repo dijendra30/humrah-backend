@@ -260,7 +260,7 @@ router.get('/eligible', auth, async (req, res) => {
     console.log('📋 GET ELIGIBLE BOOKINGS');
 
     const user = await User.findById(req.userId).select(
-      'last_known_lat last_known_lng isVerified'
+      'last_known_lat last_known_lng verified'
     );
 
     // Check if user has location
@@ -344,7 +344,7 @@ router.get('/nearby', auth, async (req, res) => {
       expiresAt: { $gt: new Date() },
       startTime: { $gte: new Date() }
     })
-    .populate('initiatorId', 'firstName lastName profilePhoto isVerified questionnaire')
+    .populate('initiatorId', 'firstName lastName profilePhoto verified questionnaire')
     .lean();
 
     console.log(`   Found ${allBookings.length} pending bookings`);
@@ -602,7 +602,7 @@ router.get('/chats', auth, async (req, res) => {
     })
     .populate({
       path: 'participants.userId',
-      select: 'firstName lastName profilePhoto isVerified'
+      select: 'firstName lastName profilePhoto verified'
     })
     .populate({
       path: 'bookingId',
@@ -847,7 +847,7 @@ router.get('/trial-status', auth, async (req, res) => {
     res.json({
       success: true,
       trialUsed: user.random_trial_used || false,
-      isVerified: user.verified || false,
+      verified: user.verified || false,
       canCreateBooking: user.verified && !user.random_trial_used
     });
   } catch (error) {
