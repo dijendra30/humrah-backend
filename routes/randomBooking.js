@@ -97,11 +97,11 @@ router.post('/create', auth, async (req, res) => {
     console.log('='.repeat(60));
 
     const user = await User.findById(req.userId).select(
-      'random_trial_used isVerified home_city questionnaire'
+      'random_trial_used verified home_city questionnaire'
     );
 
     // ✅ VALIDATION: User must be verified
-    if (!user.isVerified) {
+    if (!user.verified) {
       return res.status(403).json({
         success: false,
         message: 'Only verified users can create Random Meet requests. Please complete verification.'
@@ -409,10 +409,10 @@ router.post('/:bookingId/accept', auth, async (req, res) => {
       });
     }
 
-    const user = await User.findById(req.userId).select('isVerified');
+    const user = await User.findById(req.userId).select('verified');
 
     // ✅ VALIDATION: User must be verified
-    if (!user.isVerified) {
+    if (!user.verified) {
       return res.status(403).json({
         success: false,
         message: 'Only verified users can accept Random Meet requests'
@@ -842,13 +842,13 @@ router.post('/chats/:chatId/report', auth, async (req, res) => {
 // ==================== CHECK TRIAL STATUS ====================
 router.get('/trial-status', auth, async (req, res) => {
   try {
-    const user = await User.findById(req.userId).select('random_trial_used isVerified');
+    const user = await User.findById(req.userId).select('random_trial_used verified');
 
     res.json({
       success: true,
       trialUsed: user.random_trial_used || false,
-      isVerified: user.isVerified || false,
-      canCreateBooking: user.isVerified && !user.random_trial_used
+      isVerified: user.verified || false,
+      canCreateBooking: user.verified && !user.random_trial_used
     });
   } catch (error) {
     console.error('❌ Check trial status error:', error);
