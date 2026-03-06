@@ -148,14 +148,48 @@ router.post('/create', auth, async (req, res) => {
       });
     }
 
-    // ✅ VALIDATION: Time range (safe hours only)
-    const startHour = parseInt(startTime.split(':')[0]);
-    const endHour = parseInt(endTime.split(':')[0]);
-    
-    if (startHour < 10 || endHour > 19 || startHour >= endHour) {
+    // ✅ FIXED: Parse startTime - supports both full ISO string (new Android) and HH:mm (legacy)
+    let bookingStart;
+    if (startTime.includes('T')) {
+      // ✅ New Android sends IST-converted UTC ISO string e.g. "2026-03-06T12:30:00.000Z"
+      // This correctly represents 6:00 PM IST as UTC
+      bookingStart = new Date(startTime);
+    } else {
+      // Legacy: plain "HH:mm" string with no timezone — assume IST (+05:30)
+      const [startHourParsed, startMinute] = startTime.split(':').map(Number);
+      // Convert IST to UTC by subtracting 5 hours 30 minutes
+      const nowUTC = new Date();
+      bookingStart = new Date(Date.UTC(
+        nowUTC.getUTCFullYear(),
+        nowUTC.getUTCMonth(),
+        nowUTC.getUTCDate(),
+        startHourParsed - 5,
+        startMinute - 30,
+        0, 0
+      ));
+      // Handle minute underflow (e.g. 10:00 IST = 04:30 UTC)
+      if (startMinute < 30) {
+        bookingStart = new Date(Date.UTC(
+          nowUTC.getUTCFullYear(),
+          nowUTC.getUTCMonth(),
+          nowUTC.getUTCDate(),
+          startHourParsed - 6,
+          startMinute + 30,
+          0, 0
+        ));
+      }
+    }
+
+    // ✅ FIXED: Validate safe hours in IST
+    // Convert bookingStart (UTC) back to IST for hour validation
+    const bookingStartIST = new Date(bookingStart.getTime() + (5.5 * 60 * 60 * 1000));
+    const startHourIST = bookingStartIST.getUTCHours();
+    const startMinuteIST = bookingStartIST.getUTCMinutes();
+
+    if (startHourIST < 10 || startHourIST > 19 || (startHourIST === 19 && startMinuteIST > 30)) {
       return res.status(400).json({
         success: false,
-        message: 'Bookings only allowed between 10:00 AM and 7:30 PM'
+        message: 'Bookings only allowed between 10:00 AM and 7:30 PM IST'
       });
     }
 
@@ -172,12 +206,8 @@ router.post('/create', auth, async (req, res) => {
 
     console.log('✅ GPS validation passed');
 
-    // ✅ VALIDATION: Time must be today or near future
+    // ✅ VALIDATION: Time must be in the future
     const now = new Date();
-    const bookingStart = new Date();
-    const [startHourParsed, startMinute] = startTime.split(':').map(Number);
-    bookingStart.setHours(startHourParsed, startMinute, 0, 0);
-
     if (bookingStart < now) {
       return res.status(400).json({
         success: false,
@@ -215,6 +245,8 @@ router.post('/create', auth, async (req, res) => {
     console.log('✅ Booking created:', booking._id);
     console.log('   Status: PENDING');
     console.log('   Location: ', lat, lng);
+    console.log('   Start (UTC):', bookingStart.toISOString());
+    console.log('   Start (IST):', bookingStartIST.toISOString().replace('T', ' ').substring(0, 16), 'IST');
 
     // ✅ UPDATE: Mark trial as used
     user.random_trial_used = true;
@@ -253,6 +285,7 @@ router.post('/create', auth, async (req, res) => {
     });
   }
 });
+
 // ==================== GET ELIGIBLE BOOKINGS ====================
 router.get('/eligible', auth, async (req, res) => {
   try {
@@ -317,6 +350,7 @@ router.get('/eligible', auth, async (req, res) => {
     });
   }
 });
+
 // ==================== GET NEARBY BOOKINGS (GPS-BASED) ====================
 router.get('/nearby', auth, async (req, res) => {
   try {
