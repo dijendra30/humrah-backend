@@ -636,7 +636,8 @@ router.get('/chats', auth, async (req, res) => {
     })
     .populate({
       path: 'participants.userId',
-      select: 'firstName lastName profilePhoto verified'
+      // ✅ FIXED: Include questionnaire so profile sheet shows bio, interests, city etc.
+      select: 'firstName lastName profilePhoto verified questionnaire'
     })
     .populate({
       path: 'bookingId',
@@ -658,7 +659,13 @@ router.get('/chats', auth, async (req, res) => {
 router.get('/chats/:chatId/messages', auth, async (req, res) => {
   try {
     const chat = await RandomBookingChat.findById(req.params.chatId)
-      .populate('bookingId');
+      .populate('bookingId')
+      .populate({
+        path: 'participants.userId',
+        // ✅ FIXED: Include questionnaire so Android chat screen can show
+        // bio/interests/city/language in the profile sheet immediately
+        select: 'firstName lastName profilePhoto verified questionnaire'
+      });
     
     if (!chat) {
       return res.status(404).json({
