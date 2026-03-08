@@ -540,7 +540,7 @@ app.use('/api/voice-call', authenticate, enforceLegalAcceptance, require('./rout
 
 // ✅ GAMING SESSION ROUTES (auth + legal enforcement)
 app.use('/session', authenticate, enforceLegalAcceptance, gamingRoutes);
-app.use('/api/food', foodRoutes);
+app.use('/api/food', authenticate, enforceLegalAcceptance, foodRoutes);
 // Cron jobs
 require('./cronJobs');
 
