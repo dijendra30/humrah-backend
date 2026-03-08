@@ -42,9 +42,9 @@ async function checkAndExpire(session) {
 //  GET /gaming/sessions
 //  Fetch nearby active sessions (same city, created < 3h ago)
 // ─────────────────────────────────────────────────────────────
-router.get("/sessions", authMiddleware, async (req, res) => {
+router.get("/sessions", async (req, res) => {
   try {
-    const city     = req.query.city || req.user.city;
+    const city     = req.query.city || req.user.city || req.user.location || 'Unknown';
     const threeHAgo = new Date(Date.now() - THREE_HOURS_MS);
 
     const sessions = await GamingSession.find({
@@ -71,7 +71,7 @@ router.get("/sessions", authMiddleware, async (req, res) => {
 //  POST /gaming/sessions
 //  Create a new session (anti-spam: 1 per 2h)
 // ─────────────────────────────────────────────────────────────
-router.post("/sessions", authMiddleware, async (req, res) => {
+router.post("/sessions", async (req, res) => {
   try {
     const { gameType, customGameName, playersNeeded, startTime, optionalMessage, city } = req.body;
 
@@ -106,8 +106,8 @@ router.post("/sessions", authMiddleware, async (req, res) => {
 
     const session = await GamingSession.create({
       creatorId:      req.user._id,
-      creatorUsername: req.user.username,
-      city:           city || req.user.city,
+      creatorUsername: `${req.user.firstName || ''} ${req.user.lastName || ''}`.trim() || 'User',
+      city:           city || req.user.city || req.user.location || 'Unknown',
       gameType,
       customGameName: gameType === "OTHER" ? (customGameName || "").trim() : null,
       playersNeeded:  Number(playersNeeded),
@@ -130,7 +130,7 @@ router.post("/sessions", authMiddleware, async (req, res) => {
 //  ⚠️  MUST be registered before any /:id route or Express will
 //      match the literal string "can-create" as the :id param.
 // ─────────────────────────────────────────────────────────────
-router.get("/sessions/can-create", authMiddleware, async (req, res) => {
+router.get("/sessions/can-create", async (req, res) => {
   try {
     const recent = await GamingSession.findOne({
       creatorId: req.user._id,
@@ -152,7 +152,7 @@ router.get("/sessions/can-create", authMiddleware, async (req, res) => {
 // ─────────────────────────────────────────────────────────────
 //  POST /gaming/sessions/:id/join
 // ─────────────────────────────────────────────────────────────
-router.post("/sessions/:id/join", authMiddleware, async (req, res) => {
+router.post("/sessions/:id/join", async (req, res) => {
   try {
     const session = await GamingSession.findById(req.params.id);
     if (!session) return res.status(404).json({ error: "Session not found" });
@@ -187,7 +187,7 @@ router.post("/sessions/:id/join", authMiddleware, async (req, res) => {
 // ─────────────────────────────────────────────────────────────
 //  POST /gaming/sessions/:id/dismiss
 // ─────────────────────────────────────────────────────────────
-router.post("/sessions/:id/dismiss", authMiddleware, async (req, res) => {
+router.post("/sessions/:id/dismiss", async (req, res) => {
   try {
     await GamingSession.findByIdAndUpdate(req.params.id, {
       $addToSet: { dismissedBy: req.user._id }
@@ -202,7 +202,7 @@ router.post("/sessions/:id/dismiss", authMiddleware, async (req, res) => {
 //  GET /gaming/sessions/:id/chat
 //  Only session members (creator + joined) can fetch
 // ─────────────────────────────────────────────────────────────
-router.get("/sessions/:id/chat", authMiddleware, async (req, res) => {
+router.get("/sessions/:id/chat", async (req, res) => {
   try {
     const session = await GamingSession.findById(req.params.id);
     if (!session) return res.status(404).json({ error: "Session not found" });
@@ -241,7 +241,7 @@ router.get("/sessions/:id/chat", authMiddleware, async (req, res) => {
 // ─────────────────────────────────────────────────────────────
 //  POST /gaming/sessions/:id/chat
 // ─────────────────────────────────────────────────────────────
-router.post("/sessions/:id/chat", authMiddleware, async (req, res) => {
+router.post("/sessions/:id/chat", async (req, res) => {
   try {
     const session = await GamingSession.findById(req.params.id);
     if (!session) return res.status(404).json({ error: "Session not found" });
@@ -262,7 +262,7 @@ router.post("/sessions/:id/chat", authMiddleware, async (req, res) => {
 
     session.messages.push({
       senderId:       req.user._id,
-      senderUsername: req.user.username,
+      senderUsername: `${req.user.firstName || ''} ${req.user.lastName || ''}`.trim() || 'User',
       text,
     });
     await session.save();
