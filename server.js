@@ -509,7 +509,7 @@ const safetyReportRoutes = require('./routes/safetyReports');
 const profileRoutes = require('./routes/profile');
 const reviewRoutes = require('./routes/reviews');
 const paymentRoutes = require('./routes/payment');
-
+const foodRoutes = require('./routes/foodRoutes');
 // ✅ PUBLIC ROUTES (No legal enforcement)
 app.use('/api/auth', authRoutes);
 app.use('/api/legal', legalRoutes);
@@ -540,7 +540,7 @@ app.use('/api/voice-call', authenticate, enforceLegalAcceptance, require('./rout
 
 // ✅ GAMING SESSION ROUTES (auth + legal enforcement)
 app.use('/session', authenticate, enforceLegalAcceptance, gamingRoutes);
-
+app.use('/api/food', foodRoutes);
 // Cron jobs
 require('./cronJobs');
 
