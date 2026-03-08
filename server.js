@@ -459,6 +459,9 @@ const connectDB = async () => {
     await mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/humrah');
     console.log('✅ MongoDB Connected');
 
+    // ── Gaming session expiry cron (every 60s) ──
+    startExpiryJob(io);
+
     // ── Auto-moderation: clean existing dirty profiles on every deploy ──
     await runStartupCleanup();   // scans all users 5s after DB connect
     scheduleDailyCleanup();      // daily cron at 3:00 AM IST
@@ -478,6 +481,17 @@ const { authenticate, adminOnly } = require('./middleware/auth');
 const { enforceLegalAcceptance } = require('./middleware/enforceLegalAcceptance');
 const { runStartupCleanup, scheduleDailyCleanup } = require('./utils/autoModerationCleanup');
 const moderationRoutes = require('./routes/moderation');
+
+// =============================================
+// ✅ GAMING SESSION — IMPORTS
+// =============================================
+const gamingRoutes          = require('./routes/gamingRoutes');
+const { initSessionSocket } = require('./sockets/sessionSocket');
+const { startExpiryJob }    = require('./jobs/sessionExpiryJob');
+
+// Initialise the /gaming Socket.IO namespace for real-time session events
+// (must come BEFORE route registration, AFTER io is created)
+initSessionSocket(io);
 
 // =============================================
 // ✅ ROUTES WITH LEGAL ENFORCEMENT
@@ -524,6 +538,9 @@ app.use('/api/moderation', authenticate, adminOnly, moderationRoutes);
 app.use('/api/agora', authenticate, enforceLegalAcceptance, require('./routes/agora'));
 app.use('/api/voice-call', authenticate, enforceLegalAcceptance, require('./routes/voice-call'));
 
+// ✅ GAMING SESSION ROUTES (auth + legal enforcement)
+app.use('/session', authenticate, enforceLegalAcceptance, gamingRoutes);
+
 // Cron jobs
 require('./cronJobs');
 
@@ -534,7 +551,8 @@ app.get('/api/health', (req, res) => {
     message: 'Humrah API is running',
     socketConnections: io.engine.clientsCount,
     activeChats: chatUsers.size,
-    onlineUsers: Array.from(userPresence.values()).filter(u => u.status === 'ONLINE').length
+    onlineUsers: Array.from(userPresence.values()).filter(u => u.status === 'ONLINE').length,
+    gamingNamespaceClients: io.of('/gaming').sockets.size
   });
 });
 
@@ -560,6 +578,7 @@ server.listen(PORT, () => {
   console.log(`   - JWT authentication`);
   console.log(`✅ Legal compliance enforcement active`);
   console.log(`✅ Auto-moderation system active (startup scan + 3AM IST daily cron)`);
+  console.log(`✅ Gaming Sessions active (Socket.IO /gaming namespace + 60s expiry job)`);
 });
 
 // Graceful shutdown
