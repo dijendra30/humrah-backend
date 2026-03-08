@@ -8,10 +8,15 @@
 //  Assumes:  authMiddleware attaches req.user = { _id, username, city }
 // ─────────────────────────────────────────────────────────────
 
-const express        = require("express");
-const router         = express.Router();
-const GamingSession  = require("../models/gamingSession.model");
-const authMiddleware = require("../middleware/auth");   // your existing JWT middleware
+const express       = require("express");
+const router        = express.Router();
+const GamingSession = require("../models/GamingSession");                      // ✅ correct model path
+const { authenticate: authMiddleware } = require("../middleware/auth");         // ✅ destructure from Humrah auth.js
+const {
+  emitSessionCreated,
+  emitPlayerJoined,
+  emitSessionExpired,
+} = require("../sockets/sessionSocket");                                        // ✅ real-time socket helpers
 
 // ─── helpers ─────────────────────────────────────────────────
 
@@ -108,7 +113,35 @@ router.post("/sessions", authMiddleware, async (req, res) => {
       optionalMessage: optionalMessage?.trim() || null,
     });
 
+    // ✅ Real-time: broadcast new session to everyone in this city
+    const io = req.app.get("io");
+    if (io) emitSessionCreated(io, session.city, formatSession(session));
+
     res.status(201).json(formatSession(session));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  GET /gaming/sessions/can-create
+//  ⚠️  MUST be registered before any /:id route or Express will
+//      match the literal string "can-create" as the :id param.
+// ─────────────────────────────────────────────────────────────
+router.get("/sessions/can-create", authMiddleware, async (req, res) => {
+  try {
+    const recent = await GamingSession.findOne({
+      creatorId: req.user._id,
+      createdAt: { $gte: new Date(Date.now() - TWO_HOURS_MS) },
+    }).sort({ createdAt: -1 });
+
+    if (!recent) return res.json({ canCreate: true, nextAllowedAt: null });
+
+    const nextAllowedAt = new Date(recent.createdAt.getTime() + TWO_HOURS_MS);
+    if (Date.now() >= nextAllowedAt.getTime())
+      return res.json({ canCreate: true, nextAllowedAt: null });
+
+    res.json({ canCreate: false, nextAllowedAt: nextAllowedAt.toISOString() });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -139,6 +172,10 @@ router.post("/sessions/:id/join", authMiddleware, async (req, res) => {
     session.playersJoined.push(req.user._id);
     await session.save();
 
+    // ✅ Real-time: update player count for city feed + session room
+    const io = req.app.get("io");
+    if (io) emitPlayerJoined(io, session);
+
     res.json(formatSession(session));
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -154,28 +191,6 @@ router.post("/sessions/:id/dismiss", authMiddleware, async (req, res) => {
       $addToSet: { dismissedBy: req.user._id }
     });
     res.json({ ok: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─────────────────────────────────────────────────────────────
-//  GET /gaming/sessions/can-create
-// ─────────────────────────────────────────────────────────────
-router.get("/sessions/can-create", authMiddleware, async (req, res) => {
-  try {
-    const recent = await GamingSession.findOne({
-      creatorId: req.user._id,
-      createdAt: { $gte: new Date(Date.now() - TWO_HOURS_MS) },
-    }).sort({ createdAt: -1 });
-
-    if (!recent) return res.json({ canCreate: true, nextAllowedAt: null });
-
-    const nextAllowedAt = new Date(recent.createdAt.getTime() + TWO_HOURS_MS);
-    if (Date.now() >= nextAllowedAt.getTime())
-      return res.json({ canCreate: true, nextAllowedAt: null });
-
-    res.json({ canCreate: false, nextAllowedAt: nextAllowedAt.toISOString() });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
