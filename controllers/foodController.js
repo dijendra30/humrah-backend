@@ -1,205 +1,136 @@
 // controllers/foodController.js
-// HTTP handlers for Food Discovery Posts — thin layer over foodService.js
+const FoodPost   = require('../models/FoodPost');
+const { uploadBuffer } = require('../config/cloudinary');
+const { checkWeeklyLimit, sanitizeCaption, getFeedFoodCards, getNearbyFoodPosts, toggleLike, addComment, getComments } = require('../services/foodService');
 
-const foodService = require('../services/foodService');
-const { uploadBuffer } = require('../config/cloudinary'); // reuse existing Cloudinary config
-
-// ─────────────────────────────────────────────────────────────
-// POST /food/create
-// ─────────────────────────────────────────────────────────────
-/**
- * Create a new food discovery post.
- * Body (multipart/form-data):
- *   image       — required, food photo file
- *   caption     — optional, max 120 chars
- *   placeId     — required, Google Place ID
- *   placeName   — required
- *   latitude    — required
- *   longitude   — required
- *   priceRange  — optional, one of ₹ | ₹₹ | ₹₹₹
- *   city        — required (resolved client-side from Place details)
- */
-const createPost = async (req, res) => {
+// ─── POST /api/food/create ────────────────────────────────────
+exports.createPost = async (req, res) => {
   try {
-    const { caption, placeId, placeName, latitude, longitude, priceRange, city } = req.body;
+    const userId = req.userId;
 
-    // ── Validate required fields ──────────────────────────────
-    if (!placeId || !placeName || !latitude || !longitude || !city) {
-      return res.status(400).json({
-        success: false,
-        message: 'Place details are required (placeId, placeName, latitude, longitude, city)',
-      });
-    }
-
+    // ── 1. Image is required ──────────────────────────────────
     if (!req.file) {
-      return res.status(400).json({
+      return res.status(400).json({ success: false, message: 'Food photo is required' });
+    }
+
+    // ── 2. Weekly limit ───────────────────────────────────────
+    const limitReached = await checkWeeklyLimit(userId);
+    if (limitReached) {
+      return res.status(429).json({
         success: false,
-        message: 'A food photo is required',
+        message: 'You\'ve reached your 3 food discovery limit for this week. Try again next week! 🍜'
       });
     }
 
-    // ── Upload image to Cloudinary ────────────────────────────
-    const uploadResult = await uploadBuffer(req.file.buffer, {
-      folder:         'humrah/food_posts',
-      transformation: [{ width: 1080, height: 1080, crop: 'limit', quality: 'auto' }],
-    });
+    // ── 3. Upload to Cloudinary ───────────────────────────────
+    let imageUrl = '';
+    let imagePublicId = '';
 
-    // ── Delegate to service ───────────────────────────────────
-    const post = await foodService.createFoodPost({
-      userId:     req.userId,
-      imageUrl:   uploadResult.secure_url,
-      caption,
-      placeId,
-      placeName,
-      latitude:   parseFloat(latitude),
-      longitude:  parseFloat(longitude),
-      priceRange: priceRange || null,
-      city,
-    });
-
-    return res.status(201).json({
-      success: true,
-      message: 'Food discovery shared! 🍜',
-      post,
-    });
-  } catch (error) {
-    console.error('createPost error:', error);
-    return res.status(error.statusCode || 500).json({
-      success: false,
-      message: error.message || 'Failed to create food post',
-    });
-  }
-};
-
-// ─────────────────────────────────────────────────────────────
-// GET /food/nearby?city=delhi&page=1&limit=10
-// ─────────────────────────────────────────────────────────────
-/**
- * Return food posts within user's city, paginated, newest first.
- */
-const getNearby = async (req, res) => {
-  try {
-    const { city, page = 1, limit = 10 } = req.query;
-
-    if (!city) {
-      return res.status(400).json({ success: false, message: 'city query param is required' });
+    try {
+      const uploadResult = await uploadBuffer(req.file.buffer, 'humrah/food_posts');
+      imageUrl      = uploadResult.url      || '';
+      imagePublicId = uploadResult.publicId || '';
+    } catch (uploadErr) {
+      console.error('❌ Cloudinary upload failed:', uploadErr);
+      return res.status(500).json({ success: false, message: 'Image upload failed. Please try again.' });
     }
 
-    const result = await foodService.getNearbyFoodPosts({
-      city,
-      page: parseInt(page),
-      limit: Math.min(parseInt(limit), 20), // cap at 20
+    if (!imageUrl) {
+      return res.status(500).json({ success: false, message: 'Image upload returned no URL. Please try again.' });
+    }
+
+    // ── 4. Sanitize caption ───────────────────────────────────
+    const { caption, placeId, placeName, latitude, longitude, priceRange, city } = req.body;
+    const cleanCaption = sanitizeCaption(caption || '');
+
+    // ── 5. Create post ────────────────────────────────────────
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + 30);
+
+    const post = await FoodPost.create({
+      userId,
+      imageUrl,
+      imagePublicId,
+      caption:    cleanCaption,
+      placeId:    placeId    || '',
+      placeName:  placeName  || '',
+      latitude:   parseFloat(latitude)  || 0,
+      longitude:  parseFloat(longitude) || 0,
+      city:       (city || '').toLowerCase().trim(),
+      priceRange: priceRange || null,
+      expiresAt,
     });
 
-    return res.json({ success: true, ...result });
-  } catch (error) {
-    console.error('getNearby error:', error);
-    return res.status(500).json({ success: false, message: 'Failed to fetch nearby posts' });
+    await post.populate('userId', 'firstName lastName profilePhoto');
+
+    res.status(201).json({ success: true, message: 'Food discovery shared! 🍜', post });
+
+  } catch (err) {
+    console.error('createPost error:', err);
+    res.status(500).json({ success: false, message: err.message || 'Server error' });
   }
 };
 
-// ─────────────────────────────────────────────────────────────
-// GET /food/feed-cards?city=delhi
-// ─────────────────────────────────────────────────────────────
-/**
- * Returns exactly 3 fresh food cards for the horizontal feed section.
- * Used by the Android feed to inject the "Food discoveries near you" row.
- */
-const getFeedCards = async (req, res) => {
+// ─── GET /api/food/feed-cards ─────────────────────────────────
+exports.getFeedCards = async (req, res) => {
   try {
     const { city } = req.query;
-
-    if (!city) {
-      return res.status(400).json({ success: false, message: 'city query param is required' });
-    }
-
-    const posts = await foodService.getFeedFoodCards({
-      city,
-      requestingUserId: req.userId,
-    });
-
-    return res.json({ success: true, posts });
-  } catch (error) {
-    console.error('getFeedCards error:', error);
-    return res.status(500).json({ success: false, message: 'Failed to fetch feed cards' });
+    const posts = await getFeedFoodCards(city, req.userId);
+    res.json({ success: true, posts });
+  } catch (err) {
+    console.error('getFeedCards error:', err);
+    res.status(500).json({ success: false, message: err.message });
   }
 };
 
-// ─────────────────────────────────────────────────────────────
-// POST /food/like
-// ─────────────────────────────────────────────────────────────
-/**
- * Toggle like on a food post.
- * Body: { postId }
- */
-const likePost = async (req, res) => {
+// ─── GET /api/food/nearby ─────────────────────────────────────
+exports.getNearby = async (req, res) => {
+  try {
+    const { city, page = 1, limit = 20 } = req.query;
+    const posts = await getNearbyFoodPosts(city, req.userId, parseInt(page), parseInt(limit));
+    res.json({ success: true, posts });
+  } catch (err) {
+    console.error('getNearby error:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ─── POST /api/food/like ──────────────────────────────────────
+exports.likePost = async (req, res) => {
   try {
     const { postId } = req.body;
-
-    if (!postId) {
-      return res.status(400).json({ success: false, message: 'postId is required' });
-    }
-
-    const result = await foodService.toggleLike({ postId, userId: req.userId });
-
-    return res.json({ success: true, ...result });
-  } catch (error) {
-    console.error('likePost error:', error);
-    return res.status(error.statusCode || 500).json({
-      success: false,
-      message: error.message || 'Failed to like post',
-    });
+    const result = await toggleLike(postId, req.userId);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('likePost error:', err);
+    res.status(500).json({ success: false, message: err.message });
   }
 };
 
-// ─────────────────────────────────────────────────────────────
-// POST /food/comment
-// ─────────────────────────────────────────────────────────────
-/**
- * Add a comment to a food post.
- * Body: { postId, text }
- */
-const addComment = async (req, res) => {
+// ─── POST /api/food/comment ───────────────────────────────────
+exports.addComment = async (req, res) => {
   try {
     const { postId, text } = req.body;
-
-    if (!postId || !text) {
-      return res.status(400).json({ success: false, message: 'postId and text are required' });
+    if (!text?.trim()) {
+      return res.status(400).json({ success: false, message: 'Comment text is required' });
     }
-
-    const comment = await foodService.addComment({ postId, userId: req.userId, text });
-
-    return res.status(201).json({ success: true, comment });
-  } catch (error) {
-    console.error('addComment error:', error);
-    return res.status(error.statusCode || 500).json({
-      success: false,
-      message: error.message || 'Failed to add comment',
-    });
+    const comment = await addComment(postId, req.userId, text.trim());
+    res.status(201).json({ success: true, comment });
+  } catch (err) {
+    console.error('addComment error:', err);
+    res.status(500).json({ success: false, message: err.message });
   }
 };
 
-// ─────────────────────────────────────────────────────────────
-// GET /food/comments/:postId?page=1
-// ─────────────────────────────────────────────────────────────
-/**
- * Get paginated comments for a post.
- */
-const getComments = async (req, res) => {
+// ─── GET /api/food/comments/:postId ──────────────────────────
+exports.getComments = async (req, res) => {
   try {
     const { postId } = req.params;
-    const { page = 1 } = req.query;
-
-    const result = await foodService.getComments({ postId, page: parseInt(page) });
-
-    return res.json({ success: true, ...result });
-  } catch (error) {
-    console.error('getComments error:', error);
-    return res.status(error.statusCode || 500).json({
-      success: false,
-      message: error.message || 'Failed to fetch comments',
-    });
+    const { page = 1, limit = 20 } = req.query;
+    const result = await getComments(postId, parseInt(page), parseInt(limit));
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('getComments error:', err);
+    res.status(500).json({ success: false, message: err.message });
   }
 };
-
-module.exports = { createPost, getNearby, getFeedCards, likePost, addComment, getComments };
