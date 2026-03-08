@@ -78,9 +78,11 @@ router.post("/sessions", authMiddleware, async (req, res) => {
     // ── Validate startTime ────────────────────────────────────
     const start = new Date(startTime);
     const now   = new Date();
-    if (start <= now)
+    // ✅ 30-second buffer to absorb network latency & timezone edge cases
+    const bufferMs = 30 * 1000;
+    if (start < new Date(now.getTime() - bufferMs))
       return res.status(400).json({ error: "Start time must be in the future" });
-    if (start - now > THREE_HOURS_MS)
+    if (start - now > THREE_HOURS_MS + bufferMs)
       return res.status(400).json({ error: "Session must start within 3 hours" });
 
     // ── Validate OTHER custom name ────────────────────────────
