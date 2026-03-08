@@ -14,7 +14,21 @@
  *     socket = io(URL, { auth: { token: "Bearer <jwt>" } })
  */
 
-const { verifySocketToken } = require("../middleware/authMiddleware");
+const jwt = require("jsonwebtoken");
+
+// ✅ Inline token verifier — uses your existing JWT_SECRET, no separate authMiddleware file
+function verifySocketToken(token) {
+  if (!token) throw new Error("No token provided");
+  const decoded = jwt.verify(
+    token,
+    process.env.JWT_SECRET || "fallback_secret_change_in_production"
+  );
+  return {
+    _id:      decoded.userId || decoded._id,
+    username: decoded.username,
+    city:     decoded.city,
+  };
+}
 const sessionService         = require("../services/sessionService");
 const { getRemainingTime }   = require("../utils/timeUtils");
 
