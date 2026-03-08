@@ -1,13 +1,3 @@
-// ─────────────────────────────────────────────────────────────
-//  routes/gamingSession.routes.js   (Express)
-//
-//  Mount in app.js:
-//    const gamingRoutes = require("./routes/gamingSession.routes");
-//    app.use("/gaming", gamingRoutes);
-//
-//  Assumes:  authMiddleware attaches req.user = { _id, username, city }
-// ─────────────────────────────────────────────────────────────
-
 const express       = require("express");
 const router        = express.Router();
 const GamingSession = require("../models/GamingSession");                      // ✅ correct model path
