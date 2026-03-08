@@ -69,9 +69,20 @@ exports.createPost = async (req, res) => {
 exports.getFeedCards = async (req, res) => {
   try {
     const { city } = req.query;
+    const normalizedCity = (city || '').toLowerCase().trim();
+
     const filter = { isActive: true, expiresAt: { $gt: new Date() }, userId: { $ne: req.userId } };
-    if (city) filter.city = city.toLowerCase().trim();
-    const posts = await FoodPost.find(filter).sort({ createdAt: -1 }).limit(FEED_CARD_LIMIT).populate('userId', 'firstName lastName profilePhoto');
+
+    // Only apply city filter if a real city was provided (skip for "all" or empty)
+    if (normalizedCity && normalizedCity !== 'all') {
+      filter.city = normalizedCity;
+    }
+
+    const posts = await FoodPost.find(filter)
+      .sort({ createdAt: -1 })
+      .limit(FEED_CARD_LIMIT)
+      .populate('userId', 'firstName lastName profilePhoto');
+
     res.json({ success: true, posts });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
