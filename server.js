@@ -539,7 +539,7 @@ app.use('/api/agora', authenticate, enforceLegalAcceptance, require('./routes/ag
 app.use('/api/voice-call', authenticate, enforceLegalAcceptance, require('./routes/voice-call'));
 
 // ✅ GAMING SESSION ROUTES (auth + legal enforcement)
-app.use('/session', authenticate, enforceLegalAcceptance, gamingRoutes);
+app.use('/api/session', authenticate, enforceLegalAcceptance, gamingRoutes);
 app.use('/api/food', authenticate, enforceLegalAcceptance, foodRoutes);
 // Cron jobs
 require('./cronJobs');
