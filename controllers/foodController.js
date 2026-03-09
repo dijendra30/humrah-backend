@@ -71,7 +71,7 @@ exports.getFeedCards = async (req, res) => {
     const { city } = req.query;
     const normalizedCity = (city || '').toLowerCase().trim();
 
-    const filter = { isActive: true, expiresAt: { $gt: new Date() }, userId: { $ne: req.userId } };
+    const filter = { isActive: true, expiresAt: { $gt: new Date() } };
 
     // Only apply city filter if a real city was provided (skip for "all" or empty)
     if (normalizedCity && normalizedCity !== 'all') {
