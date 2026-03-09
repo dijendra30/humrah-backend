@@ -1,25 +1,20 @@
 const express       = require("express");
 const router        = express.Router();
-const GamingSession = require("../models/GamingSession");                      // ✅ correct model path
-const { authenticate: authMiddleware } = require("../middleware/auth");         // ✅ destructure from Humrah auth.js
+const GamingSession = require("../models/GamingSession");
 const {
   emitSessionCreated,
   emitPlayerJoined,
-  emitSessionExpired,
-} = require("../sockets/sessionSocket");                                        // ✅ real-time socket helpers
+} = require("../sockets/sessionSocket");
 
-// ─── helpers ─────────────────────────────────────────────────
-
-const THREE_HOURS_MS  = 3 * 60 * 60 * 1000;
-const FIVE_MIN_MS     = 5 * 60 * 1000;
-const ONE_HOUR_MS     = 60 * 60 * 1000;
-const TWO_HOURS_MS    = 2 * 60 * 60 * 1000;
+const THREE_HOURS_MS = 3 * 60 * 60 * 1000;
+const FIVE_MIN_MS    = 5 * 60 * 1000;
+const ONE_HOUR_MS    = 60 * 60 * 1000;
+const TWO_HOURS_MS   = 2 * 60 * 60 * 1000;
 
 function isSessionExpired(session) {
   return Date.now() > new Date(session.startTime).getTime() + FIVE_MIN_MS;
 }
 
-// Mark a session expired if needed and save
 async function checkAndExpire(session) {
   if (session.status !== "EXPIRED" && isSessionExpired(session)) {
     session.status = "EXPIRED";
@@ -29,22 +24,20 @@ async function checkAndExpire(session) {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  GET /gaming/sessions
-//  Fetch nearby active sessions (same city, created < 3h ago)
+//  GET /api/session/sessions
 // ─────────────────────────────────────────────────────────────
 router.get("/sessions", async (req, res) => {
   try {
-    const city     = req.query.city || req.user.city || req.user.location || 'Unknown';
+    const city     = req.query.city || req.user?.questionnaire?.city || 'Unknown';
     const threeHAgo = new Date(Date.now() - THREE_HOURS_MS);
 
     const sessions = await GamingSession.find({
       city,
-      status:    { $ne: "EXPIRED" },
+      status:    { $nin: ["EXPIRED", "CANCELLED"] },
       createdAt: { $gte: threeHAgo },
       dismissedBy: { $ne: req.user._id },
     }).sort({ startTime: 1 }).limit(20);
 
-    // Lazily expire stale sessions
     const live = [];
     for (const s of sessions) {
       await checkAndExpire(s);
@@ -53,23 +46,54 @@ router.get("/sessions", async (req, res) => {
 
     res.json(live);
   } catch (err) {
+    console.error("[gamingRoutes GET /sessions]", err);
     res.status(500).json({ error: err.message });
   }
 });
 
 // ─────────────────────────────────────────────────────────────
-//  POST /gaming/sessions
-//  Create a new session (anti-spam: 1 per 2h)
+//  GET /api/session/sessions/can-create   ← MUST be before /:id
+// ─────────────────────────────────────────────────────────────
+router.get("/sessions/can-create", async (req, res) => {
+  try {
+    const recent = await GamingSession.findOne({
+      creatorId: req.user._id,
+      status:    { $nin: ["EXPIRED", "CANCELLED"] },
+      createdAt: { $gte: new Date(Date.now() - TWO_HOURS_MS) },
+    }).sort({ createdAt: -1 });
+
+    if (!recent) return res.json({ canCreate: true, nextAllowedAt: null });
+
+    const nextAllowedAt = new Date(recent.createdAt.getTime() + TWO_HOURS_MS);
+    if (Date.now() >= nextAllowedAt.getTime())
+      return res.json({ canCreate: true, nextAllowedAt: null });
+
+    res.json({ canCreate: false, nextAllowedAt: nextAllowedAt.toISOString() });
+  } catch (err) {
+    console.error("[gamingRoutes GET /sessions/can-create]", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  POST /api/session/sessions
 // ─────────────────────────────────────────────────────────────
 router.post("/sessions", async (req, res) => {
   try {
     const { gameType, customGameName, playersNeeded, startTime, optionalMessage, city } = req.body;
 
+    // ── Validate required fields ──────────────────────────────
+    if (!gameType)    return res.status(400).json({ error: "gameType is required" });
+    if (!startTime)   return res.status(400).json({ error: "startTime is required" });
+    if (!playersNeeded) return res.status(400).json({ error: "playersNeeded is required" });
+
     // ── Validate startTime ────────────────────────────────────
     const start = new Date(startTime);
-    const now   = new Date();
-    // ✅ 30-second buffer to absorb network latency & timezone edge cases
-    const bufferMs = 30 * 1000;
+    if (isNaN(start.getTime()))
+      return res.status(400).json({ error: "startTime is not a valid date" });
+
+    const now      = new Date();
+    const bufferMs = 60 * 1000; // 60s buffer
     if (start < new Date(now.getTime() - bufferMs))
       return res.status(400).json({ error: "Start time must be in the future" });
     if (start - now > THREE_HOURS_MS + bufferMs)
@@ -83,64 +107,48 @@ router.post("/sessions", async (req, res) => {
     }
 
     // ── Anti-spam: 1 active session per user per 2h ───────────
+    // Only count sessions with a valid ACTIVE/STARTED status
     const existing = await GamingSession.findOne({
       creatorId: req.user._id,
-      status:    { $ne: "EXPIRED" },
-      createdAt: { $gte: new Date(Date.now() - TWO_HOURS_MS) },
+      status:    { $in: ["ACTIVE", "STARTED"] },  // ✅ only real active sessions
     });
-    if (existing)
+    if (existing) {
       return res.status(409).json({
         error: "You already have an active session",
         nextAllowedAt: new Date(existing.createdAt.getTime() + TWO_HOURS_MS).toISOString(),
       });
+    }
+
+    // ── Resolve city ──────────────────────────────────────────
+    // Priority: request body → questionnaire city → fallback
+    const sessionCity = (city || req.user?.questionnaire?.city || 'Unknown').trim();
 
     const session = await GamingSession.create({
-      creatorId:      req.user._id,
+      creatorId:       req.user._id,
       creatorUsername: `${req.user.firstName || ''} ${req.user.lastName || ''}`.trim() || 'User',
-      city:           city || req.user.city || req.user.location || 'Unknown',
-      gameType,
-      customGameName: gameType === "OTHER" ? (customGameName || "").trim() : null,
-      playersNeeded:  Number(playersNeeded),
-      startTime:      start,
+      city:            sessionCity,
+      gameType:        gameType.trim(),
+      customGameName:  gameType === "OTHER" ? (customGameName || "").trim() : null,
+      playersNeeded:   Number(playersNeeded),
+      startTime:       start,
       optionalMessage: optionalMessage?.trim() || null,
+      status:          "ACTIVE",
     });
 
-    // ✅ Real-time: broadcast new session to everyone in this city
+    console.log(`[gamingRoutes] Session created: ${session._id} by ${req.user._id} in ${sessionCity}`);
+
     const io = req.app.get("io");
     if (io) emitSessionCreated(io, session.city, formatSession(session));
 
     res.status(201).json(formatSession(session));
   } catch (err) {
+    console.error("[gamingRoutes POST /sessions]", err);
     res.status(500).json({ error: err.message });
   }
 });
 
 // ─────────────────────────────────────────────────────────────
-//  GET /gaming/sessions/can-create
-//  ⚠️  MUST be registered before any /:id route or Express will
-//      match the literal string "can-create" as the :id param.
-// ─────────────────────────────────────────────────────────────
-router.get("/sessions/can-create", async (req, res) => {
-  try {
-    const recent = await GamingSession.findOne({
-      creatorId: req.user._id,
-      createdAt: { $gte: new Date(Date.now() - TWO_HOURS_MS) },
-    }).sort({ createdAt: -1 });
-
-    if (!recent) return res.json({ canCreate: true, nextAllowedAt: null });
-
-    const nextAllowedAt = new Date(recent.createdAt.getTime() + TWO_HOURS_MS);
-    if (Date.now() >= nextAllowedAt.getTime())
-      return res.json({ canCreate: true, nextAllowedAt: null });
-
-    res.json({ canCreate: false, nextAllowedAt: nextAllowedAt.toISOString() });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─────────────────────────────────────────────────────────────
-//  POST /gaming/sessions/:id/join
+//  POST /api/session/sessions/:id/join
 // ─────────────────────────────────────────────────────────────
 router.post("/sessions/:id/join", async (req, res) => {
   try {
@@ -157,25 +165,25 @@ router.post("/sessions/:id/join", async (req, res) => {
     if (session.playersJoined.map(String).includes(userId))
       return res.status(400).json({ error: "Already joined" });
 
-    const totalPlayers = session.playersJoined.length + 1; // +1 creator
+    const totalPlayers = session.playersJoined.length + 1;
     if (totalPlayers >= session.playersNeeded)
       return res.status(409).json({ error: "Session is full" });
 
     session.playersJoined.push(req.user._id);
     await session.save();
 
-    // ✅ Real-time: update player count for city feed + session room
     const io = req.app.get("io");
     if (io) emitPlayerJoined(io, session);
 
     res.json(formatSession(session));
   } catch (err) {
+    console.error("[gamingRoutes POST /sessions/:id/join]", err);
     res.status(500).json({ error: err.message });
   }
 });
 
 // ─────────────────────────────────────────────────────────────
-//  POST /gaming/sessions/:id/dismiss
+//  POST /api/session/sessions/:id/dismiss
 // ─────────────────────────────────────────────────────────────
 router.post("/sessions/:id/dismiss", async (req, res) => {
   try {
@@ -189,27 +197,23 @@ router.post("/sessions/:id/dismiss", async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────
-//  GET /gaming/sessions/:id/chat
-//  Only session members (creator + joined) can fetch
+//  GET /api/session/sessions/:id/chat
 // ─────────────────────────────────────────────────────────────
 router.get("/sessions/:id/chat", async (req, res) => {
   try {
     const session = await GamingSession.findById(req.params.id);
     if (!session) return res.status(404).json({ error: "Session not found" });
 
-    const userId    = req.user._id.toString();
-    const isMember  = session.creatorId.toString() === userId ||
-                      session.playersJoined.map(String).includes(userId);
-    if (!isMember)
-      return res.status(403).json({ error: "Not a member of this session" });
+    const userId   = req.user._id.toString();
+    const isMember = session.creatorId.toString() === userId ||
+                     session.playersJoined.map(String).includes(userId);
+    if (!isMember) return res.status(403).json({ error: "Not a member of this session" });
 
-    // Chat closes 1h after start time
     const chatClosesAt = new Date(session.startTime.getTime() + ONE_HOUR_MS);
     if (Date.now() > chatClosesAt.getTime())
       return res.status(410).json({ error: "Chat has closed" });
 
-    // Filter after a given messageId if provided
-    let messages = session.messages;
+    let messages = session.messages || [];
     if (req.query.after) {
       const idx = messages.findIndex(m => m._id.toString() === req.query.after);
       if (idx !== -1) messages = messages.slice(idx + 1);
@@ -229,7 +233,7 @@ router.get("/sessions/:id/chat", async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────
-//  POST /gaming/sessions/:id/chat
+//  POST /api/session/sessions/:id/chat
 // ─────────────────────────────────────────────────────────────
 router.post("/sessions/:id/chat", async (req, res) => {
   try {
@@ -239,8 +243,7 @@ router.post("/sessions/:id/chat", async (req, res) => {
     const userId   = req.user._id.toString();
     const isMember = session.creatorId.toString() === userId ||
                      session.playersJoined.map(String).includes(userId);
-    if (!isMember)
-      return res.status(403).json({ error: "Not a member of this session" });
+    if (!isMember) return res.status(403).json({ error: "Not a member of this session" });
 
     const chatClosesAt = new Date(session.startTime.getTime() + ONE_HOUR_MS);
     if (Date.now() > chatClosesAt.getTime())
@@ -271,44 +274,22 @@ router.post("/sessions/:id/chat", async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────────────────────
-//  CRON JOB — run every minute to mark expired sessions
-//  Call this from your app.js:
-//    require("./routes/gamingSession.routes").startExpiryJob();
-// ─────────────────────────────────────────────────────────────
-function startExpiryJob() {
-  setInterval(async () => {
-    try {
-      const cutoff = new Date(Date.now() - FIVE_MIN_MS);
-      const result = await GamingSession.updateMany(
-        { status: { $ne: "EXPIRED" }, startTime: { $lte: cutoff } },
-        { $set: { status: "EXPIRED" } }
-      );
-      if (result.modifiedCount > 0)
-        console.log(`[GamingSession] Expired ${result.modifiedCount} session(s)`);
-    } catch (err) {
-      console.error("[GamingSession] Expiry job error:", err.message);
-    }
-  }, 60_000); // every 60 seconds
-}
-
 // ─── format helper ────────────────────────────────────────────
 function formatSession(s) {
   return {
-    sessionId:      s._id.toString(),
-    creatorId:      s.creatorId.toString(),
+    sessionId:       s._id.toString(),
+    creatorId:       s.creatorId.toString(),
     creatorUsername: s.creatorUsername,
-    creatorCity:    s.city,
-    gameType:       s.gameType,
-    customGameName: s.customGameName,
-    playersNeeded:  s.playersNeeded,
-    playersJoined:  s.playersJoined.map(String),
-    startTime:      s.startTime.toISOString(),
-    createdAt:      s.createdAt.toISOString(),
-    status:         s.status,
-    optionalMessage: s.optionalMessage,
+    creatorCity:     s.city,
+    gameType:        s.gameType,
+    customGameName:  s.customGameName || null,
+    playersNeeded:   s.playersNeeded,
+    playersJoined:   (s.playersJoined || []).map(String),
+    startTime:       s.startTime.toISOString(),
+    createdAt:       s.createdAt.toISOString(),
+    status:          s.status,
+    optionalMessage: s.optionalMessage || null,
   };
 }
 
 module.exports = router;
-module.exports.startExpiryJob = startExpiryJob;
