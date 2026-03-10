@@ -93,9 +93,18 @@ function emitNewReaction(io, sessionId, data) {
   io.of("/gaming").to(`session:${sessionId}`).emit("reaction_updated", { session_id: sessionId, ...data });
 }
 
+/**
+ * Broadcast a new chat message to every participant in the session room.
+ * Payload shape matches the ChatMessageDto the Android client already parses.
+ */
+function emitNewMessage(io, sessionId, message) {
+  io.of("/gaming").to(`session:${sessionId}`).emit("new_message", { session_id: sessionId, message });
+}
+
 module.exports = {
   initSessionSocket,
   emitSessionCreated, emitPlayerJoined, emitPlayerLeft,
   emitSessionStarted, emitSessionExpired, emitSessionCancelled,
   emitPlayerKicked, emitPlayerMuted, emitPinnedMessage, emitNewReaction,
+  emitNewMessage,
 };
