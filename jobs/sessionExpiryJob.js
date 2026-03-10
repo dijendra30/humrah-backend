@@ -1,110 +1,71 @@
 /**
  * jobs/sessionExpiryJob.js
- * ─────────────────────────────────────────────────────────────
- * Cron job — runs every 60 seconds.
  *
- * Tasks:
- *  1. Finds all sessions whose start_time + 5 min has passed.
- *  2. Marks them "expired" in MongoDB.
- *  3. Emits "session_expired" via Socket.io to the city room
- *     and the session room so clients remove them from the UI.
- *  4. Also marks "active" sessions whose start_time has passed
- *     (but not yet expired) as "started" — so the join button
- *     can show "In Progress" state.
+ * Cron job that runs every minute and:
+ *  1. Marks sessions EXPIRED when chatExpiresAt has passed
+ *  2. Emits session_expired socket events to all participants + city room
+ *
+ * Usage in server.js:
+ *   const { startExpiryJob } = require('./jobs/sessionExpiryJob');
+ *   startExpiryJob(io);
  */
 
+const cron         = require("node-cron");
 const GamingSession = require("../models/GamingSession");
-const {
-  emitSessionExpired,
-  emitSessionStarted,
-} = require("../sockets/sessionSocket");
+const { emitSessionExpired } = require("../sockets/sessionSocket");
 
-let jobTimer = null;
+let _io = null;
 
 /**
- * Starts the expiry cron job.
- * @param {import("socket.io").Server} io  — needed for socket emissions
+ * Run a single expiry sweep — exported so tests can call it directly.
  */
-function startExpiryJob(io) {
-  if (jobTimer) {
-    console.warn("[ExpiryJob] Already running — skipping duplicate start");
-    return;
-  }
-
-  console.log("[ExpiryJob] Started — checking every 60 seconds");
-
-  // Run immediately on start, then every 60 seconds
-  runExpiryTick(io);
-  jobTimer = setInterval(() => runExpiryTick(io), 60_000);
-}
-
-/**
- * Stops the job (useful for graceful shutdown / testing).
- */
-function stopExpiryJob() {
-  if (jobTimer) {
-    clearInterval(jobTimer);
-    jobTimer = null;
-    console.log("[ExpiryJob] Stopped");
-  }
-}
-
-// ─────────────────────────────────────────────────────────────
-//  CORE TICK LOGIC
-// ─────────────────────────────────────────────────────────────
-
-async function runExpiryTick(io) {
+async function runExpirySweep() {
   try {
     const now = new Date();
 
-    // ── 1. Expire sessions past the 5-min grace window ────────
-    const toExpire = await GamingSession.find({
-      status:     { $in: ["active", "started"] },
-      expires_at: { $lte: now },
-    }).select("_id city");
+    // Find all sessions that should be expired but aren't yet
+    const expired = await GamingSession.find({
+      status:       { $in: ["ACTIVE", "STARTED"] },
+      chatExpiresAt: { $lte: now },
+    }).select("_id city status");
 
-    if (toExpire.length > 0) {
-      const ids = toExpire.map((s) => s._id);
+    if (expired.length === 0) return;
 
-      await GamingSession.updateMany(
-        { _id: { $in: ids } },
-        { $set: { status: "expired" } }
-      );
+    const ids = expired.map((s) => s._id);
 
-      // Emit socket events per session
-      for (const session of toExpire) {
-        emitSessionExpired(io, session._id.toString(), session.city);
+    // Bulk update
+    await GamingSession.updateMany(
+      { _id: { $in: ids } },
+      { $set: { status: "EXPIRED" } }
+    );
+
+    // Emit socket events for each expired session
+    if (_io) {
+      for (const session of expired) {
+        emitSessionExpired(_io, session._id.toString(), session.city);
       }
-
-      console.log(`[ExpiryJob] Expired ${toExpire.length} session(s)`);
     }
 
-    // ── 2. Mark sessions whose start_time has passed as "started" ─
-    //    These are still within the 5-min grace window.
-    const toStart = await GamingSession.find({
-      status:     "active",
-      start_time: { $lte: now },
-      expires_at: { $gt: now },
-    }).select("_id city");
-
-    if (toStart.length > 0) {
-      const ids = toStart.map((s) => s._id);
-
-      await GamingSession.updateMany(
-        { _id: { $in: ids } },
-        { $set: { status: "started" } }
-      );
-
-      for (const session of toStart) {
-        emitSessionStarted(io, session._id.toString(), session.city);
-      }
-
-      console.log(`[ExpiryJob] Marked ${toStart.length} session(s) as started`);
-    }
+    console.log(`[ExpiryJob] Expired ${expired.length} session(s) at ${now.toISOString()}`);
   } catch (err) {
-    // Log but never crash the process
-    console.error("[ExpiryJob] Tick error:", err.message);
+    console.error("[ExpiryJob] Error during sweep:", err.message);
   }
 }
 
-module.exports = { startExpiryJob, stopExpiryJob };
+/**
+ * Start the cron job.
+ * @param {import('socket.io').Server} io
+ */
+function startExpiryJob(io) {
+  _io = io;
+
+  // Run every minute: "* * * * *"
+  cron.schedule("* * * * *", runExpirySweep);
+
+  // Also run immediately on startup to catch anything that expired while server was down
+  runExpirySweep();
+
+  console.log("[ExpiryJob] Session expiry job started — running every minute.");
+}
+
+module.exports = { startExpiryJob, runExpirySweep };
