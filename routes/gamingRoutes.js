@@ -17,6 +17,7 @@
 const express       = require("express");
 const router        = express.Router();
 const GamingSession = require("../models/GamingSession");
+const User          = require("../models/User");
 const {
   emitSessionCreated,
   emitPlayerJoined,
@@ -30,6 +31,7 @@ const {
   emitNewReaction,
   emitNewMessage,
 } = require("../sockets/sessionSocket");
+const { sendGamingPush } = require("../utils/gamingPush");
 
 // ── Constants ─────────────────────────────────────────────────
 const THREE_HOURS_MS    = 3 * 60 * 60 * 1000;
@@ -95,6 +97,7 @@ function formatMsg(m, sessionId) {
     sessionId,
     senderId:       m.senderId.toString(),
     senderUsername: m.senderUsername,
+    senderAvatar:   m.senderAvatar || null,
     text:           m.text,
     sentAt:         m.sentAt.toISOString(),
     isPinned:       !!m.isPinned,
@@ -236,6 +239,16 @@ router.post("/sessions/:id/join", async (req, res) => {
 
     const io = req.app.get("io");
     if (io) emitPlayerJoined(io, session);
+
+    // ── Push notification to session creator ──────────────────
+    // Runs async — does not block the response
+    sendGamingPush({
+      recipientId:  session.creatorId.toString(),
+      title:        `${session.gameType} Session`,
+      body:         `${name} joined your ${session.gameType} session! 🎮`,
+      data:         { type: "PLAYER_JOINED", sessionId: session._id.toString() },
+    }).catch(err => console.error("[gamingPush] join notification failed:", err));
+
     res.json(formatSession(session));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -432,6 +445,7 @@ router.post("/sessions/:id/chat", async (req, res) => {
     session.messages.push({
       senderId:       req.user._id,
       senderUsername: displayName(req.user),
+      senderAvatar:   req.user.profilePhoto || null,
       text,
     });
     session.lastMessageAt.set(uid, new Date());
