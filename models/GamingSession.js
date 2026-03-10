@@ -14,6 +14,7 @@ const ReactionSchema = new mongoose.Schema({
 const ChatMessageSchema = new mongoose.Schema({
   senderId:       { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
   senderUsername: { type: String, required: true },
+  senderAvatar:   { type: String, default: null },   // profilePhoto URL at send time
   text:           { type: String, required: true, maxlength: 500 },
   sentAt:         { type: Date, default: Date.now },
   isPinned:       { type: Boolean, default: false },
