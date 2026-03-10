@@ -20,6 +20,7 @@ const GamingSession = require("../models/GamingSession");
 const {
   emitSessionCreated,
   emitPlayerJoined,
+  emitPlayerLeft,
   emitSessionExpired,
   emitPlayerKicked,
   emitPlayerMuted,
@@ -27,6 +28,7 @@ const {
   emitSessionCancelled,
   emitPinnedMessage,
   emitNewReaction,
+  emitNewMessage,
 } = require("../sockets/sessionSocket");
 
 // ── Constants ─────────────────────────────────────────────────
@@ -265,12 +267,7 @@ router.post("/sessions/:id/leave", async (req, res) => {
     await session.save();
 
     const io = req.app.get("io");
-    if (io) {
-      io.of("/gaming").to(`session:${session._id}`).emit("player_left", {
-        session_id: session._id.toString(), userId: uid,
-        playersJoined: session.playersJoined.map(String),
-      });
-    }
+    if (io) emitPlayerLeft(io, session, uid);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -444,7 +441,7 @@ router.post("/sessions/:id/chat", async (req, res) => {
     const formatted = formatMsg(msg, session._id.toString());
 
     const io = req.app.get("io");
-    if (io) io.of("/gaming").to(`session:${session._id}`).emit("new_message", formatted);
+    if (io) emitNewMessage(io, session._id.toString(), formatted);
 
     res.status(201).json(formatted);
   } catch (e) { res.status(500).json({ error: e.message }); }
