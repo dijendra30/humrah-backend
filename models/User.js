@@ -337,6 +337,11 @@ imageModerationLog: [
   },
   
   verified: { type: Boolean, default: false },
+
+  // Activity Host Mode toggle
+  // ON  → user visible in discovery and can receive new bookings
+  // OFF → user hidden from discovery; existing confirmed bookings remain valid
+  hostActive: { type: Boolean, default: true },
   emailVerified: { type: Boolean, default: false },
   
   verificationPhoto: { type: String, default: null },
@@ -579,6 +584,7 @@ userSchema.methods.getPrivateProfile = function() {
     premiumExpiresAt: this.premiumExpiresAt,
     role: this.role,
     userType: this.userType,
+    hostActive: this.hostActive,
     
     verificationPhoto: this.verificationPhoto,
     photoVerificationStatus: this.photoVerificationStatus,
@@ -715,4 +721,3 @@ userSchema.methods.addModerationStrike = async function(violations, route) {
 };
 
 module.exports = mongoose.model('User', userSchema);
-
