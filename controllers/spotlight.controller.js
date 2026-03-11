@@ -27,11 +27,12 @@ exports.getSpotlightCompanions = async (req, res) => {
     const currentUser = await User.findById(currentUserId).select('questionnaire');
     const userInterests = currentUser?.questionnaire?.hangoutPreferences || [];
 
-    // ✅ BASE FILTER: Only COMPANION users
+    // ✅ BASE FILTER: Only COMPANION users who are actively hosting
     const filter = {
       _id: { $ne: currentUserId },
       userType: 'COMPANION',
       status: 'ACTIVE',
+      hostActive: true,   // ✅ FIX: exclude hosts who paused their hosting
       profilePhoto: { $ne: null }
     };
 
@@ -226,7 +227,8 @@ exports.searchCompanions = async (req, res) => {
     const filter = {
       _id: { $ne: req.userId },
       userType: 'COMPANION',
-      status: 'ACTIVE'
+      status: 'ACTIVE',
+      hostActive: true   // ✅ FIX: exclude paused hosts from search
     };
 
     // Text search
