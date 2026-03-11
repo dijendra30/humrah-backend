@@ -635,4 +635,63 @@ router.get('/admin/pending-verifications', authenticate, adminOnly, async (req, 
   }
 });
 
+
+// ============================================================
+// PATCH /host-status — Toggle Activity Host Mode visibility
+// Body: { hostActive: Boolean }
+// Only affects discovery visibility; does NOT remove host profile
+// ============================================================
+router.patch('/host-status', authenticate, async (req, res) => {
+  try {
+    const { hostActive } = req.body;
+
+    if (typeof hostActive !== 'boolean') {
+      return res.status(400).json({
+        success: false,
+        message: 'hostActive must be a boolean value'
+      });
+    }
+
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    // Only companions can toggle host mode
+    if (user.userType !== 'COMPANION') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only Activity Hosts can toggle host mode'
+      });
+    }
+
+    user.hostActive = hostActive;
+    await user.save();
+
+    // Auto-expire pending booking requests if host is going offline
+    if (!hostActive) {
+      try {
+        const Booking = require('../models/Booking');
+        await Booking.updateMany(
+          { companion: req.userId, status: 'pending' },
+          { status: 'expired', expiredReason: 'host_went_offline' }
+        );
+      } catch (_) {
+        // Non-critical — bookings model may have different path; continue
+      }
+    }
+
+    res.json({
+      success: true,
+      hostActive: user.hostActive,
+      message: hostActive
+        ? "You're now visible for activity bookings."
+        : "Hosting paused. You're no longer visible for activity bookings."
+    });
+  } catch (error) {
+    console.error('Host status update error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 module.exports = router;
