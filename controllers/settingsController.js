@@ -4,7 +4,7 @@
 const bcrypt    = require('bcryptjs');
 const User      = require('../models/User');
 const BugReport = require('../models/BugReport');
-const { sendOTPEmail } = require('../utils/email');
+const { sendOTPEmail } = require('../config/email');
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
