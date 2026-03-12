@@ -102,6 +102,28 @@ requiresLegalReacceptance: {
   default: false
 },
 
+notifications: {
+  activityRequests:  { type: Boolean, default: true },
+  gamingAlerts:      { type: Boolean, default: true },
+  communityActivity: { type: Boolean, default: true },
+  appUpdates:        { type: Boolean, default: true }
+},
+
+// ── Blocked users ─────────────────────────────────────────────────────────────
+blockedUsers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+
+// ── Pending email change (OTP flow) ───────────────────────────────────────────
+// These are transient — cleared after the change is applied.
+pendingEmail:           { type: String,  default: null, select: false },
+pendingEmailOTP:        { type: String,  default: null, select: false },
+pendingEmailOTPExpires: { type: Date,    default: null, select: false },
+
+// ══════════════════════════════════════════════════════════════════════════════
+// In your toJSON() / toPublicJSON() method, optionally expose notifications:
+// ══════════════════════════════════════════════════════════════════════════════
+//   notifications: this.notifications,
+//   blockedUsers: this.blockedUsers?.map(id => id.toString()),
+
 // ── Community Guidelines acceptance ──────────────────────────────────────────
 acceptedCommunityVersion: { type: String,  default: null },
 communityAcceptedAt:      { type: Date,    default: null },
@@ -721,3 +743,4 @@ userSchema.methods.addModerationStrike = async function(violations, route) {
 };
 
 module.exports = mongoose.model('User', userSchema);
+
