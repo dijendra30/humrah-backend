@@ -1,31 +1,28 @@
 // routes/settings.js
 // All Account Settings endpoints — all require authentication
 
-const express = require('express');
-const router  = express.Router();
-const { auth } = require('../middleware/auth');
-const ctrl    = require('../controllers/settingsController');
+const express  = require('express');
+const router   = express.Router();
+const { authenticate } = require('../middleware/auth');
+const ctrl     = require('../controllers/settingsController');
 
 // ── Email change (2-step OTP flow) ────────────────────────────────────────────
-// Step 1: Send OTP to new email
-router.post('/email/send-otp', auth, ctrl.sendEmailChangeOTP);
-
-// Step 2: Verify OTP and apply new email
-router.put('/email', auth, ctrl.updateEmail);
+router.post('/email/send-otp', authenticate, ctrl.sendEmailChangeOTP);
+router.put('/email',           authenticate, ctrl.updateEmail);
 
 // ── Password ──────────────────────────────────────────────────────────────────
-router.put('/password', auth, ctrl.updatePassword);
+router.put('/password', authenticate, ctrl.updatePassword);
 
 // ── Notifications ─────────────────────────────────────────────────────────────
-router.get('/notifications', auth, ctrl.getNotifications);
-router.put('/notifications', auth, ctrl.updateNotifications);
+router.get('/notifications', authenticate, ctrl.getNotifications);
+router.put('/notifications', authenticate, ctrl.updateNotifications);
 
 // ── Blocked users ─────────────────────────────────────────────────────────────
-router.get('/blocked-users',      auth, ctrl.getBlockedUsers);
-router.post('/block',             auth, ctrl.blockUser);
-router.delete('/unblock/:userId', auth, ctrl.unblockUser);
+router.get('/blocked-users',       authenticate, ctrl.getBlockedUsers);
+router.post('/block',              authenticate, ctrl.blockUser);
+router.delete('/unblock/:userId',  authenticate, ctrl.unblockUser);
 
 // ── Bug report ────────────────────────────────────────────────────────────────
-router.post('/report-bug', auth, ctrl.reportBug);
+router.post('/report-bug', authenticate, ctrl.reportBug);
 
 module.exports = router;
