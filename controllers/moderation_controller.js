@@ -4,15 +4,15 @@ const UserReport = require('../models/UserReport');
 const { sendWarningEmail } = require('../config/email');
 
 // ─────────────────────────────────────────────────────────────────────────────
-// POST /api/moderation/report-user
+// POST /api/report-user
 // Body: { reportedUserId, reason, description }
 // ─────────────────────────────────────────────────────────────────────────────
 exports.reportUser = async (req, res) => {
   try {
-    const reporterId           = req.userId;
+    const reporterId = req.userId;                             // set by authenticate
     const { reportedUserId, reason, description } = req.body;
 
-    // ── Basic validation ────────────────────────────────────────────────────
+    // ── Validation ────────────────────────────────────────────────────────────
     if (!reportedUserId || !reason) {
       return res.status(400).json({
         success: false,
@@ -20,14 +20,29 @@ exports.reportUser = async (req, res) => {
       });
     }
 
-    if (reporterId.toString() === reportedUserId) {
+    if (reporterId.toString() === reportedUserId.toString()) {
       return res.status(400).json({
         success: false,
         message: 'You cannot report yourself'
       });
     }
 
-    // ── Check reported user exists ──────────────────────────────────────────
+    // ── Valid reasons guard ───────────────────────────────────────────────────
+    const validReasons = [
+      'Fake profile',
+      'Harassment or inappropriate behaviour',
+      'Spam or promotion',
+      'Unsafe behaviour',
+      'Other'
+    ];
+    if (!validReasons.includes(reason)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid reason provided'
+      });
+    }
+
+    // ── Check reported user exists ────────────────────────────────────────────
     const reportedUser = await User.findById(reportedUserId).select('firstName email');
     if (!reportedUser) {
       return res.status(404).json({
@@ -36,7 +51,7 @@ exports.reportUser = async (req, res) => {
       });
     }
 
-    // ── Prevent duplicate report (unique index handles this too) ────────────
+    // ── Prevent duplicate — unique index also enforces this at DB level ───────
     const existing = await UserReport.findOne({ reporterId, reportedUserId });
     if (existing) {
       return res.status(409).json({
@@ -45,7 +60,7 @@ exports.reportUser = async (req, res) => {
       });
     }
 
-    // ── Save report ─────────────────────────────────────────────────────────
+    // ── Save report ───────────────────────────────────────────────────────────
     await UserReport.create({
       reporterId,
       reportedUserId,
@@ -53,21 +68,21 @@ exports.reportUser = async (req, res) => {
       description: description?.trim() || ''
     });
 
-    // ── Count total reports against this user ───────────────────────────────
+    // ── Threshold checks ──────────────────────────────────────────────────────
     const totalReports = await UserReport.countDocuments({ reportedUserId });
 
-    // ── Threshold: 3 reports → send warning email ───────────────────────────
+    // 3 reports → warning email
     if (totalReports === 3) {
       try {
         await sendWarningEmail(reportedUser.email, reportedUser.firstName);
-        console.log(`⚠️  Warning email sent to ${reportedUser.email} (3 reports reached)`);
+        console.log(`⚠️  Warning email sent to ${reportedUser.email}`);
       } catch (emailErr) {
-        // Don't fail the request if email errors
         console.error('❌ Warning email failed:', emailErr.message);
+        // Do NOT fail the request if email errors
       }
     }
 
-    // ── Threshold: 5 reports → flag for admin review (future: auto-suspend) ─
+    // 5 reports → flag account for admin review
     if (totalReports >= 5) {
       await User.findByIdAndUpdate(reportedUserId, {
         $set: { 'moderationFlags.isFlagged': true }
@@ -82,7 +97,7 @@ exports.reportUser = async (req, res) => {
     });
 
   } catch (error) {
-    // Mongoose duplicate key error (race condition fallback)
+    // Mongoose duplicate key (race condition fallback)
     if (error.code === 11000) {
       return res.status(409).json({
         success: false,
@@ -95,19 +110,19 @@ exports.reportUser = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// POST /api/moderation/block-user
+// POST /api/block-user
 // Body: { blockedUserId }
 // ─────────────────────────────────────────────────────────────────────────────
 exports.blockUser = async (req, res) => {
   try {
-    const currentUserId       = req.userId;
-    const { blockedUserId }   = req.body;
+    const currentUserId     = req.userId;
+    const { blockedUserId } = req.body;
 
     if (!blockedUserId) {
       return res.status(400).json({ success: false, message: 'blockedUserId is required' });
     }
 
-    if (currentUserId.toString() === blockedUserId) {
+    if (currentUserId.toString() === blockedUserId.toString()) {
       return res.status(400).json({ success: false, message: 'You cannot block yourself' });
     }
 
@@ -133,7 +148,7 @@ exports.blockUser = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DELETE /api/moderation/unblock-user
+// DELETE /api/unblock-user
 // Body: { blockedUserId }
 // ─────────────────────────────────────────────────────────────────────────────
 exports.unblockUser = async (req, res) => {
