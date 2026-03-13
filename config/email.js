@@ -291,9 +291,139 @@ async function sendWelcomeEmail(email, firstName) {
   }
 }
 // --------------------
+// SEND WARNING EMAIL  (3-report threshold)
+// Called by moderation_controller.js when a user hits 3 reports
+// --------------------
+async function sendWarningEmail(email, firstName) {
+  try {
+    console.log("📨 Sending community-guidelines warning to:", email);
+
+    const htmlContent = `
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: #f4f4f8;
+      padding: 20px;
+      margin: 0;
+    }
+    .container {
+      max-width: 600px;
+      margin: 0 auto;
+      background: white;
+      padding: 40px;
+      border-radius: 20px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+    }
+    .header { text-align: center; margin-bottom: 30px; }
+    .icon { font-size: 52px; margin-bottom: 12px; }
+    h1 { color: #333; margin: 10px 0; font-size: 24px; }
+    .message {
+      color: #444;
+      font-size: 15px;
+      line-height: 1.8;
+      margin: 20px 0;
+    }
+    .notice-box {
+      background: #fff8e1;
+      border-left: 4px solid #f5a623;
+      padding: 16px 20px;
+      border-radius: 8px;
+      margin: 24px 0;
+      font-size: 14px;
+      color: #555;
+    }
+    .cta-button {
+      display: inline-block;
+      background: linear-gradient(135deg, #667eea, #764ba2);
+      color: white;
+      padding: 13px 32px;
+      border-radius: 25px;
+      text-decoration: none;
+      font-weight: bold;
+      margin: 20px 0;
+    }
+    .footer {
+      text-align: center;
+      color: #999;
+      font-size: 13px;
+      margin-top: 30px;
+      padding-top: 20px;
+      border-top: 1px solid #eee;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="icon">🛡️</div>
+      <h1>A Note About Community Guidelines</h1>
+    </div>
+
+    <p class="message">Hi ${firstName || "there"},</p>
+
+    <p class="message">
+      We've received some feedback regarding recent interactions on Humrah involving your account.
+    </p>
+
+    <div class="notice-box">
+      ℹ️ <strong>Please note:</strong> This does not necessarily mean a rule was broken.
+      We want to make sure everyone feels safe and respected on Humrah.
+    </div>
+
+    <p class="message">
+      We kindly ask you to review our community guidelines and ensure your interactions
+      remain respectful and aligned with our values.
+    </p>
+
+    <div style="text-align:center">
+      <a href="${process.env.COMMUNITY_GUIDELINES_URL || 'https://humrah.in/community'}"
+         class="cta-button">
+        Review Community Guidelines
+      </a>
+    </div>
+
+    <p class="message">
+      Thanks for helping keep Humrah a safe and welcoming community for everyone. 💜
+    </p>
+
+    <div class="footer">
+      <p>The Humrah Safety Team</p>
+      <p>© ${new Date().getFullYear()} Humrah. All rights reserved.</p>
+      <p style="font-size:11px;color:#bbb">
+        If you believe this is a mistake, please contact support.
+      </p>
+    </div>
+  </div>
+</body>
+</html>`;
+
+    const sendSmtpEmail = {
+      sender: {
+        email: process.env.BREVO_SENDER_EMAIL,
+        name: process.env.BREVO_SENDER_NAME || "Humrah Safety Team",
+      },
+      to: [{ email }],
+      subject: "Reminder about Humrah community guidelines",
+      htmlContent,
+    };
+
+    const result = await apiInstance.sendTransacEmail(sendSmtpEmail);
+    console.log("✅ Warning email sent. messageId:", result.messageId);
+    return { success: true };
+  } catch (error) {
+    console.error("❌ Failed to send warning email:", error?.response?.body || error);
+    throw error;
+  }
+}
+
+// --------------------
 // EXPORTS (UNCHANGED + CORRECT)
 // --------------------
 module.exports = {
   sendOTPEmail,
   sendWelcomeEmail,
+  sendWarningEmail,   // ✅ new — used by moderation_controller.js
 };
