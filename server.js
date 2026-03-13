@@ -511,6 +511,8 @@ const reviewRoutes = require('./routes/reviews');
 const paymentRoutes = require('./routes/payment');
 const foodRoutes = require('./routes/foodRoutes');
 const settingsRoutes = require('./routes/settings');
+const userModerationRoutes = require('./routes/moderation_route');
+
 // ✅ PUBLIC ROUTES (No legal enforcement)
 app.use('/api/auth', authRoutes);
 app.use('/api/legal', legalRoutes);
@@ -534,6 +536,7 @@ app.use('/api/settings', authenticate, enforceLegalAcceptance, settingsRoutes);
 
 app.use('/api/settings', require('./routes/settings'));
 // ✅ ADMIN ROUTES (No legal enforcement needed for admins performing admin duties)
+app.use('/api', authenticate, enforceLegalAcceptance, userModerationRoutes);
 app.use('/api/admin', authenticate, require('./routes/admin'));
 app.use('/api/moderation', authenticate, adminOnly, moderationRoutes);
 
