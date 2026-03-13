@@ -158,9 +158,9 @@ exports.updatePassword = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Current password is incorrect.' });
     }
 
-    // Hash new password and save
-    const salt       = await bcrypt.genSalt(12);
-    user.password    = await bcrypt.hash(newPassword, salt);
+    // Assign plain password — the User model's pre('save') hook hashes it automatically.
+    // Do NOT manually bcrypt.hash here; doing so would cause double-hashing.
+    user.password = newPassword;
     await user.save();
 
     res.json({ success: true, message: 'Password updated successfully.' });
