@@ -1,19 +1,29 @@
 // routes/moderation_route.js
-const express    = require('express');
-const router     = express.Router();
-const { auth }   = require('../middleware/auth');
-const ctrl       = require('../controllers/moderation_controller');
+// Handles user-facing report + block actions (NOT admin moderation panel)
+// Registered in server.js as separate paths to avoid collision with
+// the existing admin-only /api/moderation route.
+//
+// Add these TWO lines to server.js (after existing route registrations):
+//
+//   const userModerationRoutes = require('./routes/moderation_route');
+//   app.use('/api', authenticate, enforceLegalAcceptance, userModerationRoutes);
+//
+// This mounts:
+//   POST   /api/report-user
+//   POST   /api/block-user
+//   DELETE /api/unblock-user
 
-// All routes require authentication (auth middleware already applied
-// globally in server.js, but added here too for explicitness/safety)
+const express = require('express');
+const router  = express.Router();
+const ctrl    = require('../controllers/moderation_controller');
 
-// POST /api/moderation/report-user
-router.post('/report-user', auth, ctrl.reportUser);
+// POST /api/report-user
+router.post('/report-user', ctrl.reportUser);
 
-// POST /api/moderation/block-user
-router.post('/block-user', auth, ctrl.blockUser);
+// POST /api/block-user
+router.post('/block-user', ctrl.blockUser);
 
-// DELETE /api/moderation/unblock-user
-router.delete('/unblock-user', auth, ctrl.unblockUser);
+// DELETE /api/unblock-user
+router.delete('/unblock-user', ctrl.unblockUser);
 
 module.exports = router;
