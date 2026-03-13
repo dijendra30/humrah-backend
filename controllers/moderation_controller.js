@@ -1,7 +1,7 @@
 // controllers/moderation_controller.js
 const User       = require('../models/User');
 const UserReport = require('../models/UserReport');
-const { sendWarningEmail } = require('../utils/email');
+const { sendWarningEmail } = require('../config/email');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/moderation/report-user
