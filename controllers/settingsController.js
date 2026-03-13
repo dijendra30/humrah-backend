@@ -197,10 +197,11 @@ exports.updateNotifications = async (req, res) => {
       { new: true }
     );
 
+    const defaults = { activityRequests: true, gamingAlerts: true, communityActivity: true, appUpdates: true };
     res.json({
       success: true,
       message: 'Notification preferences updated.',
-      notifications: user.notifications
+      notifications: { ...defaults, ...(user.notifications?.toObject ? user.notifications.toObject() : user.notifications) }
     });
 
   } catch (err) {
@@ -340,17 +341,24 @@ exports.reportBug = async (req, res) => {
 // ══════════════════════════════════════════════════════════════════════════════
 exports.getNotifications = async (req, res) => {
   try {
-    const user = await User.findById(req.userId).select('notifications');
+    // If the notifications sub-doc is missing (user registered before the field was added),
+    // write defaults into the document so future saves work correctly.
+    const defaults = { activityRequests: true, gamingAlerts: true, communityActivity: true, appUpdates: true };
+
+    let user = await User.findById(req.userId).select('notifications');
     if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
+
+    if (!user.notifications || Object.keys(user.notifications.toObject ? user.notifications.toObject() : user.notifications).length === 0) {
+      user = await User.findByIdAndUpdate(
+        req.userId,
+        { $set: { notifications: defaults } },
+        { new: true }
+      ).select('notifications');
+    }
 
     res.json({
       success: true,
-      notifications: user.notifications || {
-        activityRequests: true,
-        gamingAlerts:     true,
-        communityActivity: true,
-        appUpdates:       true
-      }
+      notifications: user.notifications || defaults
     });
   } catch (err) {
     console.error('getNotifications error:', err);
