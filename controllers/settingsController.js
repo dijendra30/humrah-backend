@@ -4,6 +4,7 @@
 const bcrypt    = require('bcryptjs');
 const User      = require('../models/User');
 const BugReport = require('../models/BugReport');
+const { uploadBase64 } = require('../config/cloudinary');
 const { sendOTPEmail } = require('../config/email');
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
@@ -297,12 +298,24 @@ exports.unblockUser = async (req, res) => {
 // POST /api/settings/report-bug
 // Body: { category, description, activity?, deviceModel?, androidVersion?, appVersion?, screenshotUrl? }
 // ══════════════════════════════════════════════════════════════════════════════
+// Body: { category, description, activity?, deviceModel?, androidVersion?, appVersion?, screenshotBase64? }
 exports.reportBug = async (req, res) => {
   try {
     const {
       category, description, activity,
-      deviceModel, androidVersion, appVersion, screenshotUrl
+      deviceModel, androidVersion, appVersion, screenshotBase64
     } = req.body;
+
+    // Upload screenshot to Cloudinary if provided
+    let screenshotUrl = null;
+    if (screenshotBase64) {
+      try {
+        const uploaded = await uploadBase64(screenshotBase64, 'humrah/bug-reports');
+        screenshotUrl = uploaded.url;
+      } catch (uploadErr) {
+        console.warn('Screenshot upload failed, continuing without it:', uploadErr.message);
+      }
+    }
 
     if (!category || !description) {
       return res.status(400).json({ success: false, message: 'Category and description are required.' });
