@@ -686,32 +686,38 @@ router.post('/sessions/:id/report', async (req, res) => {
 
 async function sendSessionNotifications(session, hostUserId) {
   try {
-    const User = require('../models/User');
-    const limit = BOOST_NOTIFY_LIMITS[session.boostLevel] || 50;
+    const mongoose = require('mongoose');
+    const User     = mongoose.model('User');
+    const limit    = BOOST_NOTIFY_LIMITS[session.boostLevel] || 50;
 
-    // §10: eligible users have hangoutPreferences including "Play games"
+    // §10: eligible = hangoutPreferences includes "Play games", same city, not host
     const candidates = await User.find({
-      _id:                 { $ne: hostUserId },
-      city:                session.city,
-      hangoutPreferences:  'Play games',   // adjust field name to match your User model
-      fcmTokens:           { $exists: true, $not: { $size: 0 } }
-    }).limit(limit);
+      _id:                { $ne: hostUserId },
+      city:               session.city,
+      hangoutPreferences: 'Play games',   // adjust to your actual User field name
+      fcmTokens:          { $exists: true, $not: { $size: 0 } }
+    })
+      .select('_id')
+      .limit(limit)
+      .lean();
 
-    const gameLabel = session.customGameName || session.game;
+    const gameLabel     = session.customGameName || session.game;
+    const notInterested = session.notInterestedUsers.map(String);
 
     for (const user of candidates) {
-      // §12: skip users who dismissed this session
-      if (session.notInterestedUsers.map(String).includes(String(user._id))) continue;
+      // §12: never notify users who dismissed this session
+      if (notInterested.includes(String(user._id))) continue;
 
+      // gamingPush handles FCM token lookup + stale token cleanup internally
       await gamingPush.sendGamingPush({
-        recipientId: user._id,
+        recipientId: String(user._id),
         title:       '🎮 Gaming session looking for players',
         body:        `Someone is starting a ${gameLabel} session. Join before it fills up.`,
         data:        { sessionId: String(session._id), type: 'new_session' }
       });
     }
   } catch (err) {
-    console.error('sendSessionNotifications error:', err);
+    console.error('[sendSessionNotifications] Error:', err.message);
   }
 }
 
