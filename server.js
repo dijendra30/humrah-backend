@@ -452,6 +452,25 @@ global.getUserLastSeen = getUserLastSeen;
 global.getUserInfo = getUserInfo;
 
 // =============================================
+// ✅ IMPORT MIDDLEWARE
+// =============================================
+const { authenticate, adminOnly } = require('./middleware/auth');
+const { enforceLegalAcceptance } = require('./middleware/enforceLegalAcceptance');
+const { runStartupCleanup, scheduleDailyCleanup } = require('./utils/autoModerationCleanup');
+const moderationRoutes = require('./routes/moderation');
+
+// =============================================
+// ✅ GAMING SESSION — IMPORTS
+// =============================================
+const gamingRoutes          = require('./routes/gamingRoutes');
+const { initSessionSocket } = require('./sockets/sessionSocket');
+const { startExpiryJob }    = require('./jobs/sessionExpiryJob');
+
+// Initialise the /gaming Socket.IO namespace
+// Must come AFTER io is created, BEFORE route registration
+initSessionSocket(io);
+
+// =============================================
 // DATABASE CONNECTION
 // =============================================
 const connectDB = async () => {
@@ -475,25 +494,6 @@ const connectDB = async () => {
 connectDB();
 
 // =============================================
-// ✅ IMPORT MIDDLEWARE
-// =============================================
-const { authenticate, adminOnly } = require('./middleware/auth');
-const { enforceLegalAcceptance } = require('./middleware/enforceLegalAcceptance');
-const { runStartupCleanup, scheduleDailyCleanup } = require('./utils/autoModerationCleanup');
-const moderationRoutes = require('./routes/moderation');
-
-// =============================================
-// ✅ GAMING SESSION — IMPORTS
-// =============================================
-const gamingRoutes          = require('./routes/gamingRoutes');
-const { initSessionSocket } = require('./sockets/sessionSocket');
-const { startExpiryJob }    = require('./jobs/sessionExpiryJob');
-
-// Initialise the /gaming Socket.IO namespace for real-time session events
-// (must come BEFORE route registration, AFTER io is created)
-initSessionSocket(io);
-
-// =============================================
 // ✅ ROUTES WITH LEGAL ENFORCEMENT
 // =============================================
 const authRoutes = require('./routes/auth');
@@ -512,6 +512,7 @@ const paymentRoutes = require('./routes/payment');
 const foodRoutes = require('./routes/foodRoutes');
 const settingsRoutes = require('./routes/settings');
 const userModerationRoutes = require('./routes/moderation_route'); // ✅ Report + Block (user-facing)
+
 // ✅ PUBLIC ROUTES (No legal enforcement)
 app.use('/api/auth', authRoutes);
 app.use('/api/legal', legalRoutes);
@@ -538,6 +539,7 @@ app.use('/api/settings', authenticate, enforceLegalAcceptance, settingsRoutes);
 app.use('/api', authenticate, enforceLegalAcceptance, userModerationRoutes);
 
 app.use('/api/settings', require('./routes/settings'));
+
 // ✅ ADMIN ROUTES (No legal enforcement needed for admins performing admin duties)
 app.use('/api/admin', authenticate, require('./routes/admin'));
 app.use('/api/moderation', authenticate, adminOnly, moderationRoutes);
@@ -549,6 +551,7 @@ app.use('/api/voice-call', authenticate, enforceLegalAcceptance, require('./rout
 // ✅ GAMING SESSION ROUTES (auth + legal enforcement)
 app.use('/api/session', authenticate, enforceLegalAcceptance, gamingRoutes);
 app.use('/api/food', authenticate, enforceLegalAcceptance, foodRoutes);
+
 // Cron jobs
 require('./cronJobs');
 
