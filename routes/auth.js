@@ -256,13 +256,49 @@ router.post('/login', async (req, res) => {
       });
     }
 
-    // Check account status (if field exists)
+    // ── Check account status ──────────────────────────────────────────────────
     if (user.status && user.status !== 'ACTIVE') {
-      console.log('❌ Account not active, status:', user.status);
-      return res.status(403).json({
-        success: false,
-        message: `Account is ${user.status.toLowerCase()}`
-      });
+
+      // ── Auto-lift suspension if suspendedUntil has passed ──────────────────
+      if (
+        user.status === 'SUSPENDED' &&
+        user.suspensionInfo?.suspendedUntil &&
+        new Date() >= new Date(user.suspensionInfo.suspendedUntil)
+      ) {
+        // Suspension period expired → restore account automatically
+        user.status                           = 'ACTIVE';
+        user.suspensionInfo.isSuspended       = false;
+        user.suspensionInfo.suspendedUntil    = null;
+        user.suspensionInfo.autoLiftAt        = null;
+        user.suspensionInfo.suspensionReason  = null;
+        await user.save();
+        console.log(`✅ Auto-lifted suspension for ${user.email}`);
+        // fall through to normal login
+      } else if (user.status === 'SUSPENDED') {
+        const until = user.suspensionInfo?.suspendedUntil;
+        return res.status(403).json({
+          success: false,
+          message: 'Your account has been temporarily restricted due to community reports.',
+          suspensionInfo: {
+            reason:       user.suspensionInfo?.suspensionReason || 'Community guideline violation',
+            suspendedUntil: until ? until.toISOString() : null,
+            // human readable e.g. "Restrictions lift on March 21, 2026"
+            liftsOn: until
+              ? new Date(until).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
+              : 'indefinite'
+          }
+        });
+      } else if (user.status === 'BANNED') {
+        return res.status(403).json({
+          success: false,
+          message: 'This account has been permanently banned.',
+        });
+      } else {
+        return res.status(403).json({
+          success: false,
+          message: `Account is ${user.status.toLowerCase()}`
+        });
+      }
     }
 
     // ✅ CHECK LEGAL ACCEPTANCE STATUS
