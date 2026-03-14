@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 
 // ─────────────────────────────────────────────────────────────
-//  CHAT MESSAGE SUB-SCHEMA
+//  SUB-SCHEMAS
 // ─────────────────────────────────────────────────────────────
 
 const ReactionSchema = new mongoose.Schema({
@@ -12,35 +12,31 @@ const ReactionSchema = new mongoose.Schema({
 const ChatMessageSchema = new mongoose.Schema({
   senderId:       { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   senderUsername: { type: String, required: true },
+  senderAvatar:   { type: String, default: null },
   text:           { type: String, required: true, maxlength: 500 },
   sentAt:         { type: Date, default: Date.now },
   isPinned:       { type: Boolean, default: false },
   isSystemMsg:    { type: Boolean, default: false },
-  reactions:      [ReactionSchema]
+  reactions:      { type: [ReactionSchema], default: [] }
 });
 
 // ─────────────────────────────────────────────────────────────
-//  GAMING SESSION SCHEMA  (§5 of prompt)
-//
-//  Fields per prompt:
-//    hostId, game, playersNeeded, playersJoined,
-//    status, boostLevel, notInterestedUsers, createdAt, expiresAt
-//
-//  Additional fields needed for full functionality:
-//    hostUsername, city, customGameName, startTime,
-//    chatExpiresAt, kickedPlayers, mutedPlayers,
-//    pinnedMessageId, messages, lastMessageAt
+//  GAMING SESSION SCHEMA
+//  Field names match what gamingRoutes.js actually uses:
+//    creatorId, creatorUsername  (NOT hostId, hostUsername)
+//    req.user._id                (NOT req.user.userId)
+//    status: ACTIVE | STARTED | EXPIRED | CANCELLED
+//    dismissedBy                 (NOT notInterestedUsers)
 // ─────────────────────────────────────────────────────────────
 
 const GamingSessionSchema = new mongoose.Schema({
 
-  // ── Core fields from prompt ───────────────────────────────
-  hostId: {
+  creatorId: {
     type:     mongoose.Schema.Types.ObjectId,
     ref:      'User',
     required: true
   },
-  hostUsername: {
+  creatorUsername: {
     type:     String,
     required: true
   },
@@ -49,11 +45,9 @@ const GamingSessionSchema = new mongoose.Schema({
     required: true,
     index:    true
   },
-  game: {
+  gameType: {
     type:     String,
-    required: true,
-    enum:     ['BGMI','PUBG','PUBG_PC','CALL_OF_DUTY','FREE_FIRE',
-               'PHASMOPHOBIA','MINECRAFT','DEAD_BY_DAYLIGHT','AMONG_US','OTHER']
+    required: true
   },
   customGameName: {
     type:    String,
@@ -70,23 +64,23 @@ const GamingSessionSchema = new mongoose.Schema({
     ref:  'User'
   }],
 
-  // ── Status (§4) ───────────────────────────────────────────
+  // ── Status (matches gamingRoutes.js values) ───────────────
   status: {
     type:    String,
-    enum:    ['waiting_for_players','full','starting','in_progress','completed','expired','cancelled'],
-    default: 'waiting_for_players',
+    enum:    ['ACTIVE', 'STARTED', 'EXPIRED', 'CANCELLED'],
+    default: 'ACTIVE',
     index:   true
   },
 
-  // ── Boost level (§2, §11) ─────────────────────────────────
+  // ── Boost level ───────────────────────────────────────────
   boostLevel: {
     type:    String,
-    enum:    ['NORMAL','BOOST20','BOOST50'],
+    enum:    ['NORMAL', 'BOOST20', 'BOOST50'],
     default: 'NORMAL'
   },
 
-  // ── Not interested tracking (§12) ─────────────────────────
-  notInterestedUsers: [{
+  // ── Dismiss tracking (gamingRoutes uses dismissedBy) ──────
+  dismissedBy: [{
     type: mongoose.Schema.Types.ObjectId,
     ref:  'User'
   }],
@@ -97,11 +91,7 @@ const GamingSessionSchema = new mongoose.Schema({
     required: true
   },
   chatExpiresAt: {
-    type: Date   // set to startTime + 3h on create
-  },
-  expiresAt: {
-    type:  Date,  // §4: createdAt + 10min if not filled
-    index: true
+    type: Date
   },
 
   // ── Host controls ─────────────────────────────────────────
@@ -119,59 +109,28 @@ const GamingSessionSchema = new mongoose.Schema({
     type:    mongoose.Schema.Types.ObjectId,
     default: null
   },
-  messages: [ChatMessageSchema],
+  messages: {
+    type:    [ChatMessageSchema],
+    default: []
+  },
+  // Rate limit: track last message time per userId
+  lastMessageAt: {
+    type:    Map,
+    of:      Date,
+    default: {}
+  },
 
   optionalMessage: {
-    type:    String,
-    default: null,
+    type:      String,
+    default:   null,
     maxlength: 200
   }
 
 }, {
-  timestamps: true   // createdAt, updatedAt
+  timestamps: true  // createdAt, updatedAt
 });
 
-// ── TTL index: MongoDB auto-deletes expired session docs ──────
-GamingSessionSchema.index({ chatExpiresAt: 1 }, { expireAfterSeconds: 10800 }); // +3h
-
-// ── Helpers ───────────────────────────────────────────────────
-
-GamingSessionSchema.methods.isFull = function () {
-  // +1 for host
-  return (this.playersJoined.length + 1) >= this.playersNeeded;
-};
-
-GamingSessionSchema.methods.currentPlayerCount = function () {
-  return this.playersJoined.length + 1;
-};
-
-GamingSessionSchema.methods.isExpired = function () {
-  return this.expiresAt && new Date() > this.expiresAt;
-};
-
-// ── Serialiser: expose sessionId + camelCase frontend names ──
-GamingSessionSchema.methods.toClientJSON = function () {
-  const obj = this.toObject({ virtuals: true });
-  return {
-    sessionId:          obj._id,
-    creatorId:          obj.hostId,
-    creatorUsername:    obj.hostUsername,
-    creatorCity:        obj.city,
-    gameType:           obj.game,
-    customGameName:     obj.customGameName,
-    playersNeeded:      obj.playersNeeded,
-    playersJoined:      obj.playersJoined,
-    kickedPlayers:      obj.kickedPlayers,
-    mutedPlayers:       obj.mutedPlayers,
-    notInterestedUsers: obj.notInterestedUsers,
-    boostLevel:         obj.boostLevel,
-    startTime:          obj.startTime,
-    chatExpiresAt:      obj.chatExpiresAt,
-    createdAt:          obj.createdAt,
-    status:             obj.status,
-    optionalMessage:    obj.optionalMessage,
-    pinnedMessageId:    obj.pinnedMessageId
-  };
-};
+// ── TTL: auto-delete 3h after chatExpiresAt ───────────────────
+GamingSessionSchema.index({ chatExpiresAt: 1 }, { expireAfterSeconds: 10800 });
 
 module.exports = mongoose.model('GamingSession', GamingSessionSchema);
