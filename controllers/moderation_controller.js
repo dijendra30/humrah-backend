@@ -71,23 +71,41 @@ exports.reportUser = async (req, res) => {
     // ── Threshold checks ──────────────────────────────────────────────────────
     const totalReports = await UserReport.countDocuments({ reportedUserId });
 
-    // 3 reports → warning email
+    // ── §5 Threshold: 3 reports → warning email ───────────────────────────────
     if (totalReports === 3) {
       try {
         await sendWarningEmail(reportedUser.email, reportedUser.firstName);
         console.log(`⚠️  Warning email sent to ${reportedUser.email}`);
       } catch (emailErr) {
         console.error('❌ Warning email failed:', emailErr.message);
-        // Do NOT fail the request if email errors
       }
     }
 
-    // 5 reports → flag account for admin review
-    if (totalReports >= 5) {
+    // ── §5 Threshold: 5 reports → temporary 7-day account restriction ────────
+    if (totalReports === 5) {
+      const suspendedUntil = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+
+      await User.findByIdAndUpdate(reportedUserId, {
+        $set: {
+          status: 'SUSPENDED',
+          'suspensionInfo.isSuspended':     true,
+          'suspensionInfo.suspensionReason': 'Received 5 community reports',
+          'suspensionInfo.suspendedAt':      new Date(),
+          'suspensionInfo.suspendedUntil':   suspendedUntil,
+          'suspensionInfo.suspendedBy':      'SYSTEM',
+          'suspensionInfo.autoLiftAt':       suspendedUntil,
+          'moderationFlags.isFlagged':       true,
+        }
+      });
+
+      console.log(`🚫 User ${reportedUserId} suspended for 7 days after 5 reports. Lifts: ${suspendedUntil}`);
+    }
+
+    // ── §5 Threshold: >5 reports → keep flagged, extend suspension ───────────
+    if (totalReports > 5) {
       await User.findByIdAndUpdate(reportedUserId, {
         $set: { 'moderationFlags.isFlagged': true }
       });
-      console.log(`🚩 User ${reportedUserId} flagged after ${totalReports} reports`);
     }
 
     return res.status(201).json({
