@@ -16,7 +16,6 @@
  *     data:        { type: "PLAYER_JOINED", sessionId: "abc123" },
  *   });
  */
-
 const mongoose = require("mongoose");
 
 /**
@@ -44,7 +43,6 @@ async function sendGamingPush({ recipientId, title, body, data = {} }) {
   const User = mongoose.model("User");
   const user = await User.findById(recipientId).select("fcmTokens").lean();
   if (!user || !user.fcmTokens || user.fcmTokens.length === 0) return;
-
   const tokens = user.fcmTokens.filter(Boolean);
   if (tokens.length === 0) return;
 
