@@ -511,8 +511,7 @@ const reviewRoutes = require('./routes/reviews');
 const paymentRoutes = require('./routes/payment');
 const foodRoutes = require('./routes/foodRoutes');
 const settingsRoutes = require('./routes/settings');
-const userModerationRoutes = require('./routes/moderation_route');
-
+const userModerationRoutes = require('./routes/moderation_route'); // ✅ Report + Block (user-facing)
 // ✅ PUBLIC ROUTES (No legal enforcement)
 app.use('/api/auth', authRoutes);
 app.use('/api/legal', legalRoutes);
@@ -534,9 +533,12 @@ app.use('/api/random-booking', authenticate, enforceLegalAcceptance, require('./
 app.use('/api/verification', authenticate, enforceLegalAcceptance, require('./routes/verification'));
 app.use('/api/settings', authenticate, enforceLegalAcceptance, settingsRoutes);
 
+// ✅ User-facing report + block routes (NOT admin-only)
+// Mounts: POST /api/report-user  |  POST /api/block-user  |  DELETE /api/unblock-user
+app.use('/api', authenticate, enforceLegalAcceptance, userModerationRoutes);
+
 app.use('/api/settings', require('./routes/settings'));
 // ✅ ADMIN ROUTES (No legal enforcement needed for admins performing admin duties)
-app.use('/api', authenticate, enforceLegalAcceptance, userModerationRoutes);
 app.use('/api/admin', authenticate, require('./routes/admin'));
 app.use('/api/moderation', authenticate, adminOnly, moderationRoutes);
 
