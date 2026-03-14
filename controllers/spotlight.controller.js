@@ -1,6 +1,34 @@
 // controllers/spotlight.controller.js - FIXED with correct Android field mapping
 const User = require('../models/User');
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ✅ BLOCK FILTERING HELPER (Prompt §12)
+// Returns IDs to exclude from every discovery query:
+//   • self
+//   • users I blocked
+//   • users who blocked me
+// Also returns current user's hangout interests for overlap calculation.
+// ─────────────────────────────────────────────────────────────────────────────
+async function getExcludeIds(currentUserId) {
+  // Fetch my blockedUsers list AND questionnaire in one query
+  const currentUser = await User.findById(currentUserId)
+    .select('questionnaire blockedUsers');
+
+  const myBlockedIds = currentUser?.blockedUsers || [];
+
+  // Find users who have blocked me
+  const usersWhoBlockedMe = await User.find(
+    { blockedUsers: currentUserId },
+    { _id: 1 }
+  );
+  const blockedMeIds = usersWhoBlockedMe.map(u => u._id);
+
+  return {
+    excludeIds:    [currentUserId, ...myBlockedIds, ...blockedMeIds],
+    userInterests: currentUser?.questionnaire?.hangoutPreferences || []
+  };
+}
+
 /**
  * Get spotlight companions
  * 
@@ -23,13 +51,13 @@ exports.getSpotlightCompanions = async (req, res) => {
       page = 1 
     } = req.query;
 
-    // Get current user's interests for overlap calculation
-    const currentUser = await User.findById(currentUserId).select('questionnaire');
-    const userInterests = currentUser?.questionnaire?.hangoutPreferences || [];
+    // ✅ §12: get blocked/blocker IDs + current user interests in one helper call
+    // (replaces the previous single User.findById that only fetched questionnaire)
+    const { excludeIds, userInterests } = await getExcludeIds(currentUserId);
 
     // ✅ BASE FILTER: Only COMPANION users who are actively hosting
     const filter = {
-      _id: { $ne: currentUserId },
+      _id: { $nin: excludeIds }, // ✅ §12: was $ne — now excludes blocked + blockers
       userType: 'COMPANION',
       status: 'ACTIVE',
       hostActive: true,   // ✅ FIX: exclude hosts who paused their hosting
@@ -148,7 +176,17 @@ exports.getSpotlightCompanions = async (req, res) => {
  */
 exports.getCompanionDetails = async (req, res) => {
   try {
+    const currentUserId   = req.userId;
     const { companionId } = req.params;
+
+    // ✅ §12: refuse if requester and companion have blocked each other
+    const { excludeIds, userInterests } = await getExcludeIds(currentUserId);
+    if (excludeIds.map(id => id.toString()).includes(companionId)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Profile not available'
+      });
+    }
 
     const companion = await User.findOne({
       _id: companionId,
@@ -164,6 +202,11 @@ exports.getCompanionDetails = async (req, res) => {
     }
 
     // ✅ FIXED: Format response correctly
+    const companionInterests = companion.questionnaire?.hangoutPreferences || [];
+    const overlapCount = userInterests.filter(i =>  // ✅ was hardcoded 0
+      companionInterests.includes(i)
+    ).length;
+
     const formattedCompanion = {
       id: companion._id.toString(),
       name: `${companion.firstName} ${companion.lastName}`.trim(),
@@ -173,8 +216,8 @@ exports.getCompanionDetails = async (req, res) => {
       userType: companion.userType,
       photoVerificationStatus: companion.photoVerificationStatus,
       
-      sharedHangouts: companion.questionnaire?.hangoutPreferences || [],
-      overlapCount: 0, // Would need current user's interests to calculate
+      sharedHangouts: companionInterests,
+      overlapCount,  // ✅ now correctly calculated
       
       bio: companion.questionnaire?.bio || null,
       tagline: companion.questionnaire?.tagline || null,
@@ -224,8 +267,11 @@ exports.searchCompanions = async (req, res) => {
       limit = 20 
     } = req.query;
 
+    // ✅ §12: get blocked/blocker IDs + current user interests in one helper call
+    const { excludeIds, userInterests } = await getExcludeIds(req.userId);
+
     const filter = {
-      _id: { $ne: req.userId },
+      _id: { $nin: excludeIds }, // ✅ §12: was $ne — now excludes blocked + blockers
       userType: 'COMPANION',
       status: 'ACTIVE',
       hostActive: true   // ✅ FIX: exclude paused hosts from search
@@ -265,10 +311,6 @@ exports.searchCompanions = async (req, res) => {
       .select('firstName lastName profilePhoto questionnaire ratingStats verified isPremium photoVerificationStatus')
       .sort({ 'ratingStats.averageRating': -1, lastActive: -1 })
       .limit(parseInt(limit));
-
-    // Get current user for overlap calculation
-    const currentUser = await User.findById(req.userId).select('questionnaire');
-    const userInterests = currentUser?.questionnaire?.hangoutPreferences || [];
 
     // ✅ FIXED: Format response correctly
     const formattedCompanions = companions.map(companion => {
