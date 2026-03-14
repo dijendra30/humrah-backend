@@ -464,7 +464,8 @@ const moderationRoutes = require('./routes/moderation');
 // =============================================
 const gamingRoutes          = require('./routes/gamingRoutes');
 const { initSessionSocket } = require('./sockets/sessionSocket');
-const { startExpiryJob }    = require('./jobs/sessionExpiryJob');
+// ✅ FIX: startExpiryJob is exported from gamingRoutes (built-in, not a separate file)
+const { startExpiryJob }    = require('./routes/gamingRoutes');
 
 // Initialise the /gaming Socket.IO namespace
 // Must come AFTER io is created, BEFORE route registration
