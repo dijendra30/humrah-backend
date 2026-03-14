@@ -1,71 +1,90 @@
-const jwt        = require('jsonwebtoken');
-const GamingSession = require('../models/GamingSession');
+const jwt = require('jsonwebtoken');
+const mongoose = require('mongoose');
 
 /**
- * sessionSocket.js
+ * sessionSocket.js — /gaming namespace
  *
- * Socket.io namespace: /gaming
+ * JWT does NOT include city or username in this app.
+ * We fetch them from DB after auth, same as the main socket in server.js.
  *
  * Rooms:
- *   city:{city}         → all users in a city see new sessions
- *   session:{sessionId} → participants get chat + player events
- *
- * Auth: JWT in socket.handshake.auth.token
+ *   city:{city}         — feed updates for everyone in a city
+ *   session:{sessionId} — chat + player events for participants
  */
 
 function initSessionSocket(io) {
   const gaming = io.of('/gaming');
 
   // ── JWT auth middleware ────────────────────────────────────
-  gaming.use((socket, next) => {
+  gaming.use(async (socket, next) => {
     try {
-      const token = socket.handshake.auth?.token;
-      if (!token) return next(new Error('Authentication required'));
+      // Accept token from same places as main socket
+      let token = socket.handshake.auth?.token ||
+                  socket.handshake.query?.token ||
+                  socket.handshake.headers?.authorization?.replace('Bearer ', '');
 
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      socket.user = {
-        userId:   decoded.userId || decoded.id,
-        username: decoded.username,
-        city:     decoded.city
-      };
+      if (!token) return next(new Error('Authentication error: No token provided'));
+
+      const JWT_SECRET = process.env.JWT_SECRET || 'fallback_secret_change_in_production';
+      const decoded    = jwt.verify(token, JWT_SECRET);
+
+      socket.userId = decoded.userId || decoded.id || decoded._id;
+
+      // Fetch full user from DB — same pattern as server.js main socket
+      const User = mongoose.model('User');
+      const user = await User.findById(socket.userId)
+        .select('firstName lastName profilePhoto questionnaire city')
+        .lean();
+
+      if (user) {
+        socket.userName = `${user.firstName || ''} ${user.lastName || ''}`.trim() || 'User';
+        socket.userCity =
+          user.questionnaire?.city ||
+          user.city ||
+          decoded.city ||
+          'Unknown';
+      } else {
+        socket.userName = 'User';
+        socket.userCity = decoded.city || 'Unknown';
+      }
+
       next();
     } catch (err) {
-      next(new Error('Invalid token'));
+      console.log('[GamingSocket] Auth failed:', err.message);
+      next(new Error('Authentication error: ' + err.message));
     }
   });
 
   gaming.on('connection', (socket) => {
-    const { userId, username, city } = socket.user;
-    console.log(`[GamingSocket] Connected: ${username} (${userId}) city=${city}`);
+    const { userId, userName, userCity } = socket;
+    console.log(`[GamingSocket] Connected: ${userName} (${userId}) city=${userCity}`);
 
-    // ── Auto-join city room on connect ────────────────────────
-    if (city) {
-      socket.join(`city:${city}`);
-      console.log(`[GamingSocket] ${username} joined city:${city}`);
+    // Auto-join city room so user sees new sessions in their city
+    if (userCity && userCity !== 'Unknown') {
+      socket.join(`city:${userCity}`);
     }
 
-    // ── Client joins a specific session room ──────────────────
+    // ── Join a specific session room ──────────────────────────
     socket.on('join_session_room', ({ session_id }) => {
       if (!session_id) return;
       socket.join(`session:${session_id}`);
-      console.log(`[GamingSocket] ${username} joined session:${session_id}`);
+      console.log(`[GamingSocket] ${userName} joined session:${session_id}`);
     });
 
-    // ── Client leaves a session room ──────────────────────────
+    // ── Leave a specific session room ─────────────────────────
     socket.on('leave_session_room', ({ session_id }) => {
       if (!session_id) return;
       socket.leave(`session:${session_id}`);
-      console.log(`[GamingSocket] ${username} left session:${session_id}`);
+      console.log(`[GamingSocket] ${userName} left session:${session_id}`);
     });
 
-    // ── Ping / heartbeat ──────────────────────────────────────
+    // ── Heartbeat ─────────────────────────────────────────────
     socket.on('ping_session', ({ session_id }) => {
       socket.emit('pong_session', { session_id, ts: Date.now() });
     });
 
-    // ── Disconnect ────────────────────────────────────────────
     socket.on('disconnect', (reason) => {
-      console.log(`[GamingSocket] Disconnected: ${username} — ${reason}`);
+      console.log(`[GamingSocket] Disconnected: ${userName} — ${reason}`);
     });
   });
 
@@ -73,29 +92,43 @@ function initSessionSocket(io) {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  EMIT HELPERS  (used by routes to fire events)
+//  EMIT HELPERS  (called from gamingRoutes.js)
 // ─────────────────────────────────────────────────────────────
 
 function emitSessionCreated(io, city, session) {
   io.of('/gaming').to(`city:${city}`).emit('session_created', session);
 }
 
-function emitPlayerJoined(io, sessionId, city, payload) {
-  io.of('/gaming').to(`city:${city}`).emit('session_updated', payload);
-  io.of('/gaming').to(`session:${sessionId}`).emit('player_joined', payload);
+function emitPlayerJoined(io, session) {
+  const payload = {
+    session_id:    session._id.toString(),
+    playersJoined: (session.playersJoined || []).map(String)
+  };
+  io.of('/gaming').to(`city:${session.city}`).emit('session_updated', payload);
+  io.of('/gaming').to(`session:${session._id}`).emit('player_joined', payload);
 }
 
-function emitPlayerLeft(io, sessionId, city, payload) {
-  io.of('/gaming').to(`city:${city}`).emit('session_updated', payload);
-  io.of('/gaming').to(`session:${sessionId}`).emit('player_left', payload);
+function emitPlayerLeft(io, session, userId) {
+  const payload = {
+    session_id:    session._id.toString(),
+    userId,
+    playersJoined: (session.playersJoined || []).map(String)
+  };
+  io.of('/gaming').to(`city:${session.city}`).emit('session_updated', payload);
+  io.of('/gaming').to(`session:${session._id}`).emit('player_left', payload);
 }
 
-function emitPlayerRemoved(io, sessionId, payload) {
+function emitPlayerKicked(io, sessionId, city, targetUserId) {
+  const payload = { session_id: sessionId, userId: String(targetUserId) };
   io.of('/gaming').to(`session:${sessionId}`).emit('player_removed', payload);
 }
 
-function emitPlayerMuted(io, sessionId, payload) {
-  io.of('/gaming').to(`session:${sessionId}`).emit('player_muted', payload);
+function emitPlayerMuted(io, sessionId, targetUserId, mutedUntil) {
+  io.of('/gaming').to(`session:${sessionId}`).emit('player_muted', {
+    session_id: sessionId,
+    userId:     String(targetUserId),
+    mutedUntil
+  });
 }
 
 function emitNewMessage(io, sessionId, message) {
@@ -130,11 +163,10 @@ function emitPinnedMessage(io, sessionId, message) {
   });
 }
 
-function emitNewReaction(io, sessionId, messageId, reactions) {
+function emitNewReaction(io, sessionId, payload) {
   io.of('/gaming').to(`session:${sessionId}`).emit('reaction_updated', {
     session_id: sessionId,
-    messageId,
-    reactions
+    ...payload
   });
 }
 
@@ -143,7 +175,7 @@ module.exports = {
   emitSessionCreated,
   emitPlayerJoined,
   emitPlayerLeft,
-  emitPlayerRemoved,
+  emitPlayerKicked,
   emitPlayerMuted,
   emitNewMessage,
   emitSessionStarted,
