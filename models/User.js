@@ -175,6 +175,16 @@ deletionRequestedAt: {
     default: 'ACTIVE',
     index: true
   },
+
+  // ── Suspension info (set by moderation system at 5 reports) ───────────────
+  suspensionInfo: {
+    isSuspended:     { type: Boolean, default: false },
+    suspensionReason:{ type: String,  default: null  },
+    suspendedAt:     { type: Date,    default: null  },
+    suspendedUntil:  { type: Date,    default: null  },  // null = indefinite
+    suspendedBy:     { type: String,  default: null  },  // 'SYSTEM' or admin userId
+    autoLiftAt:      { type: Date,    default: null  },  // same as suspendedUntil for auto-lift
+  },
   
   // =============================================
   // ✅ LOCATION FIELDS (Privacy-Safe)
@@ -743,4 +753,3 @@ userSchema.methods.addModerationStrike = async function(violations, route) {
 };
 
 module.exports = mongoose.model('User', userSchema);
-
