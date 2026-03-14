@@ -1,543 +1,723 @@
-/**
- * routes/gamingRoutes.js
- * Mounted at /api/session in server.js
- * Auth is handled by server.js middleware — no per-route auth needed.
- *
- * New in this version:
- *   - chatExpiresAt = startTime + 3 hours  (was 1h)
- *   - /leave     — player leaves session
- *   - /start-early, /cancel  — host powers
- *   - /kick, /mute           — host moderation
- *   - /pin-message           — host pins a message
- *   - /react                 — any member reacts to a message
- *   - /report                — report a user
- *   - Rate limit: 1 message/sec per user
- */
+const express        = require('express');
+const router         = express.Router();
+const GamingSession  = require('../models/GamingSession');
+const { authenticate } = require('../middleware/auth');
+const gamingPush     = require('../utils/gamingPush');
+const { startExpiryJob } = require('../jobs/sessionExpiryJob');
 
-const express       = require("express");
-const router        = express.Router();
-const GamingSession = require("../models/GamingSession");
-const User          = require("../models/User");
-const {
-  emitSessionCreated,
-  emitPlayerJoined,
-  emitPlayerLeft,
-  emitSessionExpired,
-  emitPlayerKicked,
-  emitPlayerMuted,
-  emitSessionStarted,
-  emitSessionCancelled,
-  emitPinnedMessage,
-  emitNewReaction,
-  emitNewMessage,
-} = require("../sockets/sessionSocket");
-const { sendGamingPush } = require("../utils/gamingPush");
+// All routes require auth (§14)
+router.use(authenticate);
 
-// ── Constants ─────────────────────────────────────────────────
-const THREE_HOURS_MS    = 3 * 60 * 60 * 1000;
-const FIVE_MIN_MS       = 5 * 60 * 1000;
-const TWO_HOURS_MS      = 2 * 60 * 60 * 1000;
-const MSG_RATE_LIMIT_MS = 1000;   // 1 msg/sec per user
+// ─────────────────────────────────────────────────────────────
+//  HELPERS
+// ─────────────────────────────────────────────────────────────
 
-// ── Helpers ───────────────────────────────────────────────────
-function isCardExpired(session) {
-  return Date.now() > new Date(session.startTime).getTime() + FIVE_MIN_MS;
-}
-async function checkAndExpire(session) {
-  if (!["EXPIRED","CANCELLED"].includes(session.status) && isCardExpired(session)) {
-    session.status = "EXPIRED";
-    await session.save();
-  }
-  return session;
-}
-function isMember(session, userId) {
-  return session.creatorId.toString() === userId ||
-         session.playersJoined.map(String).includes(userId);
-}
-function isHost(session, userId) {
-  return session.creatorId.toString() === userId;
-}
-function isMuted(session, userId) {
-  return session.mutedPlayers.some(
-    m => m.userId.toString() === userId && m.mutedUntil > new Date()
-  );
-}
-function isChatOpen(session) {
-  return Date.now() < new Date(session.chatExpiresAt).getTime() &&
-         !["CANCELLED","EXPIRED"].includes(session.status);
-}
-function formatSession(s) {
-  const pinned = s.pinnedMessageId
-    ? s.messages.find(m => m._id.toString() === s.pinnedMessageId?.toString())
-    : null;
-  return {
-    sessionId:       s._id.toString(),
-    creatorId:       s.creatorId.toString(),
-    creatorUsername: s.creatorUsername,
-    creatorCity:     s.city,
-    gameType:        s.gameType,
-    customGameName:  s.customGameName || null,
-    playersNeeded:   s.playersNeeded,
-    playersJoined:   (s.playersJoined || []).map(String),
-    kickedPlayers:   (s.kickedPlayers || []).map(String),
-    mutedPlayers:    (s.mutedPlayers || []).map(m => ({
-      userId: m.userId.toString(), mutedUntil: m.mutedUntil.toISOString(),
-    })),
-    startTime:       s.startTime.toISOString(),
-    chatExpiresAt:   s.chatExpiresAt.toISOString(),
-    createdAt:       s.createdAt.toISOString(),
-    status:          s.status,
-    optionalMessage: s.optionalMessage || null,
-    pinnedMessage:   pinned ? formatMsg(pinned, s._id.toString()) : null,
-  };
-}
-function formatMsg(m, sessionId) {
-  return {
-    messageId:      m._id.toString(),
-    sessionId,
-    senderId:       m.senderId.toString(),
-    senderUsername: m.senderUsername,
-    senderAvatar:   m.senderAvatar || null,
-    text:           m.text,
-    sentAt:         m.sentAt.toISOString(),
-    isPinned:       !!m.isPinned,
-    isSystemMsg:    !!m.isSystemMsg,
-    reactions:      (m.reactions || []).map(r => ({
-      userId: r.userId.toString(), emoji: r.emoji,
-    })),
-  };
-}
-function displayName(user) {
-  return `${user.firstName || ""} ${user.lastName || ""}`.trim() || "User";
-}
+/** How many users to notify per boost level (§11) */
+const BOOST_NOTIFY_LIMITS = {
+  NORMAL:  50,
+  BOOST20: 200,
+  BOOST50: 1000
+};
 
-// ═══════════════════════════════════════════════════════════════
-//  SESSION ROUTES
-// ═══════════════════════════════════════════════════════════════
+/** Anti-spam window: 30 minutes (§17) */
+const ANTI_SPAM_MS = 30 * 60 * 1000;
 
-// ── GET /sessions/can-create  (MUST be before /:id routes) ────
-router.get("/sessions/can-create", async (req, res) => {
+/** Session auto-expire: 10 minutes after creation if not filled (§4, §13) */
+const SESSION_EXPIRE_MS = 10 * 60 * 1000;
+
+/** Chat stays open 3h after startTime */
+const CHAT_EXPIRE_MS = 3 * 60 * 60 * 1000;
+
+// ─────────────────────────────────────────────────────────────
+//  GET /sessions/can-create  — anti-spam check (§17)
+// ─────────────────────────────────────────────────────────────
+
+router.get('/sessions/can-create', async (req, res) => {
   try {
-    const recent = await GamingSession.findOne({
-      creatorId: req.user._id,
-      status:    { $nin: ["EXPIRED","CANCELLED"] },
-      createdAt: { $gte: new Date(Date.now() - TWO_HOURS_MS) },
-    }).sort({ createdAt: -1 });
-    if (!recent) return res.json({ canCreate: true, nextAllowedAt: null });
-    const next = new Date(recent.createdAt.getTime() + TWO_HOURS_MS);
-    if (Date.now() >= next.getTime()) return res.json({ canCreate: true, nextAllowedAt: null });
-    res.json({ canCreate: false, nextAllowedAt: next.toISOString() });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    const since = new Date(Date.now() - ANTI_SPAM_MS);
+    const existing = await GamingSession.findOne({
+      hostId:    req.user.userId,
+      status:    { $in: ['waiting_for_players', 'full', 'starting', 'in_progress'] },
+      createdAt: { $gte: since }
+    });
+
+    if (existing) {
+      const nextAllowedAt = new Date(existing.createdAt.getTime() + ANTI_SPAM_MS);
+      return res.json({ canCreate: false, nextAllowedAt });
+    }
+    res.json({ canCreate: true, nextAllowedAt: null });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
-// ── GET /sessions ─────────────────────────────────────────────
-router.get("/sessions", async (req, res) => {
+// ─────────────────────────────────────────────────────────────
+//  POST /sessions/check-existing  — §3 existing session check
+// ─────────────────────────────────────────────────────────────
+
+router.post('/sessions/check-existing', async (req, res) => {
   try {
-    const city = (req.query.city || req.user?.questionnaire?.city || "Unknown").trim();
+    const { gameType } = req.body;
+    if (!gameType) return res.status(400).json({ error: 'gameType required' });
+
+    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+    const existing = await GamingSession.findOne({
+      game:      gameType,
+      status:    'waiting_for_players',
+      createdAt: { $gte: fiveMinutesAgo },
+      // Don't return sessions where this user is host or already joined
+      hostId:         { $ne: req.user.userId },
+      playersJoined:  { $nin: [req.user.userId] },
+      notInterestedUsers: { $nin: [req.user.userId] }
+    });
+
+    if (existing) {
+      return res.json({
+        sessionExists:  true,
+        sessionId:      existing._id,
+        // playersWaiting = total players in session (host counts as 1)
+        playersWaiting: existing.playersJoined.length + 1
+      });
+    }
+    res.json({ sessionExists: false, sessionId: null, playersWaiting: null });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  GET /sessions  — active sessions for this city (§14)
+// ─────────────────────────────────────────────────────────────
+
+router.get('/sessions', async (req, res) => {
+  try {
+    const { city, limit = 20 } = req.query;
+    if (!city) return res.status(400).json({ error: 'city required' });
+
     const sessions = await GamingSession.find({
       city,
-      status:        { $nin: ["EXPIRED","CANCELLED"] },
-      createdAt:     { $gte: new Date(Date.now() - THREE_HOURS_MS) },
-      dismissedBy:   { $ne: req.user._id },
-      kickedPlayers: { $ne: req.user._id },
-    }).sort({ startTime: 1 }).limit(20);
-    const live = [];
-    for (const s of sessions) {
-      await checkAndExpire(s);
-      if (!["EXPIRED","CANCELLED"].includes(s.status)) live.push(formatSession(s));
-    }
-    res.json(live);
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
+      status:             { $in: ['waiting_for_players', 'full', 'starting', 'in_progress'] },
+      expiresAt:          { $gt: new Date() },
+      notInterestedUsers: { $nin: [req.user.userId] },  // §12
+      kickedPlayers:      { $nin: [req.user.userId] }
+    })
+      .sort({ createdAt: -1 })
+      .limit(Number(limit));
 
-// ── POST /sessions ────────────────────────────────────────────
-router.post("/sessions", async (req, res) => {
-  try {
-    const { gameType, customGameName, playersNeeded, startTime, optionalMessage, city } = req.body;
-    if (!gameType)      return res.status(400).json({ error: "gameType is required" });
-    if (!startTime)     return res.status(400).json({ error: "startTime is required" });
-    if (!playersNeeded) return res.status(400).json({ error: "playersNeeded is required" });
-
-    const start = new Date(startTime);
-    if (isNaN(start.getTime())) return res.status(400).json({ error: "startTime is not a valid date" });
-
-    const bufferMs = 60 * 1000;
-    if (start < new Date(Date.now() - bufferMs))
-      return res.status(400).json({ error: "Start time must be in the future" });
-    if (start - Date.now() > THREE_HOURS_MS + bufferMs)
-      return res.status(400).json({ error: "Session must start within 3 hours" });
-
-    if (gameType === "OTHER") {
-      const name = (customGameName || "").trim();
-      if (name.length < 2 || name.length > 30)
-        return res.status(400).json({ error: "Custom game name must be 2–30 characters" });
-    }
-
-    const existing = await GamingSession.findOne({
-      creatorId: req.user._id,
-      status:    { $in: ["ACTIVE","STARTED"] },
-    });
-    if (existing) return res.status(409).json({
-      error: "You already have an active session",
-      nextAllowedAt: new Date(existing.createdAt.getTime() + TWO_HOURS_MS).toISOString(),
-    });
-
-    const sessionCity  = (city || req.user?.questionnaire?.city || "Unknown").trim();
-    const chatExpiresAt = new Date(start.getTime() + THREE_HOURS_MS);
-
-    const session = await GamingSession.create({
-      creatorId:       req.user._id,
-      creatorUsername: displayName(req.user),
-      city:            sessionCity,
-      gameType:        gameType.trim(),
-      customGameName:  gameType === "OTHER" ? (customGameName || "").trim() : null,
-      playersNeeded:   Number(playersNeeded),
-      startTime:       start,
-      chatExpiresAt,
-      optionalMessage: optionalMessage?.trim() || null,
-      status:          "ACTIVE",
-    });
-
-    console.log(`[gaming] Created ${session._id} by ${req.user._id} in ${sessionCity}`);
-    const io = req.app.get("io");
-    if (io) emitSessionCreated(io, session.city, formatSession(session));
-
-    res.status(201).json(formatSession(session));
-  } catch (e) {
-    console.error("[gaming POST /sessions]", e);
-    res.status(500).json({ error: e.message });
+    res.json(sessions.map(s => s.toClientJSON()));
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
-// ── POST /sessions/:id/join ───────────────────────────────────
-router.post("/sessions/:id/join", async (req, res) => {
+// ─────────────────────────────────────────────────────────────
+//  POST /sessions  — create session (§14 POST /gaming/create)
+// ─────────────────────────────────────────────────────────────
+
+router.post('/sessions', async (req, res) => {
   try {
-    const session = await GamingSession.findById(req.params.id);
-    if (!session) return res.status(404).json({ error: "Session not found" });
-    await checkAndExpire(session);
-    if (["EXPIRED","CANCELLED"].includes(session.status))
-      return res.status(410).json({ error: "Session is no longer available" });
-    if (session.status === "STARTED")
-      return res.status(403).json({ error: "Session already started" });
+    const {
+      gameType, customGameName, playersNeeded,
+      startTime, optionalMessage, city,
+      boostLevel = 'NORMAL'
+    } = req.body;
 
-    const uid = req.user._id.toString();
-    if (isHost(session, uid))    return res.status(400).json({ error: "You created this session" });
-    if (session.kickedPlayers.map(String).includes(uid))
-      return res.status(403).json({ error: "You were removed from this session" });
-    if (session.playersJoined.map(String).includes(uid))
-      return res.status(400).json({ error: "Already joined" });
-    if (session.playersJoined.length + 1 >= session.playersNeeded)
-      return res.status(409).json({ error: "Session is full" });
-
-    session.playersJoined.push(req.user._id);
-    const name = displayName(req.user);
-    session.messages.push({
-      senderId: req.user._id, senderUsername: name,
-      text: `${name} joined the squad 🎮`, isSystemMsg: true,
+    // ── Anti-spam (§17) ───────────────────────────────────────
+    const since = new Date(Date.now() - ANTI_SPAM_MS);
+    const spamCheck = await GamingSession.findOne({
+      hostId:    req.user.userId,
+      status:    { $in: ['waiting_for_players', 'full', 'starting', 'in_progress'] },
+      createdAt: { $gte: since }
     });
-    await session.save();
-
-    const io = req.app.get("io");
-    if (io) emitPlayerJoined(io, session);
-
-    // ── Push notification to session creator ──────────────────
-    // Runs async — does not block the response
-    sendGamingPush({
-      recipientId:  session.creatorId.toString(),
-      title:        `${session.gameType} Session`,
-      body:         `${name} joined your ${session.gameType} session! 🎮`,
-      data:         { type: "PLAYER_JOINED", sessionId: session._id.toString() },
-    }).catch(err => console.error("[gamingPush] join notification failed:", err));
-
-    res.json(formatSession(session));
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// ── POST /sessions/:id/dismiss ────────────────────────────────
-router.post("/sessions/:id/dismiss", async (req, res) => {
-  try {
-    await GamingSession.findByIdAndUpdate(req.params.id, { $addToSet: { dismissedBy: req.user._id } });
-    res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// ── POST /sessions/:id/leave ──────────────────────────────────
-router.post("/sessions/:id/leave", async (req, res) => {
-  try {
-    const session = await GamingSession.findById(req.params.id);
-    if (!session) return res.status(404).json({ error: "Session not found" });
-    const uid = req.user._id.toString();
-    if (isHost(session, uid)) return res.status(400).json({ error: "Host cannot leave — use cancel" });
-    if (!session.playersJoined.map(String).includes(uid))
-      return res.status(400).json({ error: "You are not in this session" });
-
-    session.playersJoined = session.playersJoined.filter(id => id.toString() !== uid);
-    const name = displayName(req.user);
-    session.messages.push({
-      senderId: req.user._id, senderUsername: name,
-      text: `${name} left the squad`, isSystemMsg: true,
-    });
-    await session.save();
-
-    const io = req.app.get("io");
-    if (io) emitPlayerLeft(io, session, uid);
-    res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// ═══════════════════════════════════════════════════════════════
-//  HOST POWERS
-// ═══════════════════════════════════════════════════════════════
-
-// ── POST /sessions/:id/start-early ───────────────────────────
-router.post("/sessions/:id/start-early", async (req, res) => {
-  try {
-    const session = await GamingSession.findById(req.params.id);
-    if (!session) return res.status(404).json({ error: "Session not found" });
-    if (!isHost(session, req.user._id.toString()))
-      return res.status(403).json({ error: "Only the host can start the session" });
-    if (session.status !== "ACTIVE") return res.status(400).json({ error: "Session is not active" });
-
-    session.status = "STARTED";
-    session.messages.push({
-      senderId: req.user._id, senderUsername: session.creatorUsername,
-      text: "🚀 Host started the session early!", isSystemMsg: true,
-    });
-    await session.save();
-
-    const io = req.app.get("io");
-    if (io) emitSessionStarted(io, session._id.toString(), session.city);
-    res.json(formatSession(session));
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// ── POST /sessions/:id/cancel ─────────────────────────────────
-router.post("/sessions/:id/cancel", async (req, res) => {
-  try {
-    const session = await GamingSession.findById(req.params.id);
-    if (!session) return res.status(404).json({ error: "Session not found" });
-    if (!isHost(session, req.user._id.toString()))
-      return res.status(403).json({ error: "Only the host can cancel" });
-    if (["EXPIRED","CANCELLED"].includes(session.status))
-      return res.status(400).json({ error: "Session already ended" });
-
-    session.status = "CANCELLED";
-    session.messages.push({
-      senderId: req.user._id, senderUsername: session.creatorUsername,
-      text: "❌ Session cancelled by host.", isSystemMsg: true,
-    });
-    await session.save();
-
-    const io = req.app.get("io");
-    if (io) emitSessionCancelled(io, session._id.toString(), session.city);
-    res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// ── POST /sessions/:id/kick ───────────────────────────────────
-router.post("/sessions/:id/kick", async (req, res) => {
-  try {
-    const session = await GamingSession.findById(req.params.id);
-    if (!session) return res.status(404).json({ error: "Session not found" });
-    if (!isHost(session, req.user._id.toString()))
-      return res.status(403).json({ error: "Only the host can kick players" });
-
-    const { targetUserId, targetUsername } = req.body;
-    if (!targetUserId) return res.status(400).json({ error: "targetUserId required" });
-    if (!session.playersJoined.map(String).includes(targetUserId))
-      return res.status(400).json({ error: "User is not in this session" });
-
-    session.playersJoined  = session.playersJoined.filter(id => id.toString() !== targetUserId);
-    session.kickedPlayers.push(targetUserId);
-    session.messages.push({
-      senderId: req.user._id, senderUsername: session.creatorUsername,
-      text: `🚫 ${targetUsername || "A player"} was removed by the host.`, isSystemMsg: true,
-    });
-    await session.save();
-
-    const io = req.app.get("io");
-    if (io) emitPlayerKicked(io, session._id.toString(), session.city, targetUserId);
-    res.json(formatSession(session));
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// ── POST /sessions/:id/mute ───────────────────────────────────
-// durationMinutes: 5 | 10 | 0 (0 = rest of session)
-router.post("/sessions/:id/mute", async (req, res) => {
-  try {
-    const session = await GamingSession.findById(req.params.id);
-    if (!session) return res.status(404).json({ error: "Session not found" });
-    if (!isHost(session, req.user._id.toString()))
-      return res.status(403).json({ error: "Only the host can mute players" });
-
-    const { targetUserId, targetUsername, durationMinutes } = req.body;
-    if (!targetUserId) return res.status(400).json({ error: "targetUserId required" });
-
-    const dur = Number(durationMinutes);
-    if (![5, 10, 0].includes(dur))
-      return res.status(400).json({ error: "durationMinutes must be 5, 10, or 0" });
-
-    const mutedUntil = dur === 0
-      ? new Date(session.chatExpiresAt)
-      : new Date(Date.now() + dur * 60 * 1000);
-
-    session.mutedPlayers = session.mutedPlayers.filter(m => m.userId.toString() !== targetUserId);
-    session.mutedPlayers.push({ userId: targetUserId, mutedUntil });
-    const durLabel = dur === 0 ? "for this session" : `for ${dur} minutes`;
-    session.messages.push({
-      senderId: req.user._id, senderUsername: session.creatorUsername,
-      text: `🔇 ${targetUsername || "A player"} was muted ${durLabel}.`, isSystemMsg: true,
-    });
-    await session.save();
-
-    const io = req.app.get("io");
-    if (io) emitPlayerMuted(io, session._id.toString(), targetUserId, mutedUntil.toISOString());
-    res.json({ ok: true, mutedUntil: mutedUntil.toISOString() });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// ═══════════════════════════════════════════════════════════════
-//  CHAT
-// ═══════════════════════════════════════════════════════════════
-
-// ── GET /sessions/:id/chat ────────────────────────────────────
-router.get("/sessions/:id/chat", async (req, res) => {
-  try {
-    const session = await GamingSession.findById(req.params.id);
-    if (!session) return res.status(404).json({ error: "Session not found" });
-    const uid = req.user._id.toString();
-    if (!isMember(session, uid)) return res.status(403).json({ error: "Not a member" });
-    if (!isChatOpen(session))    return res.status(410).json({ error: "Chat has closed" });
-
-    let messages = session.messages || [];
-    if (req.query.after) {
-      const idx = messages.findIndex(m => m._id.toString() === req.query.after);
-      if (idx !== -1) messages = messages.slice(idx + 1);
+    if (spamCheck) {
+      return res.status(429).json({ error: 'You already have an active session. Please wait before creating a new one.' });
     }
-    res.json({
-      messages:        messages.map(m => formatMsg(m, session._id.toString())),
-      pinnedMessageId: session.pinnedMessageId?.toString() || null,
-      chatExpiresAt:   session.chatExpiresAt.toISOString(),
-      mutedUntil:      session.mutedPlayers.find(m => m.userId.toString() === uid)?.mutedUntil?.toISOString() || null,
+
+    // ── Validation ────────────────────────────────────────────
+    if (!gameType || !playersNeeded || !startTime || !city) {
+      return res.status(400).json({ error: 'gameType, playersNeeded, startTime, city are required' });
+    }
+    const start = new Date(startTime);
+    const now   = new Date();
+    if (start < new Date(now - 60_000)) {
+      return res.status(400).json({ error: 'startTime must be in the future' });
+    }
+    if (start > new Date(now.getTime() + 3 * 60 * 60 * 1000 + 60_000)) {
+      return res.status(400).json({ error: 'Session must start within 3 hours' });
+    }
+
+    const expiresAt    = new Date(now.getTime() + SESSION_EXPIRE_MS);   // §4: +10min
+    const chatExpiresAt = new Date(start.getTime() + CHAT_EXPIRE_MS);   // start + 3h
+
+    const session = await GamingSession.create({
+      hostId:         req.user.userId,
+      hostUsername:   req.user.username,
+      city,
+      game:           gameType,
+      customGameName: customGameName || null,
+      playersNeeded:  Number(playersNeeded),
+      playersJoined:  [],
+      status:         'waiting_for_players',
+      boostLevel:     boostLevel.toUpperCase(),
+      startTime:      start,
+      chatExpiresAt,
+      expiresAt,
+      optionalMessage: optionalMessage || null
     });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+
+    // ── Push to eligible users (§10, §11) ─────────────────────
+    // Fire-and-forget — don't block the response
+    sendSessionNotifications(session, req.user.userId).catch(console.error);
+
+    // ── Emit socket event to city room ────────────────────────
+    const io = req.app.get('io');
+    if (io) {
+      io.of('/gaming').to(`city:${city}`).emit('session_created', session.toClientJSON());
+    }
+
+    res.status(201).json(session.toClientJSON());
+  } catch (err) {
+    console.error('Create session error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
-// ── POST /sessions/:id/chat ───────────────────────────────────
-router.post("/sessions/:id/chat", async (req, res) => {
+// ─────────────────────────────────────────────────────────────
+//  POST /sessions/:id/join  (§6, §14 POST /gaming/join)
+// ─────────────────────────────────────────────────────────────
+
+router.post('/sessions/:id/join', async (req, res) => {
   try {
     const session = await GamingSession.findById(req.params.id);
-    if (!session) return res.status(404).json({ error: "Session not found" });
-    const uid = req.user._id.toString();
-    if (!isMember(session, uid)) return res.status(403).json({ error: "Not a member" });
-    if (!isChatOpen(session))    return res.status(410).json({ error: "Chat has closed" });
-    if (isMuted(session, uid))   return res.status(403).json({ error: "You are muted" });
+    if (!session) return res.status(404).json({ error: 'Session not found' });
 
-    // Rate limit
-    const last = session.lastMessageAt?.get(uid);
-    if (last && Date.now() - last.getTime() < MSG_RATE_LIMIT_MS)
-      return res.status(429).json({ error: "Slow down — 1 message per second" });
+    if (session.status === 'expired' || session.status === 'cancelled') {
+      return res.status(410).json({ error: 'Session is no longer active' });
+    }
+    if (session.kickedPlayers.map(String).includes(String(req.user.userId))) {
+      return res.status(403).json({ error: 'You have been removed from this session' });
+    }
+    if (String(session.hostId) === String(req.user.userId)) {
+      return res.status(400).json({ error: 'You are the host of this session' });
+    }
+    if (session.playersJoined.map(String).includes(String(req.user.userId))) {
+      return res.status(200).json(session.toClientJSON()); // already joined
+    }
+    if (session.isFull()) {
+      return res.status(409).json({ error: 'Session is full' });
+    }
 
-    const text = (req.body.text || "").trim();
-    if (!text || text.length > 500)
-      return res.status(400).json({ error: "Message must be 1–500 characters" });
+    // Atomic add player
+    const updated = await GamingSession.findOneAndUpdate(
+      {
+        _id:          session._id,
+        status:       { $in: ['waiting_for_players', 'full'] },
+        $expr:        { $lt: [{ $add: [{ $size: '$playersJoined' }, 1] }, '$playersNeeded'] }
+      },
+      {
+        $addToSet: { playersJoined: req.user.userId },
+        $set:      { status: 'waiting_for_players' }   // recalculated below
+      },
+      { new: true }
+    );
 
-    session.messages.push({
-      senderId:       req.user._id,
-      senderUsername: displayName(req.user),
-      senderAvatar:   req.user.profilePhoto || null,
-      text,
+    if (!updated) return res.status(409).json({ error: 'Session is full' });
+
+    // Recalculate status
+    const newCount = updated.playersJoined.length + 1; // +1 for host
+    if (newCount >= updated.playersNeeded) {
+      updated.status = 'full';
+      await updated.save();
+    }
+
+    // System message in chat
+    const sysMsg = {
+      senderId:       req.user.userId,
+      senderUsername: req.user.username,
+      text:           `${req.user.username} joined the session`,
+      isSystemMsg:    true
+    };
+    updated.messages.push(sysMsg);
+    await updated.save();
+
+    // Notify host (§6)
+    gamingPush.sendGamingPush({
+      recipientId: updated.hostId,
+      title:       '🎮 Player joined!',
+      body:        `${req.user.username} joined your gaming session.`,
+      data:        { sessionId: String(updated._id), type: 'player_joined' }
+    }).catch(console.error);
+
+    // Socket emit
+    const io = req.app.get('io');
+    if (io) {
+      const payload = {
+        session_id:    String(updated._id),
+        userId:        String(req.user.userId),
+        username:      req.user.username,
+        playersJoined: updated.playersJoined.map(String)
+      };
+      io.of('/gaming').to(`city:${updated.city}`).emit('session_updated', payload);
+      io.of('/gaming').to(`session:${updated._id}`).emit('player_joined', payload);
+      io.of('/gaming').to(`session:${updated._id}`).emit('new_message', {
+        session_id: String(updated._id),
+        message:    sysMsg
+      });
+    }
+
+    res.json(updated.toClientJSON());
+  } catch (err) {
+    console.error('Join session error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  POST /sessions/:id/dismiss  — Not Interested (§12)
+// ─────────────────────────────────────────────────────────────
+
+router.post('/sessions/:id/dismiss', async (req, res) => {
+  try {
+    await GamingSession.findByIdAndUpdate(req.params.id, {
+      $addToSet: { notInterestedUsers: req.user.userId }
     });
-    session.lastMessageAt.set(uid, new Date());
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  POST /sessions/:id/leave  (§8, §14 POST /gaming/leave)
+// ─────────────────────────────────────────────────────────────
+
+router.post('/sessions/:id/leave', async (req, res) => {
+  try {
+    const session = await GamingSession.findById(req.params.id);
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+    if (String(session.hostId) === String(req.user.userId)) {
+      return res.status(400).json({ error: 'Host must cancel, not leave' });
+    }
+
+    session.playersJoined = session.playersJoined.filter(
+      id => String(id) !== String(req.user.userId)
+    );
+    // Recalculate status
+    if (session.status === 'full') session.status = 'waiting_for_players';
+
+    const sysMsg = {
+      senderId:       req.user.userId,
+      senderUsername: req.user.username,
+      text:           `${req.user.username} left the session`,
+      isSystemMsg:    true
+    };
+    session.messages.push(sysMsg);
     await session.save();
 
-    const msg = session.messages[session.messages.length - 1];
-    const formatted = formatMsg(msg, session._id.toString());
+    const io = req.app.get('io');
+    if (io) {
+      const payload = {
+        session_id:    String(session._id),
+        userId:        String(req.user.userId),
+        playersJoined: session.playersJoined.map(String)
+      };
+      io.of('/gaming').to(`city:${session.city}`).emit('session_updated', payload);
+      io.of('/gaming').to(`session:${session._id}`).emit('player_left', payload);
+      io.of('/gaming').to(`session:${session._id}`).emit('new_message', {
+        session_id: String(session._id),
+        message:    sysMsg
+      });
+    }
 
-    const io = req.app.get("io");
-    if (io) emitNewMessage(io, session._id.toString(), formatted);
-
-    res.status(201).json(formatted);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
-// ── POST /sessions/:id/pin-message ────────────────────────────
-router.post("/sessions/:id/pin-message", async (req, res) => {
+// ─────────────────────────────────────────────────────────────
+//  POST /sessions/:id/start-early  (§9, §14 POST /gaming/start-session)
+// ─────────────────────────────────────────────────────────────
+
+router.post('/sessions/:id/start-early', async (req, res) => {
   try {
     const session = await GamingSession.findById(req.params.id);
-    if (!session) return res.status(404).json({ error: "Session not found" });
-    if (!isHost(session, req.user._id.toString()))
-      return res.status(403).json({ error: "Only the host can pin messages" });
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+    if (String(session.hostId) !== String(req.user.userId)) {
+      return res.status(403).json({ error: 'Only host can start the session' });
+    }
 
+    session.status = 'in_progress';
+    await session.save();
+
+    const io = req.app.get('io');
+    if (io) {
+      io.of('/gaming').to(`city:${session.city}`).emit('session_started', { session_id: String(session._id) });
+      io.of('/gaming').to(`session:${session._id}`).emit('session_started', { session_id: String(session._id) });
+    }
+
+    res.json(session.toClientJSON());
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  POST /sessions/:id/cancel  — host cancels (§13)
+// ─────────────────────────────────────────────────────────────
+
+router.post('/sessions/:id/cancel', async (req, res) => {
+  try {
+    const session = await GamingSession.findById(req.params.id);
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+    if (String(session.hostId) !== String(req.user.userId)) {
+      return res.status(403).json({ error: 'Only host can cancel' });
+    }
+
+    session.status = 'cancelled';
+
+    const sysMsg = {
+      senderId:       req.user.userId,
+      senderUsername: req.user.username,
+      text:           'Session was cancelled by the host.',
+      isSystemMsg:    true
+    };
+    session.messages.push(sysMsg);
+    await session.save();
+
+    const io = req.app.get('io');
+    if (io) {
+      io.of('/gaming').to(`city:${session.city}`).emit('session_cancelled', { session_id: String(session._id) });
+      io.of('/gaming').to(`session:${session._id}`).emit('session_cancelled', { session_id: String(session._id) });
+      io.of('/gaming').to(`session:${session._id}`).emit('new_message', {
+        session_id: String(session._id),
+        message:    sysMsg
+      });
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  POST /sessions/:id/kick  (§9, §14 POST /gaming/kick-player)
+// ─────────────────────────────────────────────────────────────
+
+router.post('/sessions/:id/kick', async (req, res) => {
+  try {
+    const { targetUserId, targetUsername } = req.body;
+    const session = await GamingSession.findById(req.params.id);
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+    if (String(session.hostId) !== String(req.user.userId)) {
+      return res.status(403).json({ error: 'Only host can kick players' });
+    }
+    if (session.hasStarted()) {
+      return res.status(400).json({ error: 'Cannot kick after session has started' });
+    }
+
+    session.playersJoined = session.playersJoined.filter(
+      id => String(id) !== String(targetUserId)
+    );
+    session.kickedPlayers.push(targetUserId);
+    if (session.status === 'full') session.status = 'waiting_for_players';
+
+    const sysMsg = {
+      senderId:       req.user.userId,
+      senderUsername: req.user.username,
+      text:           `${targetUsername} was removed from the session.`,
+      isSystemMsg:    true
+    };
+    session.messages.push(sysMsg);
+    await session.save();
+
+    const io = req.app.get('io');
+    if (io) {
+      io.of('/gaming').to(`session:${session._id}`).emit('player_removed', {
+        session_id: String(session._id),
+        userId:     String(targetUserId)
+      });
+      io.of('/gaming').to(`session:${session._id}`).emit('new_message', {
+        session_id: String(session._id),
+        message:    sysMsg
+      });
+    }
+
+    res.json(session.toClientJSON());
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  POST /sessions/:id/mute
+// ─────────────────────────────────────────────────────────────
+
+router.post('/sessions/:id/mute', async (req, res) => {
+  try {
+    const { targetUserId, targetUsername, durationMinutes } = req.body;
+    const session = await GamingSession.findById(req.params.id);
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+    if (String(session.hostId) !== String(req.user.userId)) {
+      return res.status(403).json({ error: 'Only host can mute players' });
+    }
+
+    const mutedUntil = durationMinutes === 0
+      ? session.chatExpiresAt           // rest of session
+      : new Date(Date.now() + durationMinutes * 60 * 1000);
+
+    // Remove existing mute entry for this user, then add new one
+    session.mutedPlayers = session.mutedPlayers.filter(
+      m => String(m.userId) !== String(targetUserId)
+    );
+    session.mutedPlayers.push({ userId: targetUserId, mutedUntil });
+    await session.save();
+
+    const io = req.app.get('io');
+    if (io) {
+      io.of('/gaming').to(`session:${session._id}`).emit('player_muted', {
+        session_id: String(session._id),
+        userId:     String(targetUserId),
+        mutedUntil: mutedUntil.toISOString()
+      });
+    }
+
+    res.json({ ok: true, mutedUntil });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  GET /sessions/:id/chat
+// ─────────────────────────────────────────────────────────────
+
+router.get('/sessions/:id/chat', async (req, res) => {
+  try {
+    const { after } = req.query;
+    const session = await GamingSession.findById(req.params.id);
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+
+    let messages = session.messages;
+    if (after) {
+      const afterIdx = messages.findIndex(m => String(m._id) === after);
+      if (afterIdx !== -1) messages = messages.slice(afterIdx + 1);
+    }
+
+    // Check mute status for requesting user
+    const muteEntry = session.mutedPlayers.find(
+      m => String(m.userId) === String(req.user.userId) && m.mutedUntil > new Date()
+    );
+
+    res.json({
+      messages:       messages.map(m => ({
+        messageId:      m._id,
+        sessionId:      session._id,
+        senderId:       m.senderId,
+        senderUsername: m.senderUsername,
+        text:           m.text,
+        sentAt:         m.sentAt,
+        isPinned:       String(m._id) === String(session.pinnedMessageId),
+        isSystemMsg:    m.isSystemMsg,
+        reactions:      m.reactions
+      })),
+      pinnedMessageId: session.pinnedMessageId,
+      chatExpiresAt:   session.chatExpiresAt,
+      mutedUntil:      muteEntry ? muteEntry.mutedUntil : null
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  POST /sessions/:id/chat
+// ─────────────────────────────────────────────────────────────
+
+router.post('/sessions/:id/chat', async (req, res) => {
+  try {
+    const { text } = req.body;
+    if (!text || !text.trim()) return res.status(400).json({ error: 'text required' });
+
+    const session = await GamingSession.findById(req.params.id);
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+    if (new Date() > session.chatExpiresAt) {
+      return res.status(410).json({ error: 'Chat has expired' });
+    }
+
+    // Mute check
+    const muteEntry = session.mutedPlayers.find(
+      m => String(m.userId) === String(req.user.userId) && m.mutedUntil > new Date()
+    );
+    if (muteEntry) return res.status(403).json({ error: 'You are muted', mutedUntil: muteEntry.mutedUntil });
+
+    const msg = {
+      senderId:       req.user.userId,
+      senderUsername: req.user.username,
+      text:           text.trim(),
+      isSystemMsg:    false
+    };
+    session.messages.push(msg);
+    await session.save();
+
+    const saved = session.messages[session.messages.length - 1];
+    const response = {
+      messageId:      saved._id,
+      sessionId:      session._id,
+      senderId:       saved.senderId,
+      senderUsername: saved.senderUsername,
+      text:           saved.text,
+      sentAt:         saved.sentAt,
+      isPinned:       false,
+      isSystemMsg:    false,
+      reactions:      []
+    };
+
+    const io = req.app.get('io');
+    if (io) {
+      io.of('/gaming').to(`session:${session._id}`).emit('new_message', {
+        session_id: String(session._id),
+        message:    response
+      });
+    }
+
+    res.json(response);
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  POST /sessions/:id/pin-message
+// ─────────────────────────────────────────────────────────────
+
+router.post('/sessions/:id/pin-message', async (req, res) => {
+  try {
     const { messageId } = req.body;
-    if (!messageId) return res.status(400).json({ error: "messageId required" });
-    const msg = session.messages.id(messageId);
-    if (!msg) return res.status(404).json({ error: "Message not found" });
+    const session = await GamingSession.findById(req.params.id);
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+    if (String(session.hostId) !== String(req.user.userId)) {
+      return res.status(403).json({ error: 'Only host can pin messages' });
+    }
 
+    const msg = session.messages.id(messageId);
+    if (!msg) return res.status(404).json({ error: 'Message not found' });
+
+    // Unpin previous
     session.messages.forEach(m => { m.isPinned = false; });
     msg.isPinned = true;
     session.pinnedMessageId = msg._id;
     await session.save();
 
-    const formatted = formatMsg(msg, session._id.toString());
-    const io = req.app.get("io");
-    if (io) emitPinnedMessage(io, session._id.toString(), formatted);
-    res.json({ ok: true, pinnedMessage: formatted });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    const io = req.app.get('io');
+    if (io) {
+      io.of('/gaming').to(`session:${session._id}`).emit('message_pinned', {
+        session_id: String(session._id),
+        message:    msg
+      });
+    }
+
+    res.json({ ok: true, pinnedMessage: msg });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
-// ── POST /sessions/:id/react ──────────────────────────────────
-router.post("/sessions/:id/react", async (req, res) => {
+// ─────────────────────────────────────────────────────────────
+//  POST /sessions/:id/react
+// ─────────────────────────────────────────────────────────────
+
+router.post('/sessions/:id/react', async (req, res) => {
   try {
-    const session = await GamingSession.findById(req.params.id);
-    if (!session) return res.status(404).json({ error: "Session not found" });
-    const uid = req.user._id.toString();
-    if (!isMember(session, uid)) return res.status(403).json({ error: "Not a member" });
-
     const { messageId, emoji } = req.body;
-    if (!messageId || !emoji) return res.status(400).json({ error: "messageId and emoji required" });
-    const msg = session.messages.id(messageId);
-    if (!msg) return res.status(404).json({ error: "Message not found" });
+    const session = await GamingSession.findById(req.params.id);
+    if (!session) return res.status(404).json({ error: 'Session not found' });
 
-    const existIdx = msg.reactions.findIndex(r => r.userId.toString() === uid && r.emoji === emoji);
-    if (existIdx !== -1) {
-      msg.reactions.splice(existIdx, 1);  // toggle off
+    const msg = session.messages.id(messageId);
+    if (!msg) return res.status(404).json({ error: 'Message not found' });
+
+    const existingIdx = msg.reactions.findIndex(
+      r => String(r.userId) === String(req.user.userId) && r.emoji === emoji
+    );
+    if (existingIdx !== -1) {
+      msg.reactions.splice(existingIdx, 1); // toggle off
     } else {
-      msg.reactions = msg.reactions.filter(r => r.userId.toString() !== uid); // remove old
-      msg.reactions.push({ userId: req.user._id, emoji });
+      // Remove any other reaction by this user first (one reaction per user per message)
+      msg.reactions = msg.reactions.filter(r => String(r.userId) !== String(req.user.userId));
+      msg.reactions.push({ userId: req.user.userId, emoji });
     }
+
     await session.save();
 
-    const reactions = msg.reactions.map(r => ({ userId: r.userId.toString(), emoji: r.emoji }));
-    const io = req.app.get("io");
-    if (io) emitNewReaction(io, session._id.toString(), { messageId, reactions });
-    res.json({ ok: true, reactions });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    const io = req.app.get('io');
+    if (io) {
+      io.of('/gaming').to(`session:${session._id}`).emit('reaction_updated', {
+        session_id: String(session._id),
+        messageId,
+        reactions:  msg.reactions
+      });
+    }
+
+    res.json({ ok: true, reactions: msg.reactions });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
-// ── POST /sessions/:id/report ─────────────────────────────────
-router.post("/sessions/:id/report", async (req, res) => {
+// ─────────────────────────────────────────────────────────────
+//  POST /sessions/:id/report
+// ─────────────────────────────────────────────────────────────
+
+router.post('/sessions/:id/report', async (req, res) => {
   try {
     const { targetUserId, reason } = req.body;
-    console.warn(`[gaming] REPORT session=${req.params.id} target=${targetUserId} by=${req.user._id} reason="${reason}"`);
-    res.json({ ok: true, message: "Report received. Thank you." });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    // Log report — extend with Report model if needed
+    console.log(`[REPORT] session=${req.params.id} reporter=${req.user.userId} target=${targetUserId} reason=${reason}`);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
-// ── Cron job ──────────────────────────────────────────────────
-function startExpiryJob() {
-  setInterval(async () => {
-    try {
-      const cutoff = new Date(Date.now() - FIVE_MIN_MS);
-      const r = await GamingSession.updateMany(
-        { status: { $nin: ["EXPIRED","CANCELLED"] }, startTime: { $lte: cutoff } },
-        { $set: { status: "EXPIRED" } }
-      );
-      if (r.modifiedCount > 0)
-        console.log(`[gaming] Expired ${r.modifiedCount} session(s)`);
-    } catch (e) { console.error("[gaming] Expiry job error:", e.message); }
-  }, 60_000);
+// ─────────────────────────────────────────────────────────────
+//  PRIVATE: send push notifications on session create (§10, §11)
+// ─────────────────────────────────────────────────────────────
+
+async function sendSessionNotifications(session, hostUserId) {
+  try {
+    const User = require('../models/User');
+    const limit = BOOST_NOTIFY_LIMITS[session.boostLevel] || 50;
+
+    // §10: eligible users have hangoutPreferences including "Play games"
+    const candidates = await User.find({
+      _id:                 { $ne: hostUserId },
+      city:                session.city,
+      hangoutPreferences:  'Play games',   // adjust field name to match your User model
+      fcmTokens:           { $exists: true, $not: { $size: 0 } }
+    }).limit(limit);
+
+    const gameLabel = session.customGameName || session.game;
+
+    for (const user of candidates) {
+      // §12: skip users who dismissed this session
+      if (session.notInterestedUsers.map(String).includes(String(user._id))) continue;
+
+      await gamingPush.sendGamingPush({
+        recipientId: user._id,
+        title:       '🎮 Gaming session looking for players',
+        body:        `Someone is starting a ${gameLabel} session. Join before it fills up.`,
+        data:        { sessionId: String(session._id), type: 'new_session' }
+      });
+    }
+  } catch (err) {
+    console.error('sendSessionNotifications error:', err);
+  }
 }
+
+// ─────────────────────────────────────────────────────────────
+//  EXPORT + EXPIRY JOB
+// ─────────────────────────────────────────────────────────────
 
 module.exports = router;
 module.exports.startExpiryJob = startExpiryJob;
