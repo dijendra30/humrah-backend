@@ -379,7 +379,7 @@ async function sendWarningEmail(email, firstName) {
     </p>
 
     <div style="text-align:center">
-      <a href="${process.env.COMMUNITY_GUIDELINES_URL || 'https://humrah.in/community'}"
+      <a href="${process.env.COMMUNITY_GUIDELINES_URL || 'https://humrah.com/guidelines'}"
          class="cta-button">
         Review Community Guidelines
       </a>
