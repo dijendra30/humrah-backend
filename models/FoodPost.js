@@ -178,9 +178,16 @@ FoodPostSchema.virtual('computedLikesCount').get(function () {
 
 // ─── Pre-save: sync denormalized counts ───────────────────────
 FoodPostSchema.pre('save', function (next) {
+  // likesCount always synced from embedded likes array
   this.likesCount = this.likes.length;
-  this.commentsCount = this.comments.length;
-  // ✅ Keep GeoJSON location in sync with flat lat/lng fields
+
+  // ✅ commentsCount is NOT synced here.
+  //    Comments live in the separate FoodComment collection so
+  //    this.comments.length is always 0 — syncing it would reset
+  //    commentsCount back to 0 on every like save. It is managed
+  //    exclusively via $inc in foodController.addComment().
+
+  // Keep GeoJSON location in sync with flat lat/lng fields
   if (this.isModified('latitude') || this.isModified('longitude') || this.isNew) {
     this.location = {
       type: 'Point',
