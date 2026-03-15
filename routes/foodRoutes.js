@@ -9,6 +9,7 @@ const {
   likePost,
   addComment,
   getComments,
+  testPlaces,
 } = require('../controllers/foodController');
 
 const upload = multer({
@@ -31,6 +32,8 @@ router.get('/feed-cards',       getFeedCards);
 router.post('/like',            likePost);
 router.post('/comment',         addComment);
 router.get('/comments/:postId', getComments);
+// ✅ Debug route — no auth required so you can open in browser
+router.get('/test-places',      testPlaces);
 
 router.use((err, _req, res, _next) => {
   if (err instanceof multer.MulterError || err.message === 'Only image files are allowed') {
