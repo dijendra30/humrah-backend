@@ -1,7 +1,7 @@
 const FoodPost    = require('../models/FoodPost');
 const FoodComment = require('../models/FoodCommentModel');
 const { uploadBuffer } = require('../config/cloudinary');
-const https = require('https');
+const { getPlaceDetails } = require('../services/googlePlaceService');
 
 const MAX_POSTS_PER_DAY = 2;
 const FEED_CARD_LIMIT   = 3;
@@ -39,63 +39,6 @@ function sanitize(caption = '') {
 // ─── Google Places New API — fetch rating ─────────────────────
 // Uses the Places API v1 (new) with placeId
 // Returns a number (e.g. 4.3) or null if unavailable
-async function fetchPlaceRating(placeId) {
-  // Try all common env var names for the Google Places / Maps API key
-  const apiKey = process.env.GOOGLE_PLACES_API_KEY
-    || process.env.PLACES_API_KEY
-    || process.env.GOOGLE_MAPS_API_KEY
-    || '';
-
-  if (!apiKey || !placeId) {
-    console.warn('⚠️  [Places] No API key set — placeRating will be null. Set GOOGLE_PLACES_API_KEY in env.');
-    return null;
-  }
-
-  // ✅ Places API New (v1) requires HEADERS, not query params.
-  //    The old format ?fields=rating&key=KEY silently returns nothing in v1.
-  //    Correct format: X-Goog-FieldMask header + X-Goog-Api-Key header.
-  return new Promise((resolve) => {
-    const options = {
-      hostname: 'places.googleapis.com',
-      path:     `/v1/places/${encodeURIComponent(placeId)}`,
-      method:   'GET',
-      headers:  {
-        'X-Goog-Api-Key':   apiKey,
-        'X-Goog-FieldMask': 'rating',
-        'Content-Type':     'application/json',
-      },
-    };
-
-    const req = https.request(options, (res) => {
-      let body = '';
-      res.on('data',  (chunk) => (body += chunk));
-      res.on('end',   () => {
-        try {
-          const json = JSON.parse(body);
-          if (json.error) {
-            console.error('❌ [Places] API error:', json.error.message || JSON.stringify(json.error));
-            resolve(null);
-            return;
-          }
-          const rating = typeof json.rating === 'number' ? json.rating : null;
-          console.log(`⭐ [Places] placeId=${placeId} → rating=${rating}`);
-          resolve(rating);
-        } catch (e) {
-          console.error('❌ [Places] Parse error:', e.message, '| body:', body.slice(0, 200));
-          resolve(null);
-        }
-      });
-    });
-
-    req.on('error', (e) => {
-      console.error('❌ [Places] Request error:', e.message);
-      resolve(null);
-    });
-
-    req.end();
-  });
-}
-
 // ══════════════════════════════════════════════════════════════
 //  POST /food/create
 // ══════════════════════════════════════════════════════════════
@@ -124,11 +67,33 @@ exports.createPost = async (req, res) => {
     if (!imageUrl) return res.status(500).json({ success: false, message: 'Image upload returned no URL.' });
 
     const { caption, placeId, placeName, latitude, longitude, priceRange, city } = req.body;
-    const lat = parseFloat(latitude)  || 0;
-    const lng = parseFloat(longitude) || 0;
+    let lat = parseFloat(latitude)  || 0;
+    let lng = parseFloat(longitude) || 0;
 
-    // Fetch Google Places rating for this stall (non-blocking — null if API fails)
-    const placeRating = await fetchPlaceRating(placeId);
+    // ✅ If placeId provided → call Places API once, store result permanently.
+    // If no placeId → homemade food post (placeName, rating, userRatingCount all null).
+    let finalPlaceName       = null;
+    let finalRating          = null;
+    let finalUserRatingCount = null;
+
+    if (placeId) {
+      const place = await getPlaceDetails(placeId);
+      // Prefer server-fetched name; fall back to what Android sent
+      finalPlaceName       = place.placeName || placeName || null;
+      finalRating          = place.rating;
+      finalUserRatingCount = place.userRatingCount;
+      // Use server coordinates if returned (more accurate than client GPS)
+      if (place.latitude  != null) lat = place.latitude;
+      if (place.longitude != null) lng = place.longitude;
+
+      // Android also sends rating as fallback if server API is unavailable
+      if (finalRating == null && req.body.placeRating) {
+        const cr = parseFloat(req.body.placeRating);
+        if (!isNaN(cr)) finalRating = cr;
+      }
+    }
+
+    console.log(`🍜 [createPost] placeId=${placeId || 'none'} → placeName=${finalPlaceName} rating=${finalRating} reviews=${finalUserRatingCount}`);
 
     const expiresAt = new Date(Date.now() + 4 * 60 * 60 * 1000); // 4 hours
 
@@ -136,15 +101,16 @@ exports.createPost = async (req, res) => {
       userId,
       imageUrl,
       imagePublicId,
-      caption:     sanitize(caption),
-      placeId:     placeId   || '',
-      placeName:   placeName || '',
-      latitude:    lat,
-      longitude:   lng,
-      location:    { type: 'Point', coordinates: [lng, lat] }, // GeoJSON [lng, lat]
-      city:        (city || '').toLowerCase().trim(),
-      priceRange:  priceRange || null,
-      placeRating: placeRating,
+      caption:         sanitize(caption),
+      placeId:         placeId || null,
+      placeName:       finalPlaceName,
+      latitude:        lat,
+      longitude:       lng,
+      location:        { type: 'Point', coordinates: [lng, lat] },
+      city:            (city || '').toLowerCase().trim(),
+      priceRange:      priceRange || null,
+      rating:          finalRating,
+      userRatingCount: finalUserRatingCount,
       expiresAt,
     });
 
