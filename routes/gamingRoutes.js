@@ -32,6 +32,29 @@ const MSG_RATE_LIMIT_MS = 1000;
 // Boost notification limits (§11)
 const BOOST_LIMITS = { normal: 50, boost20: 200, boost50: 1000 };
 
+// ── §10: Daily notification rate-limiter (max 2 per user per day) ─────────
+// Key = "userId:YYYY-M-D"  →  count sent today (auto-resets with date key).
+const _dailyNotifCount = new Map();
+
+function _dayKey(userId) {
+  const d = new Date();
+  return `${userId}:${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+}
+function canNotifyToday(userId) {
+  return (_dailyNotifCount.get(_dayKey(userId)) || 0) < 2;
+}
+function markNotified(userId) {
+  const k = _dayKey(userId);
+  _dailyNotifCount.set(k, (_dailyNotifCount.get(k) || 0) + 1);
+}
+// Purge stale keys every hour to prevent unbounded memory growth
+setInterval(() => {
+  const todayDate = _dayKey('').split(':')[1];
+  for (const k of _dailyNotifCount.keys()) {
+    if (!k.endsWith(todayDate)) _dailyNotifCount.delete(k);
+  }
+}, 60 * 60 * 1000);
+
 // ── Helpers ───────────────────────────────────────────────────
 
 function isMember(session, userId) {
@@ -85,6 +108,7 @@ function formatSession(s) {
     })),
     notInterestedUsers: (s.notInterestedUsers || []).map(String),  // §5, §12
     boostLevel:         s.boostLevel || 'normal',                  // §5, §11
+    likedBy:            (s.likedBy || []).map(String),             // like system
     status:             s.status,                                  // §4 values
     startTime:          s.startTime.toISOString(),
     chatExpiresAt:      s.chatExpiresAt.toISOString(),
@@ -504,6 +528,31 @@ router.post('/sessions/:id/mute', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── POST /sessions/:id/like  — toggle like ───────────────────
+router.post('/sessions/:id/like', async (req, res) => {
+  try {
+    const session      = await GamingSession.findById(req.params.id);
+    if (!session)      return res.status(404).json({ error: 'Session not found' });
+
+    const uid          = req.user._id;
+    const uidStr       = uid.toString();
+    const alreadyLiked = (session.likedBy || []).map(String).includes(uidStr);
+
+    if (alreadyLiked) {
+      session.likedBy = session.likedBy.filter(id => id.toString() !== uidStr);
+    } else {
+      session.likedBy.push(uid);
+    }
+    await session.save();
+
+    res.json({
+      liked:     !alreadyLiked,
+      likeCount: session.likedBy.length,
+      likedBy:   session.likedBy.map(String),
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ═══════════════════════════════════════════════════════════════
 //  CHAT  (§7)
 // ═══════════════════════════════════════════════════════════════
@@ -628,6 +677,11 @@ router.post('/sessions/:id/report', async (req, res) => {
 
 // ═══════════════════════════════════════════════════════════════
 //  §10, §11: NOTIFICATION HELPER
+//
+//  Fixed vs original:
+//    1. city filter uses questionnaire.city  (not top-level city)
+//    2. hangout filter uses questionnaire.hangoutPreferences  (not top-level)
+//    3. enforces 2-per-user-per-day cap via _dailyNotifCount
 // ═══════════════════════════════════════════════════════════════
 
 async function sendNewSessionNotifications(session, hostUserId) {
@@ -638,24 +692,50 @@ async function sendNewSessionNotifications(session, hostUserId) {
     const gameLabel = session.customGameName || session.gameType;
 
     // §10: eligible = hangoutPreferences includes "Play games", same city, not host
+    // FIX: city and hangoutPreferences live inside questionnaire, not at top level
     const candidates = await User.find({
-      _id:                { $ne: hostUserId },
-      city:               session.city,
-      hangoutPreferences: 'Play games',
-      fcmTokens:          { $exists: true, $not: { $size: 0 } }
+      _id:  { $ne: hostUserId },
+      'questionnaire.city': {
+        $regex: new RegExp(`^${session.city.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
+      },
+      'questionnaire.hangoutPreferences': {
+        $in: ['Play games', '🎮 Play games', '🎮  Play games'],
+      },
+      fcmTokens: { $exists: true, $not: { $size: 0 } }
     }).select('_id').limit(limit).lean();
+
+    if (!candidates.length) {
+      console.log(`[gamingNotif] 0 eligible users in "${session.city}"`);
+      return;
+    }
+
+    console.log(`[gamingNotif] ${candidates.length} candidate(s) — enforcing 2/day cap`);
 
     // §12: skip users in notInterestedUsers
     const excluded = (session.notInterestedUsers || []).map(String);
 
     for (const user of candidates) {
-      if (excluded.includes(String(user._id))) continue;
-      await sendGamingPush({
-        recipientId: String(user._id),
+      const uid = String(user._id);
+
+      if (excluded.includes(uid)) continue;
+
+      // FIX: enforce 2-per-user-per-day cap
+      if (!canNotifyToday(uid)) {
+        console.log(`[gamingNotif] Skipping ${uid} — daily limit reached`);
+        continue;
+      }
+
+      sendGamingPush({
+        recipientId: uid,
         title:       '🎮 Gaming session looking for players',
         body:        `Someone is starting a ${gameLabel} session. Join before it fills up.`,
         data:        { sessionId: String(session._id), type: 'new_session' }
-      });
+      })
+      .then(() => {
+        markNotified(uid);
+        console.log(`[gamingNotif] ✅ Sent to ${uid}`);
+      })
+      .catch(err => console.error(`[gamingNotif] ❌ Push failed for ${uid}:`, err.message));
     }
   } catch (err) {
     console.error('[sendNewSessionNotifications]', err.message);
