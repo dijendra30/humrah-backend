@@ -1,6 +1,11 @@
 // models/FoodPost.js
 // MongoDB schema for Food Discovery Posts
 // These are personal community recommendations — NOT business listings
+//
+// FIXES applied vs previous version:
+//  • expiresAt default: 30 days → 4 hours  (spec §2)
+//  • Comment maxlength: 200 → 120 chars     (spec §9)
+//  • location GeoJSON field added for $nearSphere radius queries (spec §5)
 
 const mongoose = require('mongoose');
 
@@ -14,7 +19,7 @@ const FoodCommentSchema = new mongoose.Schema({
   text: {
     type: String,
     required: true,
-    maxlength: [200, 'Comment cannot exceed 200 characters'],
+    maxlength: [120, 'Comment cannot exceed 120 characters'],  // ✅ fixed: was 200
     trim: true,
   },
   createdAt: {
@@ -44,7 +49,6 @@ const FoodPostSchema = new mongoose.Schema(
       maxlength: [120, 'Caption cannot exceed 120 characters'],
       trim: true,
       default: '',
-      // Validation: no URLs or phone numbers (anti-spam / anti-business-promo)
       validate: [
         {
           validator: (v) => !/https?:\/\//i.test(v),
@@ -65,10 +69,12 @@ const FoodPostSchema = new mongoose.Schema(
       trim: true,
     },
     placeId: {
-      type: String, // Google Place ID (e.g. "ChIJN1t_tDeuEmsRUs...)
+      type: String,
       required: true,
       index: true,
     },
+
+    // Flat lat/lng (kept for backward compat + Haversine filtering)
     latitude: {
       type: Number,
       required: true,
@@ -82,7 +88,20 @@ const FoodPostSchema = new mongoose.Schema(
       max: 180,
     },
 
-    // City-level index for "nearby" queries
+    // ✅ GeoJSON Point — enables $nearSphere / $geoWithin radius queries (spec §5)
+    location: {
+      type: {
+        type: String,
+        enum: ['Point'],
+        default: 'Point',
+      },
+      coordinates: {
+        type: [Number], // [longitude, latitude]
+        required: true,
+      },
+    },
+
+    // City-level index for broad pre-filter before distance check
     city: {
       type: String,
       required: true,
@@ -99,27 +118,16 @@ const FoodPostSchema = new mongoose.Schema(
     },
 
     // Engagement
-    likes: [
-      {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: 'User',
-      },
-    ],
-    likesCount: {
-      type: Number,
-      default: 0,
-    },
-    comments: [FoodCommentSchema],
-    commentsCount: {
-      type: Number,
-      default: 0,
-    },
+    likes: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+    likesCount:    { type: Number, default: 0 },
+    comments:      [FoodCommentSchema],
+    commentsCount: { type: Number, default: 0 },
 
-    // Auto-expire posts after 30 days to keep feed fresh
+    // ✅ Auto-expire after 4 hours (spec §2) — MongoDB TTL deletes the doc automatically
     expiresAt: {
       type: Date,
-      default: () => new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-      index: { expires: 0 }, // MongoDB TTL index — auto-deletes when this date passes
+      default: () => new Date(Date.now() + 4 * 60 * 60 * 1000), // ✅ fixed: was 30 days
+      index: { expires: 0 },
     },
 
     // Soft-delete / moderation flag
@@ -129,27 +137,26 @@ const FoodPostSchema = new mongoose.Schema(
       index: true,
     },
   },
-  {
-    timestamps: true, // adds createdAt / updatedAt
-  }
+  { timestamps: true }
 );
 
-// ─── Compound indexes for feed queries ───────────────────────
-FoodPostSchema.index({ city: 1, createdAt: -1 }); // "nearby" sorted by newest
-FoodPostSchema.index({ userId: 1, createdAt: -1 }); // user's own posts
+// ─── Indexes ──────────────────────────────────────────────────
+FoodPostSchema.index({ city: 1, createdAt: -1 });
+FoodPostSchema.index({ userId: 1, createdAt: -1 });
+FoodPostSchema.index({ location: '2dsphere' }); // ✅ required for $nearSphere
 
-// ─── Geospatial index (optional — for radius queries) ─────────
-FoodPostSchema.index({ latitude: 1, longitude: 1 });
-
-// ─── Virtual: total likes count from array ────────────────────
-FoodPostSchema.virtual('computedLikesCount').get(function () {
-  return this.likes.length;
-});
-
-// ─── Pre-save: sync denormalized counts ───────────────────────
+// ─── Pre-save: sync denormalized counts + auto-populate location ──
 FoodPostSchema.pre('save', function (next) {
-  this.likesCount = this.likes.length;
+  this.likesCount    = this.likes.length;
   this.commentsCount = this.comments.length;
+
+  // Keep GeoJSON location in sync with flat lat/lng fields
+  if (this.isModified('latitude') || this.isModified('longitude')) {
+    this.location = {
+      type:        'Point',
+      coordinates: [this.longitude, this.latitude], // GeoJSON: [lng, lat]
+    };
+  }
   next();
 });
 
