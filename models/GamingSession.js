@@ -113,6 +113,12 @@ const GamingSessionSchema = new mongoose.Schema({
     index: true
   },
 
+  // ── Like system ───────────────────────────────────────────
+  likedBy: {
+    type:    [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+    default: []
+  },
+
   // ── Chat ──────────────────────────────────────────────────
   startTime: {
     type:     Date,
