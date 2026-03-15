@@ -322,8 +322,7 @@ exports.testPlaces = async (req, res) => {
       return res.status(500).json({
         success: false,
         keyFound: false,
-        message: '❌ GOOGLE_PLACES_API_KEY is NOT set in Render. Go to Render → Your Service → Environment → Add Variable → Name: GOOGLE_PLACES_API_KEY, Value: AIzaSyA90Kv-XIGu5RYKfDRoE_K_aQEf_JehhNA',
-      });
+        message: '❌ GOOGLE_PLACES_API_KEY is NOT set in Render.
     }
     const place = await getPlaceDetails(placeId);
     res.json({ success: true, keyFound: true, keyPrefix: apiKey.slice(0, 12) + '...', place });
