@@ -63,16 +63,19 @@ const FoodPostSchema = new mongoose.Schema(
     },
 
     // Google Places data
+    // Google Places data — all optional (null = homemade food, no attached place)
     placeName: {
       type: String,
-      required: [true, 'A place name is required'],
+      required: false,
       maxlength: [100, 'Place name too long'],
       trim: true,
+      default: null,
     },
     placeId: {
-      type: String, // Google Place ID (e.g. "ChIJN1t_tDeuEmsRUs...)
-      required: true,
+      type: String,
+      required: false,
       index: true,
+      default: null,
     },
     latitude: {
       type: Number,
@@ -117,12 +120,20 @@ const FoodPostSchema = new mongoose.Schema(
       default: null,
     },
 
-    // ✅ Google Places rating fetched at create time (null if unavailable)
-    placeRating: {
+    // ✅ Google Places rating — fetched once at create time, stored permanently
+    // null if post is homemade food or API is unavailable
+    rating: {
       type: Number,
       default: null,
       min: 1,
       max: 5,
+    },
+
+    // ✅ Number of Google reviews — shown as "⭐ 4.3 (2156 reviews)"
+    userRatingCount: {
+      type: Number,
+      default: null,
+      min: 0,
     },
 
     // Engagement
