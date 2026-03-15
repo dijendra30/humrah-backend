@@ -302,3 +302,32 @@ exports.getComments = async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 };
+
+// ══════════════════════════════════════════════════════════════
+//  GET /food/test-places?placeId=ChIJ...
+//  Debug endpoint — verify GOOGLE_PLACES_API_KEY is set.
+//  Open in browser: https://your-render-url.com/api/food/test-places?placeId=ChIJ4wgpYLD9DDkRqmTXR6UN4Fg
+// ══════════════════════════════════════════════════════════════
+exports.testPlaces = async (req, res) => {
+  try {
+    const { placeId } = req.query;
+    if (!placeId) {
+      return res.status(400).json({ success: false, message: 'Pass ?placeId=ChIJ... in query' });
+    }
+    const apiKey = process.env.GOOGLE_PLACES_API_KEY
+      || process.env.PLACES_API_KEY
+      || process.env.GOOGLE_MAPS_API_KEY
+      || '';
+    if (!apiKey) {
+      return res.status(500).json({
+        success: false,
+        keyFound: false,
+        message: '❌ GOOGLE_PLACES_API_KEY is NOT set in Render. Go to Render → Your Service → Environment → Add Variable → Name: GOOGLE_PLACES_API_KEY, Value: AIzaSyA90Kv-XIGu5RYKfDRoE_K_aQEf_JehhNA',
+      });
+    }
+    const place = await getPlaceDetails(placeId);
+    res.json({ success: true, keyFound: true, keyPrefix: apiKey.slice(0, 12) + '...', place });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
