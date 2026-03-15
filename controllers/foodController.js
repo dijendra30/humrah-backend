@@ -6,7 +6,6 @@ const https = require('https');
 const MAX_POSTS_PER_DAY = 2;
 const FEED_CARD_LIMIT   = 3;
 const NEARBY_RADIUS_KM  = 15;
-const PLACES_API_KEY    = process.env.GOOGLE_PLACES_API_KEY || '';
 
 // ─── Daily post count ─────────────────────────────────────────
 async function dailyPostCount(userId) {
@@ -41,21 +40,59 @@ function sanitize(caption = '') {
 // Uses the Places API v1 (new) with placeId
 // Returns a number (e.g. 4.3) or null if unavailable
 async function fetchPlaceRating(placeId) {
-  if (!PLACES_API_KEY || !placeId) return null;
+  // Try all common env var names for the Google Places / Maps API key
+  const apiKey = process.env.GOOGLE_PLACES_API_KEY
+    || process.env.PLACES_API_KEY
+    || process.env.GOOGLE_MAPS_API_KEY
+    || '';
+
+  if (!apiKey || !placeId) {
+    console.warn('⚠️  [Places] No API key set — placeRating will be null. Set GOOGLE_PLACES_API_KEY in env.');
+    return null;
+  }
+
+  // ✅ Places API New (v1) requires HEADERS, not query params.
+  //    The old format ?fields=rating&key=KEY silently returns nothing in v1.
+  //    Correct format: X-Goog-FieldMask header + X-Goog-Api-Key header.
   return new Promise((resolve) => {
-    const url = `https://places.googleapis.com/v1/places/${encodeURIComponent(placeId)}?fields=rating&key=${PLACES_API_KEY}`;
-    https.get(url, (res) => {
+    const options = {
+      hostname: 'places.googleapis.com',
+      path:     `/v1/places/${encodeURIComponent(placeId)}`,
+      method:   'GET',
+      headers:  {
+        'X-Goog-Api-Key':   apiKey,
+        'X-Goog-FieldMask': 'rating',
+        'Content-Type':     'application/json',
+      },
+    };
+
+    const req = https.request(options, (res) => {
       let body = '';
-      res.on('data', (chunk) => (body += chunk));
-      res.on('end', () => {
+      res.on('data',  (chunk) => (body += chunk));
+      res.on('end',   () => {
         try {
           const json = JSON.parse(body);
-          resolve(typeof json.rating === 'number' ? json.rating : null);
-        } catch {
+          if (json.error) {
+            console.error('❌ [Places] API error:', json.error.message || JSON.stringify(json.error));
+            resolve(null);
+            return;
+          }
+          const rating = typeof json.rating === 'number' ? json.rating : null;
+          console.log(`⭐ [Places] placeId=${placeId} → rating=${rating}`);
+          resolve(rating);
+        } catch (e) {
+          console.error('❌ [Places] Parse error:', e.message, '| body:', body.slice(0, 200));
           resolve(null);
         }
       });
-    }).on('error', () => resolve(null));
+    });
+
+    req.on('error', (e) => {
+      console.error('❌ [Places] Request error:', e.message);
+      resolve(null);
+    });
+
+    req.end();
   });
 }
 
