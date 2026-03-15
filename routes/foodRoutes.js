@@ -5,6 +5,7 @@ const multer  = require('multer');
 const {
   createPost,
   getNearby,
+  getFoodPosts,
   getFeedCards,
   likePost,
   addComment,
@@ -27,12 +28,14 @@ const upload = multer({
 // DO NOT add authenticate here — it would double-fire and break req.userId
 
 router.post('/create',          upload.single('image'), createPost);
+// GET /api/food-posts — spec endpoint name (prompt §3)
+// Accepts: ?latitude=28.61&longitude=77.20&page=1
+router.get('/food-posts',       getFoodPosts);
 router.get('/nearby',           getNearby);
 router.get('/feed-cards',       getFeedCards);
 router.post('/like',            likePost);
 router.post('/comment',         addComment);
 router.get('/comments/:postId', getComments);
-// ✅ Debug route — no auth required so you can open in browser
 router.get('/test-places',      testPlaces);
 
 router.use((err, _req, res, _next) => {
