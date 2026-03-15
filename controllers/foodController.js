@@ -128,35 +128,17 @@ exports.createPost = async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 exports.getFeedCards = async (req, res) => {
   try {
-    const { city } = req.query;
+    const { city, latitude, longitude } = req.query;
     const normalizedCity = (city || '').toLowerCase().trim();
-    const filter = { isActive: true, expiresAt: { $gt: new Date() } };
-    if (normalizedCity && normalizedCity !== 'all') filter.city = normalizedCity;
-
-    const posts = await FoodPost.find(filter)
-      .sort({ createdAt: -1 })
-      .limit(FEED_CARD_LIMIT)
-      .populate('userId', 'firstName lastName profilePhoto');
-
-    res.json({ success: true, posts });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-// ══════════════════════════════════════════════════════════════
-//  GET /food/nearby   — 15 km radius via $nearSphere
-// ══════════════════════════════════════════════════════════════
-exports.getNearby = async (req, res) => {
-  try {
-    const { latitude, longitude, city, page = 1, limit = 20 } = req.query;
     const userLat  = parseFloat(latitude);
     const userLng  = parseFloat(longitude);
     const hasCoords = !isNaN(userLat) && !isNaN(userLng);
 
     let posts;
+
     if (hasCoords) {
-      posts = await FoodPost.find({
+      // With coordinates: use 15 km $nearSphere, re-sort newest, take first 3
+      const matched = await FoodPost.find({
         isActive:  true,
         expiresAt: { $gt: new Date() },
         location: {
@@ -165,20 +147,101 @@ exports.getNearby = async (req, res) => {
             $maxDistance: NEARBY_RADIUS_KM * 1000,
           },
         },
-      })
-        .skip((parseInt(page) - 1) * parseInt(limit))
-        .limit(parseInt(limit))
+      }).select('_id');
+
+      const ids = matched.map((p) => p._id);
+      posts = await FoodPost.find({ _id: { $in: ids } })
+        .sort({ createdAt: -1 })
+        .limit(FEED_CARD_LIMIT)
         .populate('userId', 'firstName lastName profilePhoto');
     } else {
+      // Fallback: city filter only
+      const filter = { isActive: true, expiresAt: { $gt: new Date() } };
+      if (normalizedCity && normalizedCity !== 'all') filter.city = normalizedCity;
+      posts = await FoodPost.find(filter)
+        .sort({ createdAt: -1 })
+        .limit(FEED_CARD_LIMIT)
+        .populate('userId', 'firstName lastName profilePhoto');
+    }
+
+    // Attach distanceKm when coordinates available
+    const result = posts.map((post) => {
+      const obj = post.toObject();
+      if (hasCoords) {
+        obj.distanceKm = parseFloat(
+          haversineKm(userLat, userLng, post.latitude, post.longitude).toFixed(1)
+        );
+      }
+      return obj;
+    });
+
+    res.json({ success: true, posts: result });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ══════════════════════════════════════════════════════════════
+//  GET /food/nearby  AND  GET /api/food-posts
+//  Both handled by the same function.
+//
+//  Prompt requirements:
+//    1. Filter expiresAt > now
+//    2. Return only posts within 15 km radius
+//    3. Sort by newest first (createdAt DESC)
+//
+//  $nearSphere sorts by distance — we override with createdAt sort
+//  by fetching the matched IDs first, then re-querying with sort.
+// ══════════════════════════════════════════════════════════════
+exports.getNearby = async (req, res) => {
+  try {
+    const { latitude, longitude, city, page = 1, limit = 20 } = req.query;
+    const userLat   = parseFloat(latitude);
+    const userLng   = parseFloat(longitude);
+    const hasCoords = !isNaN(userLat) && !isNaN(userLng);
+    const skip      = (parseInt(page) - 1) * parseInt(limit);
+    const lim       = parseInt(limit);
+
+    let posts;
+
+    if (hasCoords) {
+      // ── Step 1: use $nearSphere to get IDs of posts within 15 km ──
+      // $nearSphere is required for the 2dsphere index but sorts by distance.
+      // We only use it to collect the matching IDs, then re-query sorted newest first.
+      const matched = await FoodPost.find({
+        isActive:  true,
+        expiresAt: { $gt: new Date() },
+        location: {
+          $nearSphere: {
+            $geometry:    { type: 'Point', coordinates: [userLng, userLat] },
+            $maxDistance: NEARBY_RADIUS_KM * 1000, // 15 km in metres
+          },
+        },
+      }).select('_id');
+
+      const ids = matched.map((p) => p._id);
+
+      // ── Step 2: re-query by those IDs sorted newest first (spec §3) ──
+      posts = await FoodPost.find({ _id: { $in: ids } })
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(lim)
+        .populate('userId', 'firstName lastName profilePhoto');
+
+    } else {
+      // Fallback: no coordinates — city filter + newest sort
       const filter = { isActive: true, expiresAt: { $gt: new Date() } };
       if (city) filter.city = city.toLowerCase().trim();
       posts = await FoodPost.find(filter)
         .sort({ createdAt: -1 })
-        .skip((parseInt(page) - 1) * parseInt(limit))
-        .limit(parseInt(limit))
+        .skip(skip)
+        .limit(lim)
         .populate('userId', 'firstName lastName profilePhoto');
     }
 
+    // ── Attach Haversine distanceKm to each post (spec §5) ──
+    // Android uses this as a fallback when no GPS is available.
+    // Primary distance display is always calculated on the device.
     const postsWithDistance = posts.map((post) => {
       const obj = post.toObject();
       if (hasCoords) {
@@ -195,6 +258,9 @@ exports.getNearby = async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 };
+
+// Alias — the prompt spec uses GET /api/food-posts as the endpoint name
+exports.getFoodPosts = exports.getNearby;
 
 // ══════════════════════════════════════════════════════════════
 //  POST /food/like
