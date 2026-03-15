@@ -1,47 +1,34 @@
-// controllers/foodController.js
-// All business logic for Food Discovery Posts
-//
-// FIXES applied vs previous version:
-//  • Spam limit: 3/week → 2/day            (spec §17)
-//  • expiresAt:  30 days → 4 hours         (spec §2)
-//  • getNearby:  city-string → Haversine 15 km radius (spec §4, §5)
-//  • addComment: now writes to separate FoodComment collection (spec §8)
-//  • getComments: reads from FoodComment collection (spec §8)
-
-const FoodPost        = require('../models/FoodPost');
-const FoodComment     = require('../models/FoodCommentModel');
+const FoodPost    = require('../models/FoodPost');
+const FoodComment = require('../models/FoodCommentModel');
 const { uploadBuffer } = require('../config/cloudinary');
+const https = require('https');
 
-const MAX_POSTS_PER_DAY = 2;   // spec §17: max 2 per user per day
+const MAX_POSTS_PER_DAY = 2;
 const FEED_CARD_LIMIT   = 3;
-const NEARBY_RADIUS_KM  = 15;  // spec §4: 15 km radius
+const NEARBY_RADIUS_KM  = 15;
+const PLACES_API_KEY    = process.env.GOOGLE_PLACES_API_KEY || '';
 
-// ─── Helper: count today's posts for a user ───────────────────
+// ─── Daily post count ─────────────────────────────────────────
 async function dailyPostCount(userId) {
   const startOfDay = new Date();
-  startOfDay.setHours(0, 0, 0, 0); // midnight local → UTC-safe enough for rate limiting
-  return FoodPost.countDocuments({
-    userId,
-    createdAt: { $gte: startOfDay },
-    isActive: true,
-  });
+  startOfDay.setHours(0, 0, 0, 0);
+  return FoodPost.countDocuments({ userId, createdAt: { $gte: startOfDay }, isActive: true });
 }
 
-// ─── Helper: Haversine distance (km) between two lat/lng points ─
-// Returns distance in kilometres.
+// ─── Haversine distance (km) ──────────────────────────────────
 function haversineKm(lat1, lng1, lat2, lng2) {
-  const R   = 6371;                          // Earth radius in km
-  const dLat = toRad(lat2 - lat1);
-  const dLng = toRad(lng2 - lng1);
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLng = ((lng2 - lng1) * Math.PI) / 180;
   const a =
     Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+    Math.cos((lat1 * Math.PI) / 180) *
+    Math.cos((lat2 * Math.PI) / 180) *
     Math.sin(dLng / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
-function toRad(deg) { return (deg * Math.PI) / 180; }
 
-// ─── Helper: sanitize caption ─────────────────────────────────
+// ─── Caption sanitizer ────────────────────────────────────────
 function sanitize(caption = '') {
   return caption
     .replace(/https?:\/\/\S+/gi, '')
@@ -50,17 +37,36 @@ function sanitize(caption = '') {
     .slice(0, 120);
 }
 
+// ─── Google Places New API — fetch rating ─────────────────────
+// Uses the Places API v1 (new) with placeId
+// Returns a number (e.g. 4.3) or null if unavailable
+async function fetchPlaceRating(placeId) {
+  if (!PLACES_API_KEY || !placeId) return null;
+  return new Promise((resolve) => {
+    const url = `https://places.googleapis.com/v1/places/${encodeURIComponent(placeId)}?fields=rating&key=${PLACES_API_KEY}`;
+    https.get(url, (res) => {
+      let body = '';
+      res.on('data', (chunk) => (body += chunk));
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(body);
+          resolve(typeof json.rating === 'number' ? json.rating : null);
+        } catch {
+          resolve(null);
+        }
+      });
+    }).on('error', () => resolve(null));
+  });
+}
+
 // ══════════════════════════════════════════════════════════════
 //  POST /food/create
 // ══════════════════════════════════════════════════════════════
 exports.createPost = async (req, res) => {
   try {
     const userId = req.userId;
-    if (!req.file) {
-      return res.status(400).json({ success: false, message: 'Food photo is required' });
-    }
+    if (!req.file) return res.status(400).json({ success: false, message: 'Food photo is required' });
 
-    // ✅ Rate limit: 2 posts per day (spec §17)
     const todayCount = await dailyPostCount(userId);
     if (todayCount >= MAX_POSTS_PER_DAY) {
       return res.status(429).json({
@@ -69,39 +75,39 @@ exports.createPost = async (req, res) => {
       });
     }
 
-    // Upload image to Cloudinary
     let imageUrl = '', imagePublicId = '';
     try {
-      const result  = await uploadBuffer(req.file.buffer, 'humrah/food_posts');
+      const result = await uploadBuffer(req.file.buffer, 'humrah/food_posts');
       imageUrl      = result.url      || '';
       imagePublicId = result.publicId || '';
     } catch (uploadErr) {
       console.error('❌ Cloudinary upload failed:', uploadErr);
       return res.status(500).json({ success: false, message: 'Image upload failed. Please try again.' });
     }
-    if (!imageUrl) {
-      return res.status(500).json({ success: false, message: 'Image upload returned no URL.' });
-    }
+    if (!imageUrl) return res.status(500).json({ success: false, message: 'Image upload returned no URL.' });
 
     const { caption, placeId, placeName, latitude, longitude, priceRange, city } = req.body;
     const lat = parseFloat(latitude)  || 0;
     const lng = parseFloat(longitude) || 0;
 
-    // ✅ expiresAt = now + 4 hours (spec §2)
-    const expiresAt = new Date(Date.now() + 4 * 60 * 60 * 1000);
+    // Fetch Google Places rating for this stall (non-blocking — null if API fails)
+    const placeRating = await fetchPlaceRating(placeId);
+
+    const expiresAt = new Date(Date.now() + 4 * 60 * 60 * 1000); // 4 hours
 
     const post = await FoodPost.create({
       userId,
       imageUrl,
       imagePublicId,
-      caption:   sanitize(caption),
-      placeId:   placeId   || '',
-      placeName: placeName || '',
-      latitude:  lat,
-      longitude: lng,
-      location:  { type: 'Point', coordinates: [lng, lat] }, // GeoJSON
-      city:      (city || '').toLowerCase().trim(),
-      priceRange: priceRange || null,
+      caption:     sanitize(caption),
+      placeId:     placeId   || '',
+      placeName:   placeName || '',
+      latitude:    lat,
+      longitude:   lng,
+      location:    { type: 'Point', coordinates: [lng, lat] }, // GeoJSON [lng, lat]
+      city:        (city || '').toLowerCase().trim(),
+      priceRange:  priceRange || null,
+      placeRating: placeRating,
       expiresAt,
     });
 
@@ -115,17 +121,14 @@ exports.createPost = async (req, res) => {
 };
 
 // ══════════════════════════════════════════════════════════════
-//  GET /food/feed-cards   (3 cards for horizontal feed section)
+//  GET /food/feed-cards
 // ══════════════════════════════════════════════════════════════
 exports.getFeedCards = async (req, res) => {
   try {
     const { city } = req.query;
     const normalizedCity = (city || '').toLowerCase().trim();
-
     const filter = { isActive: true, expiresAt: { $gt: new Date() } };
-    if (normalizedCity && normalizedCity !== 'all') {
-      filter.city = normalizedCity;
-    }
+    if (normalizedCity && normalizedCity !== 'all') filter.city = normalizedCity;
 
     const posts = await FoodPost.find(filter)
       .sort({ createdAt: -1 })
@@ -139,57 +142,40 @@ exports.getFeedCards = async (req, res) => {
 };
 
 // ══════════════════════════════════════════════════════════════
-//  GET /food/nearby   (paginated, 15 km Haversine filter)
+//  GET /food/nearby   — 15 km radius via $nearSphere
 // ══════════════════════════════════════════════════════════════
 exports.getNearby = async (req, res) => {
   try {
     const { latitude, longitude, city, page = 1, limit = 20 } = req.query;
-
-    const userLat = parseFloat(latitude);
-    const userLng = parseFloat(longitude);
+    const userLat  = parseFloat(latitude);
+    const userLng  = parseFloat(longitude);
     const hasCoords = !isNaN(userLat) && !isNaN(userLng);
 
-    // ✅ Strategy: if lat/lng are provided, use MongoDB $nearSphere for radius query.
-    // Fallback to city-string filter if no coordinates (e.g. older clients).
     let posts;
-
     if (hasCoords) {
-      // ── $nearSphere — returns posts within 15 km, sorted by distance ──
-      // Requires the 2dsphere index on FoodPost.location (added in FoodPost.js)
       posts = await FoodPost.find({
         isActive:  true,
         expiresAt: { $gt: new Date() },
-        location:  {
+        location: {
           $nearSphere: {
-            $geometry: {
-              type:        'Point',
-              coordinates: [userLng, userLat], // GeoJSON: [lng, lat]
-            },
-            $maxDistance: NEARBY_RADIUS_KM * 1000, // convert km → metres
+            $geometry:    { type: 'Point', coordinates: [userLng, userLat] },
+            $maxDistance: NEARBY_RADIUS_KM * 1000,
           },
         },
       })
         .skip((parseInt(page) - 1) * parseInt(limit))
         .limit(parseInt(limit))
         .populate('userId', 'firstName lastName profilePhoto');
-
     } else {
-      // ── Fallback: city-string filter + Haversine post-filter ──────────
       const filter = { isActive: true, expiresAt: { $gt: new Date() } };
       if (city) filter.city = city.toLowerCase().trim();
-
-      const allPosts = await FoodPost.find(filter)
+      posts = await FoodPost.find(filter)
         .sort({ createdAt: -1 })
+        .skip((parseInt(page) - 1) * parseInt(limit))
+        .limit(parseInt(limit))
         .populate('userId', 'firstName lastName profilePhoto');
-
-      // Haversine post-filter (no coord info → skip distance filter)
-      posts = allPosts.slice(
-        (parseInt(page) - 1) * parseInt(limit),
-        parseInt(page) * parseInt(limit),
-      );
     }
 
-    // Attach distanceKm to each post for the Android card label ("2.3 km away")
     const postsWithDistance = posts.map((post) => {
       const obj = post.toObject();
       if (hasCoords) {
@@ -209,20 +195,41 @@ exports.getNearby = async (req, res) => {
 
 // ══════════════════════════════════════════════════════════════
 //  POST /food/like
+//  FIX: ObjectId comparison must use .toString()
+//  NEW: emits FOOD_POST_LIKED socket event for real-time UI
 // ══════════════════════════════════════════════════════════════
 exports.likePost = async (req, res) => {
   try {
     const { postId } = req.body;
+    const userId = req.userId.toString();
+
     const post = await FoodPost.findById(postId);
     if (!post) return res.status(404).json({ success: false, message: 'Post not found' });
 
-    const idx = post.likes.indexOf(req.userId);
-    if (idx === -1) post.likes.push(req.userId);
-    else post.likes.splice(idx, 1);
+    // ✅ FIX: use .toString() comparison — ObjectId === ObjectId is always false
+    const alreadyLikedIdx = post.likes.findIndex((id) => id.toString() === userId);
+    const liked = alreadyLikedIdx === -1;
+
+    if (liked) {
+      post.likes.push(req.userId);
+    } else {
+      post.likes.splice(alreadyLikedIdx, 1);
+    }
     post.likesCount = post.likes.length;
     await post.save();
 
-    res.json({ success: true, liked: idx === -1, likesCount: post.likesCount });
+    // ✅ Real-time: broadcast to everyone watching this food post room
+    const io = req.app.get('io');
+    if (io) {
+      io.to(`food_post_${postId}`).emit('FOOD_POST_LIKED', {
+        postId,
+        likesCount: post.likesCount,
+        liked,
+        likedBy: userId,
+      });
+    }
+
+    res.json({ success: true, liked, likesCount: post.likesCount });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -230,36 +237,43 @@ exports.likePost = async (req, res) => {
 
 // ══════════════════════════════════════════════════════════════
 //  POST /food/comment
-//  ✅ Writes to separate FoodComment collection (spec §8)
-//     AND increments embedded commentsCount on FoodPost
+//  NEW: emits FOOD_NEW_COMMENT socket event for real-time UI
 // ══════════════════════════════════════════════════════════════
 exports.addComment = async (req, res) => {
   try {
     const { postId, text } = req.body;
-    if (!text?.trim()) {
-      return res.status(400).json({ success: false, message: 'Comment text is required' });
-    }
-    if (text.trim().length > 120) {
-      return res.status(400).json({ success: false, message: 'Comment cannot exceed 120 characters' });
-    }
+    if (!text?.trim()) return res.status(400).json({ success: false, message: 'Comment text is required' });
+    if (text.trim().length > 120) return res.status(400).json({ success: false, message: 'Comment cannot exceed 120 characters' });
 
     const post = await FoodPost.findById(postId);
-    if (!post || !post.isActive) {
-      return res.status(404).json({ success: false, message: 'Post not found' });
-    }
+    if (!post || !post.isActive) return res.status(404).json({ success: false, message: 'Post not found' });
 
-    // Write to standalone FoodComment collection
     const comment = await FoodComment.create({
       postId,
       userId: req.userId,
       text:   text.trim(),
     });
-
-    // Keep denormalized count on the post in sync
     await FoodPost.findByIdAndUpdate(postId, { $inc: { commentsCount: 1 } });
-
-    // Populate author before responding
     await comment.populate('userId', 'firstName lastName profilePhoto');
+
+    // ✅ Real-time: broadcast new comment to the post room
+    const io = req.app.get('io');
+    if (io) {
+      io.to(`food_post_${postId}`).emit('FOOD_NEW_COMMENT', {
+        postId,
+        comment: {
+          _id:       comment._id.toString(),
+          text:      comment.text,
+          createdAt: comment.createdAt,
+          userId: {
+            _id:          comment.userId._id,
+            firstName:    comment.userId.firstName,
+            lastName:     comment.userId.lastName,
+            profilePhoto: comment.userId.profilePhoto,
+          },
+        },
+      });
+    }
 
     res.status(201).json({ success: true, comment });
   } catch (err) {
@@ -269,21 +283,17 @@ exports.addComment = async (req, res) => {
 
 // ══════════════════════════════════════════════════════════════
 //  GET /food/comments/:postId
-//  ✅ Reads from separate FoodComment collection (spec §8)
 // ══════════════════════════════════════════════════════════════
 exports.getComments = async (req, res) => {
   try {
     const { postId } = req.params;
     const { page = 1, limit = 20 } = req.query;
-
     const comments = await FoodComment.find({ postId })
       .sort({ createdAt: -1 })
       .skip((parseInt(page) - 1) * parseInt(limit))
       .limit(parseInt(limit))
       .populate('userId', 'firstName lastName profilePhoto');
-
     const total = await FoodComment.countDocuments({ postId });
-
     res.json({ success: true, comments, total, hasMore: total > parseInt(page) * parseInt(limit) });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
