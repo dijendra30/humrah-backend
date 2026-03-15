@@ -1,11 +1,6 @@
 // models/FoodPost.js
 // MongoDB schema for Food Discovery Posts
 // These are personal community recommendations — NOT business listings
-//
-// FIXES applied vs previous version:
-//  • expiresAt default: 30 days → 4 hours  (spec §2)
-//  • Comment maxlength: 200 → 120 chars     (spec §9)
-//  • location GeoJSON field added for $nearSphere radius queries (spec §5)
 
 const mongoose = require('mongoose');
 
@@ -19,7 +14,7 @@ const FoodCommentSchema = new mongoose.Schema({
   text: {
     type: String,
     required: true,
-    maxlength: [120, 'Comment cannot exceed 120 characters'],  // ✅ fixed: was 200
+    maxlength: [200, 'Comment cannot exceed 200 characters'],
     trim: true,
   },
   createdAt: {
@@ -44,11 +39,17 @@ const FoodPostSchema = new mongoose.Schema(
       type: String,
       required: [true, 'A food photo is required'],
     },
+    // Cloudinary public ID — used for deletion when post is removed
+    imagePublicId: {
+      type: String,
+      default: '',
+    },
     caption: {
       type: String,
       maxlength: [120, 'Caption cannot exceed 120 characters'],
       trim: true,
       default: '',
+      // Validation: no URLs or phone numbers (anti-spam / anti-business-promo)
       validate: [
         {
           validator: (v) => !/https?:\/\//i.test(v),
@@ -69,12 +70,10 @@ const FoodPostSchema = new mongoose.Schema(
       trim: true,
     },
     placeId: {
-      type: String,
+      type: String, // Google Place ID (e.g. "ChIJN1t_tDeuEmsRUs...)
       required: true,
       index: true,
     },
-
-    // Flat lat/lng (kept for backward compat + Haversine filtering)
     latitude: {
       type: Number,
       required: true,
@@ -88,7 +87,8 @@ const FoodPostSchema = new mongoose.Schema(
       max: 180,
     },
 
-    // ✅ GeoJSON Point — enables $nearSphere / $geoWithin radius queries (spec §5)
+    // ✅ GeoJSON Point — enables $nearSphere 15 km radius queries
+    // coordinates: [longitude, latitude]  ← GeoJSON order (lng first)
     location: {
       type: {
         type: String,
@@ -101,7 +101,7 @@ const FoodPostSchema = new mongoose.Schema(
       },
     },
 
-    // City-level index for broad pre-filter before distance check
+    // City-level index for "nearby" queries
     city: {
       type: String,
       required: true,
@@ -117,17 +117,36 @@ const FoodPostSchema = new mongoose.Schema(
       default: null,
     },
 
-    // Engagement
-    likes: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
-    likesCount:    { type: Number, default: 0 },
-    comments:      [FoodCommentSchema],
-    commentsCount: { type: Number, default: 0 },
+    // ✅ Google Places rating fetched at create time (null if unavailable)
+    placeRating: {
+      type: Number,
+      default: null,
+      min: 1,
+      max: 5,
+    },
 
-    // ✅ Auto-expire after 4 hours (spec §2) — MongoDB TTL deletes the doc automatically
+    // Engagement
+    likes: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+      },
+    ],
+    likesCount: {
+      type: Number,
+      default: 0,
+    },
+    comments: [FoodCommentSchema],
+    commentsCount: {
+      type: Number,
+      default: 0,
+    },
+
+    // ✅ Auto-expire posts after 4 hours — MongoDB TTL deletes the doc automatically
     expiresAt: {
       type: Date,
-      default: () => new Date(Date.now() + 4 * 60 * 60 * 1000), // ✅ fixed: was 30 days
-      index: { expires: 0 },
+      default: () => new Date(Date.now() + 4 * 60 * 60 * 1000), // 4 hours
+      index: { expires: 0 }, // MongoDB TTL index — auto-deletes when this date passes
     },
 
     // Soft-delete / moderation flag
@@ -137,23 +156,34 @@ const FoodPostSchema = new mongoose.Schema(
       index: true,
     },
   },
-  { timestamps: true }
+  {
+    timestamps: true, // adds createdAt / updatedAt
+  }
 );
 
-// ─── Indexes ──────────────────────────────────────────────────
-FoodPostSchema.index({ city: 1, createdAt: -1 });
-FoodPostSchema.index({ userId: 1, createdAt: -1 });
-FoodPostSchema.index({ location: '2dsphere' }); // ✅ required for $nearSphere
+// ─── Compound indexes for feed queries ───────────────────────
+FoodPostSchema.index({ city: 1, createdAt: -1 }); // "nearby" sorted by newest
+FoodPostSchema.index({ userId: 1, createdAt: -1 }); // user's own posts
 
-// ─── Pre-save: sync denormalized counts + auto-populate location ──
+// ─── Geospatial index (optional — for radius queries) ─────────
+FoodPostSchema.index({ latitude: 1, longitude: 1 });
+
+// ✅ 2dsphere index on location — required for $nearSphere 15 km radius queries
+FoodPostSchema.index({ location: '2dsphere' });
+
+// ─── Virtual: total likes count from array ────────────────────
+FoodPostSchema.virtual('computedLikesCount').get(function () {
+  return this.likes.length;
+});
+
+// ─── Pre-save: sync denormalized counts ───────────────────────
 FoodPostSchema.pre('save', function (next) {
-  this.likesCount    = this.likes.length;
+  this.likesCount = this.likes.length;
   this.commentsCount = this.comments.length;
-
-  // Keep GeoJSON location in sync with flat lat/lng fields
-  if (this.isModified('latitude') || this.isModified('longitude')) {
+  // ✅ Keep GeoJSON location in sync with flat lat/lng fields
+  if (this.isModified('latitude') || this.isModified('longitude') || this.isNew) {
     this.location = {
-      type:        'Point',
+      type: 'Point',
       coordinates: [this.longitude, this.latitude], // GeoJSON: [lng, lat]
     };
   }
