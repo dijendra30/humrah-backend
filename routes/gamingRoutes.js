@@ -563,6 +563,27 @@ router.post('/sessions/:id/like', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
+//  GET SINGLE SESSION  — used by Android to re-open chat after
+//  Activity navigation clears activeChatSession
+// ═══════════════════════════════════════════════════════════════
+
+router.get('/sessions/:id', async (req, res) => {
+  try {
+    const session = await GamingSession.findById(req.params.id);
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+    // Re-use checkAndExpire so status stays accurate
+    await checkAndExpire(session, req.app.get('io'));
+    // Verify requester is a participant (creator or joined player)
+    const uid = req.user._id.toString();
+    const isParticipant =
+      session.creatorId.toString() === uid ||
+      session.playersJoined.map(String).includes(uid);
+    if (!isParticipant) return res.status(403).json({ error: 'Not a participant' });
+    res.json(formatSession(session));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ═══════════════════════════════════════════════════════════════
 //  CHAT  (§7)
 // ═══════════════════════════════════════════════════════════════
 
