@@ -531,24 +531,30 @@ router.post('/sessions/:id/mute', async (req, res) => {
 // ── POST /sessions/:id/like  — toggle like ───────────────────
 router.post('/sessions/:id/like', async (req, res) => {
   try {
-    const session      = await GamingSession.findById(req.params.id);
-    if (!session)      return res.status(404).json({ error: 'Session not found' });
+    const uid     = req.user._id;
+    const uidStr  = uid.toString();
 
-    const uid          = req.user._id;
-    const uidStr       = uid.toString();
-    const alreadyLiked = (session.likedBy || []).map(String).includes(uidStr);
+    // Check current like state without loading full session
+    const current = await GamingSession.findById(req.params.id).select('likedBy').lean();
+    if (!current) return res.status(404).json({ error: 'Session not found' });
 
-    if (alreadyLiked) {
-      session.likedBy = session.likedBy.filter(id => id.toString() !== uidStr);
-    } else {
-      session.likedBy.push(uid);
-    }
-    await session.save();
+    const alreadyLiked = (current.likedBy || []).map(String).includes(uidStr);
+
+    // ✅ Use atomic operators — works correctly even if likedBy wasn't in schema before
+    const updated = await GamingSession.findByIdAndUpdate(
+      req.params.id,
+      alreadyLiked
+        ? { $pull:     { likedBy: uid } }
+        : { $addToSet: { likedBy: uid } },
+      { new: true, select: 'likedBy' }
+    );
+
+    if (!updated) return res.status(404).json({ error: 'Session not found' });
 
     res.json({
       liked:     !alreadyLiked,
-      likeCount: session.likedBy.length,
-      likedBy:   session.likedBy.map(String),
+      likeCount: (updated.likedBy || []).length,
+      likedBy:   (updated.likedBy || []).map(String),
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
