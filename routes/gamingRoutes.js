@@ -70,8 +70,11 @@ function isMuted(session, userId) {
   );
 }
 function isChatOpen(session) {
+  // Chat stays open until chatExpiresAt (startTime + 3h).
+  // A session can be 'expired' (card gone from feed) but chat remains accessible
+  // to players who already joined — only 'cancelled' hard-stops the chat.
   return Date.now() < new Date(session.chatExpiresAt).getTime() &&
-         !['cancelled', 'expired'].includes(session.status);
+         session.status !== 'cancelled';
 }
 function isActive(session) {
   return ['waiting_for_players', 'full', 'starting'].includes(session.status);
