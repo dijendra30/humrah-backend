@@ -1,186 +1,116 @@
-const jwt = require('jsonwebtoken');
-const mongoose = require('mongoose');
-
 /**
- * sessionSocket.js — /gaming namespace
- *
- * JWT does NOT include city or username in this app.
- * We fetch them from DB after auth, same as the main socket in server.js.
- *
- * Rooms:
- *   city:{city}         — feed updates for everyone in a city
- *   session:{sessionId} — chat + player events for participants
+ * sockets/sessionSocket.js
+ * Socket.io /gaming namespace — updated with host power events.
+ * Import and call initSessionSocket(io) from your server.js.
  */
+const jwt = require("jsonwebtoken");
+
+function verifySocketToken(token) {
+  if (!token) throw new Error("No token");
+  const decoded = jwt.verify(token, process.env.JWT_SECRET || "fallback_secret_change_in_production");
+  return {
+    _id:      decoded.userId || decoded._id,
+    username: decoded.username,
+    city:     decoded.city,
+  };
+}
 
 function initSessionSocket(io) {
-  const gaming = io.of('/gaming');
+  const ns = io.of("/gaming");
 
-  // ── JWT auth middleware ────────────────────────────────────
-  gaming.use(async (socket, next) => {
+  ns.use((socket, next) => {
     try {
-      // Accept token from same places as main socket
-      let token = socket.handshake.auth?.token ||
-                  socket.handshake.query?.token ||
-                  socket.handshake.headers?.authorization?.replace('Bearer ', '');
-
-      if (!token) return next(new Error('Authentication error: No token provided'));
-
-      const JWT_SECRET = process.env.JWT_SECRET || 'fallback_secret_change_in_production';
-      const decoded    = jwt.verify(token, JWT_SECRET);
-
-      socket.userId = decoded.userId || decoded.id || decoded._id;
-
-      // Fetch full user from DB — same pattern as server.js main socket
-      const User = mongoose.model('User');
-      const user = await User.findById(socket.userId)
-        .select('firstName lastName profilePhoto questionnaire city')
-        .lean();
-
-      if (user) {
-        socket.userName = `${user.firstName || ''} ${user.lastName || ''}`.trim() || 'User';
-        socket.userCity =
-          user.questionnaire?.city ||
-          user.city ||
-          decoded.city ||
-          'Unknown';
-      } else {
-        socket.userName = 'User';
-        socket.userCity = decoded.city || 'Unknown';
-      }
-
+      const raw   = socket.handshake.auth?.token || "";
+      const token = raw.startsWith("Bearer ") ? raw.slice(7) : raw;
+      socket.data.user = verifySocketToken(token);
       next();
-    } catch (err) {
-      console.log('[GamingSocket] Auth failed:', err.message);
-      next(new Error('Authentication error: ' + err.message));
-    }
+    } catch (e) { next(new Error("Auth failed: " + e.message)); }
   });
 
-  gaming.on('connection', (socket) => {
-    const { userId, userName, userCity } = socket;
-    console.log(`[GamingSocket] Connected: ${userName} (${userId}) city=${userCity}`);
+  ns.on("connection", (socket) => {
+    const { city } = socket.data.user;
+    socket.join(`city:${city}`);
 
-    // Auto-join city room so user sees new sessions in their city
-    if (userCity && userCity !== 'Unknown') {
-      socket.join(`city:${userCity}`);
-    }
+    socket.on("join_session_room",  ({ session_id }) => { if (session_id) socket.join(`session:${session_id}`); });
+    socket.on("leave_session_room", ({ session_id }) => { if (session_id) socket.leave(`session:${session_id}`); });
 
-    // ── Join a specific session room ──────────────────────────
-    socket.on('join_session_room', ({ session_id }) => {
-      if (!session_id) return;
-      socket.join(`session:${session_id}`);
-      console.log(`[GamingSocket] ${userName} joined session:${session_id}`);
-    });
-
-    // ── Leave a specific session room ─────────────────────────
-    socket.on('leave_session_room', ({ session_id }) => {
-      if (!session_id) return;
-      socket.leave(`session:${session_id}`);
-      console.log(`[GamingSocket] ${userName} left session:${session_id}`);
-    });
-
-    // ── Heartbeat ─────────────────────────────────────────────
-    socket.on('ping_session', ({ session_id }) => {
-      socket.emit('pong_session', { session_id, ts: Date.now() });
-    });
-
-    socket.on('disconnect', (reason) => {
-      console.log(`[GamingSocket] Disconnected: ${userName} — ${reason}`);
+    socket.on("ping_session", async ({ session_id }, cb) => {
+      try {
+        const GamingSession = require("../models/GamingSession");
+        const s = await GamingSession.findById(session_id);
+        if (!s) return cb?.({ error: "Not found" });
+        cb?.({
+          session_id:    s._id, playersJoined: s.playersJoined.map(String),
+          playersNeeded: s.playersNeeded, status: s.status,
+          chatExpiresAt: s.chatExpiresAt.toISOString(),
+        });
+      } catch (e) { cb?.({ error: e.message }); }
     });
   });
 
-  console.log('[GamingSocket] /gaming namespace initialized');
+  return ns;
 }
 
-// ─────────────────────────────────────────────────────────────
-//  EMIT HELPERS  (called from gamingRoutes.js)
-// ─────────────────────────────────────────────────────────────
-
+// ── Emit helpers ───────────────────────────────────────────────
 function emitSessionCreated(io, city, session) {
-  io.of('/gaming').to(`city:${city}`).emit('session_created', session);
+  io.of("/gaming").to(`city:${city}`).emit("session_created", session);
 }
-
 function emitPlayerJoined(io, session) {
-  const payload = {
+  const p = {
     session_id:    session._id.toString(),
-    playersJoined: (session.playersJoined || []).map(String)
+    playersJoined: session.playersJoined.map(String),
+    playersNeeded: session.playersNeeded,
+    // ✅ Include creatorId so Android client only shows "X joined" toast to host
+    creatorId:     session.creatorId.toString(),
   };
-  io.of('/gaming').to(`city:${session.city}`).emit('session_updated', payload);
-  io.of('/gaming').to(`session:${session._id}`).emit('player_joined', payload);
+  io.of("/gaming").to(`session:${session._id}`).emit("player_joined", p);
+  io.of("/gaming").to(`city:${session.city}`).emit("session_updated", p);
 }
-
 function emitPlayerLeft(io, session, userId) {
-  const payload = {
-    session_id:    session._id.toString(),
-    userId,
-    playersJoined: (session.playersJoined || []).map(String)
-  };
-  io.of('/gaming').to(`city:${session.city}`).emit('session_updated', payload);
-  io.of('/gaming').to(`session:${session._id}`).emit('player_left', payload);
+  const p = { session_id: session._id.toString(), userId, playersJoined: session.playersJoined.map(String) };
+  io.of("/gaming").to(`session:${session._id}`).emit("player_left", p);
 }
-
-function emitPlayerKicked(io, sessionId, city, targetUserId) {
-  const payload = { session_id: sessionId, userId: String(targetUserId) };
-  io.of('/gaming').to(`session:${sessionId}`).emit('player_removed', payload);
-}
-
-function emitPlayerMuted(io, sessionId, targetUserId, mutedUntil) {
-  io.of('/gaming').to(`session:${sessionId}`).emit('player_muted', {
-    session_id: sessionId,
-    userId:     String(targetUserId),
-    mutedUntil
-  });
-}
-
-function emitNewMessage(io, sessionId, message) {
-  io.of('/gaming').to(`session:${sessionId}`).emit('new_message', {
-    session_id: sessionId,
-    message
-  });
-}
-
 function emitSessionStarted(io, sessionId, city) {
-  const payload = { session_id: sessionId };
-  io.of('/gaming').to(`city:${city}`).emit('session_started', payload);
-  io.of('/gaming').to(`session:${sessionId}`).emit('session_started', payload);
+  const p = { session_id: sessionId };
+  io.of("/gaming").to(`session:${sessionId}`).emit("session_started", p);
+  io.of("/gaming").to(`city:${city}`).emit("session_started", p);
 }
-
 function emitSessionExpired(io, sessionId, city) {
-  const payload = { session_id: sessionId };
-  io.of('/gaming').to(`city:${city}`).emit('session_expired', payload);
-  io.of('/gaming').to(`session:${sessionId}`).emit('session_expired', payload);
+  const p = { session_id: sessionId };
+  io.of("/gaming").to(`session:${sessionId}`).emit("session_expired", p);
+  io.of("/gaming").to(`city:${city}`).emit("session_expired", p);
 }
-
 function emitSessionCancelled(io, sessionId, city) {
-  const payload = { session_id: sessionId };
-  io.of('/gaming').to(`city:${city}`).emit('session_cancelled', payload);
-  io.of('/gaming').to(`session:${sessionId}`).emit('session_cancelled', payload);
+  const p = { session_id: sessionId };
+  io.of("/gaming").to(`session:${sessionId}`).emit("session_cancelled", p);
+  io.of("/gaming").to(`city:${city}`).emit("session_cancelled", p);
 }
-
+function emitPlayerKicked(io, sessionId, city, targetUserId) {
+  io.of("/gaming").to(`session:${sessionId}`).emit("player_removed", { session_id: sessionId, userId: targetUserId });
+  io.of("/gaming").to(`city:${city}`).emit("session_updated", { session_id: sessionId });
+}
+function emitPlayerMuted(io, sessionId, targetUserId, mutedUntil) {
+  io.of("/gaming").to(`session:${sessionId}`).emit("player_muted", { session_id: sessionId, userId: targetUserId, mutedUntil });
+}
 function emitPinnedMessage(io, sessionId, message) {
-  io.of('/gaming').to(`session:${sessionId}`).emit('message_pinned', {
-    session_id: sessionId,
-    message
-  });
+  io.of("/gaming").to(`session:${sessionId}`).emit("message_pinned", { session_id: sessionId, message });
+}
+function emitNewReaction(io, sessionId, data) {
+  io.of("/gaming").to(`session:${sessionId}`).emit("reaction_updated", { session_id: sessionId, ...data });
 }
 
-function emitNewReaction(io, sessionId, payload) {
-  io.of('/gaming').to(`session:${sessionId}`).emit('reaction_updated', {
-    session_id: sessionId,
-    ...payload
-  });
+/**
+ * Broadcast a new chat message to every participant in the session room.
+ * Payload shape matches the ChatMessageDto the Android client already parses.
+ */
+function emitNewMessage(io, sessionId, message) {
+  io.of("/gaming").to(`session:${sessionId}`).emit("new_message", { session_id: sessionId, message });
 }
 
 module.exports = {
   initSessionSocket,
-  emitSessionCreated,
-  emitPlayerJoined,
-  emitPlayerLeft,
-  emitPlayerKicked,
-  emitPlayerMuted,
+  emitSessionCreated, emitPlayerJoined, emitPlayerLeft,
+  emitSessionStarted, emitSessionExpired, emitSessionCancelled,
+  emitPlayerKicked, emitPlayerMuted, emitPinnedMessage, emitNewReaction,
   emitNewMessage,
-  emitSessionStarted,
-  emitSessionExpired,
-  emitSessionCancelled,
-  emitPinnedMessage,
-  emitNewReaction
 };
