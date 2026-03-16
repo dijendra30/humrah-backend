@@ -9,6 +9,14 @@ const dotenv = require('dotenv');
 
 dotenv.config();
 
+// ✅ Initialize Firebase Admin SDK (MUST be before any push notification calls)
+try {
+  require('./config/firebase');
+  console.log('✅ Firebase Admin SDK initialized');
+} catch (err) {
+  console.error('❌ Firebase init failed:', err.message);
+}
+
 const app = express();
 const server = http.createServer(app);
 
@@ -397,19 +405,6 @@ io.on('connection', (socket) => {
     });
   });
   
-  // ==================== 🍜 FOOD POST ROOMS ====================
-  socket.on('join_food_post', (postId) => {
-    if (!postId) return;
-    socket.join(`food_post_${postId}`);
-    console.log(`🍜 ${userName} joined food_post_${postId}`);
-  });
-
-  socket.on('leave_food_post', (postId) => {
-    if (!postId) return;
-    socket.leave(`food_post_${postId}`);
-    console.log(`🍜 ${userName} left food_post_${postId}`);
-  });
-
   // ==================== DISCONNECT ====================
   socket.on('disconnect', () => {
     console.log(`❌ User disconnected: ${userName} (${socket.id})`);
