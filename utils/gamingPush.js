@@ -1,79 +1,57 @@
 /**
  * utils/gamingPush.js
  *
- * Sends Firebase Cloud Messaging push notifications for gaming session events.
- *
- * Uses the app's existing firebase-admin setup (initialized once in server.js).
- * Falls back gracefully if firebase-admin is not yet initialized.
- *
- * Usage:
- *   const { sendGamingPush } = require("../utils/gamingPush");
- *
- *   await sendGamingPush({
- *     recipientId: session.creatorId.toString(),
- *     title:       "BGMI Session",
- *     body:        "Arjun joined your BGMI session! 🎮",
- *     data:        { type: "PLAYER_JOINED", sessionId: "abc123" },
- *   });
+ * KEY DESIGN: sends DATA-ONLY messages (no notification:{} field).
+ *   - FCM never auto-shows a notification — zero duplicates
+ *   - onMessageReceived always fires regardless of app state
+ *   - Android shows exactly ONE notification via showGamingNotification()
+ *   - recipientUserId in data lets app verify notification is for current user
  */
+
 const mongoose = require("mongoose");
 
-/**
- * Send a push notification to all FCM tokens registered for a user.
- *
- * @param {Object} opts
- * @param {string}  opts.recipientId   - MongoDB User _id string
- * @param {string}  opts.title         - Notification title
- * @param {string}  opts.body          - Notification body
- * @param {Object}  [opts.data]        - Extra key-value payload (string values only)
- */
 async function sendGamingPush({ recipientId, title, body, data = {} }) {
-  // ── 1. Resolve firebase-admin app ──────────────────────────
+  // ── 1. Resolve firebase-admin ─────────────────────────────
   let admin;
   try {
     admin = require("firebase-admin");
-    // If getApp() throws, firebase-admin hasn't been initialized yet
     admin.app();
   } catch {
     console.warn("[gamingPush] firebase-admin not initialized — skipping push");
     return;
   }
 
-  // ── 2. Fetch recipient's FCM tokens ────────────────────────
+  // ── 2. Fetch recipient FCM tokens ─────────────────────────
   const User = mongoose.model("User");
   const user = await User.findById(recipientId).select("fcmTokens").lean();
   if (!user || !user.fcmTokens || user.fcmTokens.length === 0) return;
+
   const tokens = user.fcmTokens.filter(Boolean);
   if (tokens.length === 0) return;
 
-  // ── 3. Build FCM multicast message ────────────────────────
-  // Stringify all data values (FCM requires string-only maps)
+  // ── 3. DATA-ONLY message ──────────────────────────────────
+  // No notification:{} — prevents Android auto-display AND onMessageReceived double-fire.
+  // title + body + recipientUserId are included in data so the app can:
+  //   a) display exactly one notification
+  //   b) check recipientUserId == SharedPrefs userId before showing
   const stringData = Object.fromEntries(
-    Object.entries(data).map(([k, v]) => [k, String(v)])
+    Object.entries({ ...data, title, body, recipientUserId: String(recipientId) })
+      .map(([k, v]) => [k, String(v)])
   );
 
   const message = {
     tokens,
-    notification: { title, body },
-    data: stringData,
-    android: {
-      priority: "high",
-      notification: {
-        channelId: "gaming_sessions",   // must match Android channel ID
-        sound:     "default",
-      },
-    },
+    data: stringData,           // ✅ data-only, no notification block
+    android: { priority: "high" },
     apns: {
-      payload: {
-        aps: { sound: "default", badge: 1 },
-      },
+      payload: { aps: { "content-available": 1 } },
+      headers: { "apns-priority": "5" },
     },
   };
 
-  // ── 4. Send & clean up stale tokens ───────────────────────
+  // ── 4. Send & remove stale tokens ────────────────────────
   const result = await admin.messaging().sendEachForMulticast(message);
 
-  // Remove tokens that are no longer valid
   const staleTokens = [];
   result.responses.forEach((resp, idx) => {
     if (!resp.success) {
@@ -91,6 +69,7 @@ async function sendGamingPush({ recipientId, title, body, data = {} }) {
     await User.findByIdAndUpdate(recipientId, {
       $pull: { fcmTokens: { $in: staleTokens } },
     });
+    console.log(`[gamingPush] Removed ${staleTokens.length} stale token(s) for ${recipientId}`);
   }
 
   const successCount = result.responses.filter(r => r.success).length;
