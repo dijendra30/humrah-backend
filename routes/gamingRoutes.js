@@ -228,17 +228,36 @@ router.post('/sessions/check-existing', async (req, res) => {
 router.get('/sessions', async (req, res) => {
   try {
     const io   = req.app.get('io');
+    const uid  = req.user._id;
     const city = resolveCity(req, req.query.city);
 
-    const sessions = await GamingSession.find({
+    // ── Query 1: Active feed sessions (visible to everyone in city) ──
+    const feedSessions = await GamingSession.find({
       city,
       status:             { $in: ['waiting_for_players', 'full', 'starting'] },
-      notInterestedUsers: { $nin: [req.user._id] },    // §12
-      kickedPlayers:      { $nin: [req.user._id] },
+      notInterestedUsers: { $nin: [uid] },
+      kickedPlayers:      { $nin: [uid] },
     }).sort({ startTime: 1 }).limit(20);
 
+    // ── Query 2: User's own 'live' sessions where chat is still open ──
+    // These are sessions where the card expired but the chat window (startTime + 3h)
+    // is still running. The user is creator or joined player.
+    const now = new Date();
+    const mySessions = await GamingSession.find({
+      status:        'live',
+      chatExpiresAt: { $gt: now },
+      $or: [
+        { creatorId: uid },
+        { playersJoined: uid }
+      ]
+    });
+
+    // Merge, deduplicate, expire stale ones
+    const seen = new Set();
     const live = [];
-    for (const s of sessions) {
+    for (const s of [...feedSessions, ...mySessions]) {
+      if (seen.has(s._id.toString())) continue;
+      seen.add(s._id.toString());
       await checkAndExpire(s, io);
       if (!['expired', 'cancelled'].includes(s.status)) live.push(formatSession(s));
     }
