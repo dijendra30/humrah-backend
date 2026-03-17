@@ -71,13 +71,13 @@ function isMuted(session, userId) {
 }
 function isChatOpen(session) {
   // Chat stays open until chatExpiresAt (startTime + 3h).
-  // A session can be 'expired' (card gone from feed) but chat remains accessible
-  // to players who already joined — only 'cancelled' hard-stops the chat.
+  // 'live' = card expired from feed but chat still running.
+  // Only 'cancelled' and 'expired' hard-stop the chat.
   return Date.now() < new Date(session.chatExpiresAt).getTime() &&
-         session.status !== 'cancelled';
+         !['cancelled', 'expired'].includes(session.status);
 }
 function isActive(session) {
-  return ['waiting_for_players', 'full', 'starting'].includes(session.status);
+  return ['waiting_for_players', 'full', 'starting', 'live'].includes(session.status);
 }
 function displayName(user) {
   return `${user.firstName || ''} ${user.lastName || ''}`.trim() || 'User';
@@ -141,20 +141,32 @@ function formatMsg(m, sessionId) {
 
 // ── Check + expire sessions past expiresAt ────────────────────
 async function checkAndExpire(session, io) {
-  if (
-    !['expired', 'cancelled', 'completed', 'in_progress'].includes(session.status) &&
-    session.expiresAt &&
-    new Date() > session.expiresAt
-  ) {
-    session.status = 'expired';
-    session.messages.push({
-      senderId:       session.creatorId,
-      senderUsername: session.creatorUsername,
-      text:           'This session has expired.',
-      isSystemMsg:    true
-    });
-    await session.save();
-    if (io) emitSessionExpired(io, session._id.toString(), session.city);
+  const now = new Date();
+  const cardExpired = session.expiresAt && now > session.expiresAt;
+  const chatExpired = now > new Date(session.chatExpiresAt);
+
+  if (['cancelled', 'expired'].includes(session.status)) return session;
+
+  if (cardExpired && chatExpired) {
+    // Both card and chat have expired — fully done
+    if (session.status !== 'expired') {
+      session.status = 'expired';
+      session.messages.push({
+        senderId:       session.creatorId,
+        senderUsername: session.creatorUsername,
+        text:           'This gaming session chat has ended.',
+        isSystemMsg:    true
+      });
+      await session.save();
+      if (io) emitSessionExpired(io, session._id.toString(), session.city);
+    }
+  } else if (cardExpired && !chatExpired) {
+    // Card expired but chat still open — move to 'live'
+    if (!['live', 'in_progress', 'started'].includes(session.status)) {
+      session.status = 'live';
+      await session.save();
+      if (io) emitSessionExpired(io, session._id.toString(), session.city); // remove from feed
+    }
   }
   return session;
 }
@@ -779,23 +791,43 @@ async function sendNewSessionNotifications(session, hostUserId) {
 function startExpiryJob(io) {
   setInterval(async () => {
     try {
-      // §4: expire sessions where expiresAt passed AND status is still active
-      const expired = await GamingSession.find({
-        status:    { $in: ['waiting_for_players', 'full', 'starting'] },
-        expiresAt: { $lte: new Date() }
+      const now = new Date();
+
+      // ── Step 1: Card expired but chat still open → status = 'live' ──────────
+      // These sessions didn't fill in time (expiresAt passed) but chatExpiresAt
+      // (startTime + 3h) hasn't passed yet. The card disappears from the feed
+      // but the chat stays accessible. We use 'live' so isChatOpen() returns true.
+      const cardExpired = await GamingSession.find({
+        status:         { $in: ['waiting_for_players', 'full', 'starting'] },
+        expiresAt:      { $lte: now },
+        chatExpiresAt:  { $gt: now }       // chat still has time left
       });
 
-      for (const s of expired) {
-        s.status = 'expired';   // §4, §13
+      for (const s of cardExpired) {
+        s.status = 'live';   // card gone from feed, chat still running
+        await s.save();
+        if (io) emitSessionExpired(io, s._id.toString(), s.city);  // remove from feed
+        console.log(`[gaming] Session ${s._id} card expired → status=live (chat open until ${s.chatExpiresAt.toISOString()})`);
+      }
+
+      // ── Step 2: Chat window also closed → status = 'expired' ─────────────
+      // These sessions are fully done — both card and chat have expired.
+      const fullyExpired = await GamingSession.find({
+        status:        { $in: ['waiting_for_players', 'full', 'starting', 'live', 'in_progress'] },
+        chatExpiresAt: { $lte: now }
+      });
+
+      for (const s of fullyExpired) {
+        s.status = 'expired';
         s.messages.push({
           senderId:       s.creatorId,
           senderUsername: s.creatorUsername,
-          text:           'This gaming session has expired.',   // §13
+          text:           'This gaming session chat has ended.',
           isSystemMsg:    true
         });
         await s.save();
         if (io) emitSessionExpired(io, s._id.toString(), s.city);
-        console.log(`[gaming] Session ${s._id} expired`);
+        console.log(`[gaming] Session ${s._id} fully expired (chat closed)`);
       }
     } catch (e) { console.error('[gaming] Expiry job error:', e.message); }
   }, 60_000);
