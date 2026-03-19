@@ -95,7 +95,7 @@ exports.createPost = async (req, res) => {
 
     console.log(`🍜 [createPost] placeId=${placeId || 'none'} → placeName=${finalPlaceName} rating=${finalRating} reviews=${finalUserRatingCount}`);
 
-    const expiresAt = new Date(Date.now() + 4 * 60 * 60 * 1000); // 4 hours
+    const expiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000); // 48 hours — TTL hard-delete
 
     const post = await FoodPost.create({
       userId,
@@ -126,21 +126,31 @@ exports.createPost = async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 //  GET /food/feed-cards
 // ══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
+//  GET /food/feed-cards  — 3 horizontal cards for community feed
+//
+//  Tiered visibility:
+//    Priority 1 (0–24h)   → always shown first
+//    Priority 2 (24–48h)  → backfill only when < FEED_CARD_LIMIT fresh posts exist
+//    Priority 3 (48h+)    → TTL-deleted by MongoDB, never shown
+// ══════════════════════════════════════════════════════════════
 exports.getFeedCards = async (req, res) => {
   try {
     const { city, latitude, longitude } = req.query;
     const normalizedCity = (city || '').toLowerCase().trim();
-    const userLat  = parseFloat(latitude);
-    const userLng  = parseFloat(longitude);
+    const userLat   = parseFloat(latitude);
+    const userLng   = parseFloat(longitude);
     const hasCoords = !isNaN(userLat) && !isNaN(userLng);
 
-    let posts;
+    const now        = new Date();
+    const fresh24h   = new Date(now - 24 * 60 * 60 * 1000); // 24h ago
 
-    if (hasCoords) {
-      // With coordinates: use 15 km $nearSphere, re-sort newest, take first 3
+    // ── Helper: base filter by coords or city ─────────────────
+    async function getIds() {
+      if (!hasCoords) return null; // null = no geo filter
       const matched = await FoodPost.find({
         isActive:  true,
-        expiresAt: { $gt: new Date() },
+        expiresAt: { $gt: now },
         location: {
           $nearSphere: {
             $geometry:    { type: 'Point', coordinates: [userLng, userLat] },
@@ -148,25 +158,62 @@ exports.getFeedCards = async (req, res) => {
           },
         },
       }).select('_id');
-
-      const ids = matched.map((p) => p._id);
-      posts = await FoodPost.find({ _id: { $in: ids } })
-        .sort({ createdAt: -1 })
-        .limit(FEED_CARD_LIMIT)
-        .populate('userId', 'firstName lastName profilePhoto');
-    } else {
-      // Fallback: city filter only
-      const filter = { isActive: true, expiresAt: { $gt: new Date() } };
-      if (normalizedCity && normalizedCity !== 'all') filter.city = normalizedCity;
-      posts = await FoodPost.find(filter)
-        .sort({ createdAt: -1 })
-        .limit(FEED_CARD_LIMIT)
-        .populate('userId', 'firstName lastName profilePhoto');
+      return matched.map((p) => p._id);
     }
 
-    // Attach distanceKm when coordinates available
+    const geoIds = await getIds();
+
+    function buildFilter(createdAfter) {
+      const f = {
+        isActive:  true,
+        expiresAt: { $gt: now },
+        createdAt: { $gte: createdAfter },
+      };
+      if (geoIds) {
+        f._id = { $in: geoIds };
+      } else if (normalizedCity && normalizedCity !== 'all') {
+        f.city = normalizedCity;
+      }
+      return f;
+    }
+
+    // ── Step 1: fetch fresh posts (0–24h) ─────────────────────
+    let freshPosts = await FoodPost.find(buildFilter(fresh24h))
+      .sort({ createdAt: -1 })
+      .limit(FEED_CARD_LIMIT)
+      .populate('userId', 'firstName lastName profilePhoto');
+
+    let posts = freshPosts;
+
+    // ── Step 2: backfill with stale posts (24–48h) if needed ──
+    if (posts.length < FEED_CARD_LIMIT) {
+      const needed    = FEED_CARD_LIMIT - posts.length;
+      const freshIds  = posts.map((p) => p._id);
+      const staleFilter = {
+        isActive:  true,
+        expiresAt: { $gt: now },
+        createdAt: { $lt: fresh24h }, // older than 24h
+        _id: { $nin: freshIds },
+      };
+      if (geoIds) {
+        staleFilter._id = { $in: geoIds, $nin: freshIds };
+      } else if (normalizedCity && normalizedCity !== 'all') {
+        staleFilter.city = normalizedCity;
+      }
+
+      const stalePosts = await FoodPost.find(staleFilter)
+        .sort({ createdAt: -1 })
+        .limit(needed)
+        .populate('userId', 'firstName lastName profilePhoto');
+
+      posts = [...freshPosts, ...stalePosts];
+    }
+
+    // Attach distanceKm + priority tier to each post
     const result = posts.map((post) => {
-      const obj = post.toObject();
+      const obj       = post.toObject();
+      const ageMs     = now - new Date(post.createdAt);
+      obj.priority    = ageMs < 24 * 60 * 60 * 1000 ? 'fresh' : 'stale';
       if (hasCoords) {
         obj.distanceKm = parseFloat(
           haversineKm(userLat, userLng, post.latitude, post.longitude).toFixed(1)
@@ -183,15 +230,11 @@ exports.getFeedCards = async (req, res) => {
 
 // ══════════════════════════════════════════════════════════════
 //  GET /food/nearby  AND  GET /api/food-posts
-//  Both handled by the same function.
 //
-//  Prompt requirements:
-//    1. Filter expiresAt > now
-//    2. Return only posts within 15 km radius
-//    3. Sort by newest first (createdAt DESC)
-//
-//  $nearSphere sorts by distance — we override with createdAt sort
-//  by fetching the matched IDs first, then re-querying with sort.
+//  Tiered visibility (same rules as getFeedCards):
+//    0–24h  → always shown, newest first
+//    24–48h → backfill if page has fewer than `limit` fresh posts
+//    48h+   → TTL-deleted, never returned
 // ══════════════════════════════════════════════════════════════
 exports.getNearby = async (req, res) => {
   try {
@@ -202,48 +245,62 @@ exports.getNearby = async (req, res) => {
     const skip      = (parseInt(page) - 1) * parseInt(limit);
     const lim       = parseInt(limit);
 
-    let posts;
+    const now      = new Date();
+    const fresh24h = new Date(now - 24 * 60 * 60 * 1000);
 
+    // ── Step 1: $nearSphere to get IDs within 15 km ───────────
+    let geoIds = null;
     if (hasCoords) {
-      // ── Step 1: use $nearSphere to get IDs of posts within 15 km ──
-      // $nearSphere is required for the 2dsphere index but sorts by distance.
-      // We only use it to collect the matching IDs, then re-query sorted newest first.
       const matched = await FoodPost.find({
         isActive:  true,
-        expiresAt: { $gt: new Date() },
+        expiresAt: { $gt: now },
         location: {
           $nearSphere: {
             $geometry:    { type: 'Point', coordinates: [userLng, userLat] },
-            $maxDistance: NEARBY_RADIUS_KM * 1000, // 15 km in metres
+            $maxDistance: NEARBY_RADIUS_KM * 1000,
           },
         },
       }).select('_id');
-
-      const ids = matched.map((p) => p._id);
-
-      // ── Step 2: re-query by those IDs sorted newest first (spec §3) ──
-      posts = await FoodPost.find({ _id: { $in: ids } })
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(lim)
-        .populate('userId', 'firstName lastName profilePhoto');
-
-    } else {
-      // Fallback: no coordinates — city filter + newest sort
-      const filter = { isActive: true, expiresAt: { $gt: new Date() } };
-      if (city) filter.city = city.toLowerCase().trim();
-      posts = await FoodPost.find(filter)
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(lim)
-        .populate('userId', 'firstName lastName profilePhoto');
+      geoIds = matched.map((p) => p._id);
     }
 
-    // ── Attach Haversine distanceKm to each post (spec §5) ──
-    // Android uses this as a fallback when no GPS is available.
-    // Primary distance display is always calculated on the device.
-    const postsWithDistance = posts.map((post) => {
-      const obj = post.toObject();
+    function baseFilter(extra = {}) {
+      const f = { isActive: true, expiresAt: { $gt: now }, ...extra };
+      if (geoIds) f._id = { ...(f._id || {}), $in: geoIds };
+      else if (city) f.city = city.toLowerCase().trim();
+      return f;
+    }
+
+    // ── Step 2: fetch fresh posts (0–24h) sorted newest ───────
+    const freshFilter = baseFilter({ createdAt: { $gte: fresh24h } });
+    const freshPosts  = await FoodPost.find(freshFilter)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(lim)
+      .populate('userId', 'firstName lastName profilePhoto');
+
+    let posts = freshPosts;
+
+    // ── Step 3: backfill with stale (24–48h) if page not full ─
+    if (posts.length < lim) {
+      const needed     = lim - posts.length;
+      const freshIds   = posts.map((p) => p._id);
+      const staleFilter = baseFilter({
+        createdAt: { $lt: fresh24h },
+        _id:       { $nin: freshIds, ...(geoIds ? { $in: geoIds } : {}) },
+      });
+      const stalePosts  = await FoodPost.find(staleFilter)
+        .sort({ createdAt: -1 })
+        .limit(needed)
+        .populate('userId', 'firstName lastName profilePhoto');
+      posts = [...freshPosts, ...stalePosts];
+    }
+
+    // ── Attach distanceKm + priority tier ─────────────────────
+    const postsWithMeta = posts.map((post) => {
+      const obj    = post.toObject();
+      const ageMs  = now - new Date(post.createdAt);
+      obj.priority = ageMs < 24 * 60 * 60 * 1000 ? 'fresh' : 'stale';
       if (hasCoords) {
         obj.distanceKm = parseFloat(
           haversineKm(userLat, userLng, post.latitude, post.longitude).toFixed(1)
@@ -252,14 +309,14 @@ exports.getNearby = async (req, res) => {
       return obj;
     });
 
-    res.json({ success: true, posts: postsWithDistance });
+    res.json({ success: true, posts: postsWithMeta });
   } catch (err) {
     console.error('getNearby error:', err);
     res.status(500).json({ success: false, message: err.message });
   }
 };
 
-// Alias — the prompt spec uses GET /api/food-posts as the endpoint name
+// Alias — prompt spec uses GET /api/food-posts
 exports.getFoodPosts = exports.getNearby;
 
 // ══════════════════════════════════════════════════════════════
