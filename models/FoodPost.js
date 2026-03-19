@@ -153,11 +153,14 @@ const FoodPostSchema = new mongoose.Schema(
       default: 0,
     },
 
-    // ✅ Auto-expire posts after 4 hours — MongoDB TTL deletes the doc automatically
+    // ✅ Tiered visibility — MongoDB TTL hard-deletes at 48h
+    //   0–24h  → fresh / high priority — always shown first in feed
+    //   24–48h → stale / low priority  — shown only when no fresh posts exist nearby
+    //   48h+   → TTL index auto-deletes the document from MongoDB
     expiresAt: {
-      type: Date,
-      default: () => new Date(Date.now() + 4 * 60 * 60 * 1000), // 4 hours
-      index: { expires: 0 }, // MongoDB TTL index — auto-deletes when this date passes
+      type:    Date,
+      default: () => new Date(Date.now() + 48 * 60 * 60 * 1000), // 48 hours
+      index:   { expires: 0 }, // MongoDB TTL — auto-deletes when expiresAt passes
     },
 
     // Soft-delete / moderation flag
