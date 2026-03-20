@@ -45,8 +45,21 @@ exports.createPost = async (req, res) => {
       placeRating,
     } = req.body;
 
-    if (!latitude || !longitude || !city) {
-      return res.status(400).json({ success: false, message: 'latitude, longitude and city are required' });
+    if (!latitude || !longitude) {
+      return res.status(400).json({ success: false, message: 'latitude and longitude are required' });
+    }
+
+    // ✅ City normalisation:
+    // The Places API often returns locality names like "New Delhi", "Central Delhi" etc.
+    // The user's profile city (from JWT via req.user) is the canonical city used in all
+    // feed queries. We always prefer the profile city so posts appear in the user's feed.
+    // If the profile city is blank we fall back to whatever the client sent.
+    const profileCity = (req.user?.questionnaire?.city || req.user?.city || '').toLowerCase().trim();
+    const clientCity  = (city || '').toLowerCase().trim();
+    const finalCity   = profileCity || clientCity;
+
+    if (!finalCity) {
+      return res.status(400).json({ success: false, message: 'city is required' });
     }
 
     // Upload image to Cloudinary
@@ -87,7 +100,7 @@ exports.createPost = async (req, res) => {
         coordinates: [finalLng, finalLat],  // GeoJSON order: [longitude, latitude]
       },
       priceRange:      priceRange || null,
-      city:            city.toLowerCase().trim(),
+      city:            finalCity,
       rating:          finalRating,
       userRatingCount: finalRatingCount,
     });
@@ -106,16 +119,20 @@ exports.createPost = async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 exports.getFeedCards = async (req, res) => {
   try {
-    const city = (req.query.city || req.user?.questionnaire?.city || '').toLowerCase().trim();
+    // ✅ Always prefer user's profile city over query param — same normalisation as createPost
+    const profileCity = (req.user?.questionnaire?.city || req.user?.city || '').toLowerCase().trim();
+    const queryCity   = (req.query.city || '').toLowerCase().trim();
+    const city        = profileCity || queryCity;
+
     if (!city) return res.status(400).json({ success: false, message: 'city is required' });
 
     const requestingUserId = req.userId;
+    const baseQuery = { isActive: true, expiresAt: { $gt: new Date() } };
 
-    // Try fresh posts first (< 24h)
+    // ── Step 1: fresh posts (< 24h) in user's city ────────────
     let posts = await FoodPost.find({
+      ...baseQuery,
       city,
-      isActive:  true,
-      expiresAt: { $gt: new Date() },
       userId:    { $ne: requestingUserId },
       createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
     })
@@ -124,13 +141,12 @@ exports.getFeedCards = async (req, res) => {
       .populate('userId', 'firstName lastName profilePhoto')
       .lean();
 
-    // Fall back to any active posts if fewer than 3 fresh ones
+    // ── Step 2: any active posts in city if fewer than 3 fresh ─
     if (posts.length < 3) {
       const freshIds = posts.map(p => p._id);
       const older = await FoodPost.find({
+        ...baseQuery,
         city,
-        isActive:  true,
-        expiresAt: { $gt: new Date() },
         userId:    { $ne: requestingUserId },
         _id:       { $nin: freshIds },
       })
@@ -139,6 +155,19 @@ exports.getFeedCards = async (req, res) => {
         .populate('userId', 'firstName lastName profilePhoto')
         .lean();
       posts = [...posts, ...older];
+    }
+
+    // ── Step 3: ✅ Fallback — if still 0, return the 3 most recent posts ANY city ──
+    // This handles city name mismatches (e.g. post saved as "new delhi", user city "delhi")
+    if (posts.length === 0) {
+      posts = await FoodPost.find({
+        ...baseQuery,
+        userId: { $ne: requestingUserId },
+      })
+        .sort({ createdAt: -1 })
+        .limit(3)
+        .populate('userId', 'firstName lastName profilePhoto')
+        .lean();
     }
 
     res.json({ success: true, posts });
@@ -153,7 +182,8 @@ exports.getFeedCards = async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 exports.getNearby = async (req, res) => {
   try {
-    const city      = (req.query.city || req.user?.questionnaire?.city || '').toLowerCase().trim();
+    const profileCity = (req.user?.questionnaire?.city || req.user?.city || '').toLowerCase().trim();
+    const city        = profileCity || (req.query.city || '').toLowerCase().trim();
     const page      = Math.max(1, parseInt(req.query.page) || 1);
     const limit     = 10;
     const skip      = (page - 1) * limit;
