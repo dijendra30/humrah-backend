@@ -65,7 +65,9 @@ const activitySchema = new mongoose.Schema(
 
     isRead: { type: Boolean, default: false, index: true },
   },
-  { timestamps: true }
+  {
+    timestamps: true, // adds createdAt + updatedAt (both returned in API responses)
+  }
 );
 
 // Primary feed query index
