@@ -17,6 +17,9 @@
 const Activity = require('../models/Activity');
 const User     = require('../models/User');
 
+// Lazy require — avoids circular deps at module load time
+const getPush = () => require('../utils/gamingPush').sendGamingPush;
+
 // ─────────────────────────────────────────────────────────────
 //  CONSTANTS
 // ─────────────────────────────────────────────────────────────
@@ -122,7 +125,7 @@ async function createOrAggregateActivity({
   const actorPhoto = actor?.profilePhoto || null;
 
   // 5. Create fresh activity
-  return Activity.create({
+  const created = await Activity.create({
     userId,
     actorId,
     actorName,
@@ -135,13 +138,50 @@ async function createOrAggregateActivity({
     meta: { count: 1, previewUsers: [actorId] },
     isRead: false,
   });
+
+  // 6. Push notifications — WARNING always pushes (spec §5)
+  //    COMMENT_FOOD and JOIN_GAMING are handled at the caller level
+  if (type === 'WARNING') {
+    getPush()({
+      recipientId: userId,
+      title:       '⚠ Community Guidelines',
+      body:        created.message,
+      data: {
+        type:       'WARNING',
+        entityType: entityType || '',
+        entityId:   entityId ? entityId.toString() : '',
+      },
+    }).catch(e => console.error('[ActivityPush] WARNING:', e.message));
+  }
+
+  return created;
 }
 
 // ─────────────────────────────────────────────────────────────
 //  ROUTE HANDLERS
 // ─────────────────────────────────────────────────────────────
 
-// GET /api/activity?page=1&limit=20
+// POST /api/activity/create  (internal — called by other services)
+// Body: { userId, actorId, type, entityType, entityId, entityImage, message }
+exports.createActivity = async (req, res) => {
+  try {
+    const { userId, actorId, type, entityType, entityId, entityImage, message } = req.body;
+    if (!userId || !actorId || !type) {
+      return res.status(400).json({ success: false, message: 'userId, actorId, type are required' });
+    }
+    const activity = await createOrAggregateActivity({
+      userId, actorId, type,
+      entityType: entityType || 'post',
+      entityId:   entityId   || null,
+      entityImage: entityImage || null,
+      message:    message    || null,
+    });
+    res.status(201).json({ success: true, activity });
+  } catch (err) {
+    console.error('[Activity] createActivity:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
 exports.getActivities = async (req, res) => {
   try {
     const page  = Math.max(1, parseInt(req.query.page)  || 1);
