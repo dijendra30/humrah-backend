@@ -390,6 +390,18 @@ router.post('/sessions/:id/join', async (req, res) => {
     }).catch(err => console.error('[gamingPush] join notification failed:', err));
 
     res.json(formatSession(session));
+
+    // ── ✅ Activity: JOIN_GAMING + push (spec: push on join) ───
+    const { createOrAggregateActivity } = require('../controllers/activityController');
+    createOrAggregateActivity({
+      userId:     session.creatorId.toString(),
+      actorId:    req.user._id.toString(),
+      type:       'JOIN_GAMING',
+      entityType: 'gaming_session',
+      entityId:   session._id,
+      message:    `${name} joined your gaming session`,
+    }).catch(e => console.error('[Activity] JOIN_GAMING:', e.message));
+
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
