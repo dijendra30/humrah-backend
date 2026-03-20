@@ -266,6 +266,19 @@ router.post('/:id/like', auth, likeLimiter, async (req, res) => {
       message:   liked ? 'Post liked ❤️' : 'Post unliked'
     });
 
+    // ── ✅ Activity: LIKE_POST — no push per spec ──────────────
+    if (liked && post.userId.toString() !== req.userId.toString()) {
+      const { createOrAggregateActivity } = require('../controllers/activityController');
+      createOrAggregateActivity({
+        userId:      post.userId,
+        actorId:     req.userId,
+        type:        'LIKE_POST',
+        entityType:  'post',
+        entityId:    post._id,
+        entityImage: post.imageUrl,
+      }).catch(e => console.error('[Activity] LIKE_POST:', e.message));
+    }
+
   } catch (error) {
     console.error('Like error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -308,6 +321,21 @@ router.post('/:id/comment', auth, commentLimiter, async (req, res) => {
     }
 
     res.json({ success: true, message: 'Comment added ✨', comment });
+
+    // ── ✅ Activity: COMMENT_POST — no push per spec ───────────
+    if (post.userId.toString() !== req.userId.toString()) {
+      const { createOrAggregateActivity } = require('../controllers/activityController');
+      const actorName = `${comment.userId.firstName} ${comment.userId.lastName || ''}`.trim();
+      createOrAggregateActivity({
+        userId:      post.userId,
+        actorId:     req.userId,
+        type:        'COMMENT_POST',
+        entityType:  'post',
+        entityId:    post._id,
+        entityImage: post.imageUrl,
+        message:     `${actorName} commented on your post`,
+      }).catch(e => console.error('[Activity] COMMENT_POST:', e.message));
+    }
 
   } catch (error) {
     console.error('Comment error:', error);
