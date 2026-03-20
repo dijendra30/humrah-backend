@@ -10,6 +10,7 @@ const {
   likePost,
   addComment,
   getComments,
+  getPostById,
   testPlaces,
 } = require('../controllers/foodController');
 
@@ -37,6 +38,8 @@ router.post('/like',            likePost);
 router.post('/comment',         addComment);
 router.get('/comments/:postId', getComments);
 router.get('/test-places',      testPlaces);
+// ⚠ Keep /:id LAST — it is a catch-all that would shadow routes above if placed first
+router.get('/:id',              getPostById);
 
 router.use((err, _req, res, _next) => {
   if (err instanceof multer.MulterError || err.message === 'Only image files are allowed') {
