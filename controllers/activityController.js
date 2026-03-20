@@ -78,16 +78,21 @@ async function createOrAggregateActivity({
   entityImage = null,
   message = null,
 }) {
-  // 1. Skip self-activity
-  if (userId.toString() === actorId.toString()) return null;
+  const isSystemType = type === 'WARNING' || type === 'SYSTEM';
 
-  // 2. Rate limit — 1 activity per actor per action per 10s
-  const tenSecondsAgo = new Date(Date.now() - RATE_LIMIT_MS);
-  const veryRecent = await Activity.findOne({
-    userId, actorId, type, entityId,
-    createdAt: { $gte: tenSecondsAgo },
-  }).lean();
-  if (veryRecent) return null;
+  // 1. Skip self-activity — except for WARNING/SYSTEM which are always system-issued
+  if (!isSystemType && userId.toString() === actorId.toString()) return null;
+
+  // 2. Rate limit — 1 activity per actor+action+entity per 10s
+  //    WARNING skips this: two posts can violate rules within 10s on different entities
+  if (!isSystemType) {
+    const tenSecondsAgo = new Date(Date.now() - RATE_LIMIT_MS);
+    const veryRecent = await Activity.findOne({
+      userId, actorId, type, entityId,
+      createdAt: { $gte: tenSecondsAgo },
+    }).lean();
+    if (veryRecent) return null;
+  }
 
   // 3. Aggregation for likes only
   const isLike = type.startsWith('LIKE_');
@@ -182,27 +187,43 @@ exports.createActivity = async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };
+// GET /api/activity/unread-count  — lightweight badge fetch (no pagination)
+exports.getUnreadCount = async (req, res) => {
+  try {
+    const count = await Activity.countDocuments({ userId: req.userId, isRead: false });
+    res.json({ success: true, unreadCount: count });
+  } catch (err) {
+    console.error('[Activity] getUnreadCount:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// GET /api/activity?page=1&limit=20
 exports.getActivities = async (req, res) => {
   try {
     const page  = Math.max(1, parseInt(req.query.page)  || 1);
     const limit = Math.min(50, parseInt(req.query.limit) || 20);
     const skip  = (page - 1) * limit;
 
-    const [activities, unreadCount] = await Promise.all([
+    // Fetch limit+1 to determine hasMore without a separate count query
+    const [raw, unreadCount] = await Promise.all([
       Activity.find({ userId: req.userId })
         .sort({ createdAt: -1 })
         .skip(skip)
-        .limit(limit)
+        .limit(limit + 1)   // one extra to detect next page
         .lean(),
       Activity.countDocuments({ userId: req.userId, isRead: false }),
     ]);
+
+    const hasMore    = raw.length > limit;
+    const activities = hasMore ? raw.slice(0, limit) : raw;
 
     res.json({
       success:     true,
       activities,
       unreadCount,
       page,
-      hasMore: activities.length === limit,
+      hasMore,
     });
   } catch (err) {
     console.error('[Activity] getActivities:', err.message);
