@@ -11,9 +11,10 @@ const express = require('express');
 const router  = express.Router();
 const ctrl    = require('../controllers/activityController');
 
-router.post  ('/create',    ctrl.createActivity);   // internal — POST /api/activity/create
-router.get   ('/',          ctrl.getActivities);
-router.patch ('/read/:id',  ctrl.markRead);
-router.patch ('/read-all',  ctrl.markAllRead);
+router.post  ('/create',       ctrl.createActivity);    // POST /api/activity/create
+router.get   ('/unread-count', ctrl.getUnreadCount);    // GET  /api/activity/unread-count  ← badge fetch
+router.get   ('/',             ctrl.getActivities);     // GET  /api/activity
+router.patch ('/read/:id',     ctrl.markRead);          // PATCH /api/activity/read/:id
+router.patch ('/read-all',     ctrl.markAllRead);       // PATCH /api/activity/read-all
 
 module.exports = router;
