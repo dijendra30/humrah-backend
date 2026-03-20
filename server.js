@@ -519,6 +519,7 @@ const reviewRoutes = require('./routes/reviews');
 const paymentRoutes = require('./routes/payment');
 const foodRoutes = require('./routes/foodRoutes');
 const settingsRoutes = require('./routes/settings');
+const activityRoutes = require('./routes/activityRoutes');
 // ✅ PUBLIC ROUTES (No legal enforcement)
 app.use('/api/auth', authRoutes);
 app.use('/api/legal', legalRoutes);
@@ -539,7 +540,7 @@ app.use('/api/payment', authenticate, enforceLegalAcceptance, paymentRoutes);
 app.use('/api/random-booking', authenticate, enforceLegalAcceptance, require('./routes/randomBooking'));
 app.use('/api/verification', authenticate, enforceLegalAcceptance, require('./routes/verification'));
 app.use('/api/settings', authenticate, enforceLegalAcceptance, settingsRoutes);
-
+app.use('/api/activity', authenticate, enforceLegalAcceptance, activityRoutes);
 app.use('/api/settings', require('./routes/settings'));
 // ✅ ADMIN ROUTES (No legal enforcement needed for admins performing admin duties)
 app.use('/api/admin', authenticate, require('./routes/admin'));
