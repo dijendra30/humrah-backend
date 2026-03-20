@@ -11,6 +11,7 @@ const express = require('express');
 const router  = express.Router();
 const ctrl    = require('../controllers/activityController');
 
+router.post  ('/create',    ctrl.createActivity);   // internal — POST /api/activity/create
 router.get   ('/',          ctrl.getActivities);
 router.patch ('/read/:id',  ctrl.markRead);
 router.patch ('/read-all',  ctrl.markAllRead);
