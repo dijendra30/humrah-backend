@@ -1,6 +1,7 @@
 // middleware/imageModerationMiddleware.js
 const User = require('../models/User');
 const { analyzeImageSafety } = require('../services/imageModeration');
+const { sendWarningActivity } = require('../utils/sendWarningActivity');
 
 /**
  * Middleware: runs Google Vision SafeSearch on req.body.imageBase64
@@ -112,6 +113,11 @@ const enforceImageModeration = async (req, res, next) => {
       });
 
       await user.save();
+
+      // ── ✅ WARNING activity feed entry + push (spec §6) ───────
+      sendWarningActivity({ userId: user._id }).catch(e =>
+        console.error('[ImageMod] WARNING activity failed:', e.message)
+      );
 
       // TODO: trigger push notification [notifType] here
       console.log(`📣 Notification queued: [${notifType}] for user ${user._id}`);
