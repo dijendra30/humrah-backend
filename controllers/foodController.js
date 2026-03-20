@@ -80,6 +80,12 @@ exports.createPost = async (req, res) => {
       placeName:       finalPlaceName,
       latitude:        finalLat,
       longitude:       finalLng,
+      // ✅ Set location explicitly so Mongoose validation passes.
+      // The pre-save hook also sets this, but validation runs BEFORE hooks on create().
+      location: {
+        type:        'Point',
+        coordinates: [finalLng, finalLat],  // GeoJSON order: [longitude, latitude]
+      },
       priceRange:      priceRange || null,
       city:            city.toLowerCase().trim(),
       rating:          finalRating,
