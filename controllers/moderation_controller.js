@@ -1,7 +1,8 @@
 // controllers/moderation_controller.js
 const User       = require('../models/User');
 const UserReport = require('../models/UserReport');
-const { sendWarningEmail } = require('../config/email');
+const { sendWarningEmail }    = require('../config/email');
+const { sendWarningActivity } = require('../utils/sendWarningActivity');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/report-user
@@ -71,7 +72,7 @@ exports.reportUser = async (req, res) => {
     // ── Threshold checks ──────────────────────────────────────────────────────
     const totalReports = await UserReport.countDocuments({ reportedUserId });
 
-    // ── §5 Threshold: 3 reports → warning email ───────────────────────────────
+    // ── §5 Threshold: 3 reports → warning email + activity feed + push ──────
     if (totalReports === 3) {
       try {
         await sendWarningEmail(reportedUser.email, reportedUser.firstName);
@@ -79,6 +80,10 @@ exports.reportUser = async (req, res) => {
       } catch (emailErr) {
         console.error('❌ Warning email failed:', emailErr.message);
       }
+      // ✅ Activity feed entry + push notification (spec §6)
+      sendWarningActivity({ userId: reportedUserId }).catch(e =>
+        console.error('[ModerationCtrl] WARNING activity failed:', e.message)
+      );
     }
 
     // ── §5 Threshold: 5 reports → temporary 7-day account restriction ────────
