@@ -367,6 +367,23 @@ exports.getComments = async (req, res) => {
 };
 
 // ══════════════════════════════════════════════════════════════
+//  GET /food/:id  — fetch single post by ID (used by push notification tap)
+// ══════════════════════════════════════════════════════════════
+exports.getPostById = async (req, res) => {
+  try {
+    const post = await FoodPost.findById(req.params.id)
+      .populate('userId', 'firstName lastName profilePhoto')
+      .lean();
+    if (!post || !post.isActive) {
+      return res.status(404).json({ success: false, message: 'Post not found or expired' });
+    }
+    res.json({ success: true, post });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ══════════════════════════════════════════════════════════════
 //  GET /food/test-places — dev helper
 // ══════════════════════════════════════════════════════════════
 exports.testPlaces = async (req, res) => {
