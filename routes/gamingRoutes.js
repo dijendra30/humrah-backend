@@ -602,6 +602,23 @@ router.post('/sessions/:id/like', async (req, res) => {
       likeCount: (updated.likedBy || []).length,
       likedBy:   (updated.likedBy || []).map(String),
     });
+
+    // ── ✅ Activity: LIKE_GAMING — no push per spec ────────────
+    if (!alreadyLiked) {
+      // Fetch creatorId from session (not in the select above — need a second query)
+      const session = await GamingSession.findById(req.params.id).select('creatorId').lean();
+      if (session && session.creatorId.toString() !== uidStr) {
+        const { createOrAggregateActivity } = require('../controllers/activityController');
+        createOrAggregateActivity({
+          userId:     session.creatorId.toString(),
+          actorId:    uid.toString(),
+          type:       'LIKE_GAMING',
+          entityType: 'gaming_session',
+          entityId:   req.params.id,
+        }).catch(e => console.error('[Activity] LIKE_GAMING:', e.message));
+      }
+    }
+
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
