@@ -1,9 +1,26 @@
 /**
  * models/GamingSession.js
- * Migrated from snake_case → camelCase to match gamingRoutes.js.
- * New fields: kickedPlayers, mutedPlayers, pinnedMessageId,
- *             chatExpiresAt, reactions, isSystemMsg, lastMessageAt
+ *
+ * ── DUAL-STATUS ARCHITECTURE ─────────────────────────────────
+ *
+ *   cardStatus  — controls the SESSION CARD in the community feed
+ *     'waiting'   card visible, accepting players
+ *     'full'      card visible, all spots taken
+ *     'started'   host started the session
+ *     'expired'   card gone (cardExpiresAt = createdAt+10min passed)
+ *     'cancelled' host cancelled hard
+ *
+ *   chatStatus  — controls CHAT ACCESS (completely independent)
+ *     'open'      chat accessible to all members
+ *     'closed'    chatExpiresAt (startTime+3h) passed, OR host cancelled
+ *
+ * The expiry job runs every 60 seconds:
+ *   Step 1 → cardExpiresAt passed  →  cardStatus = 'expired'   (chat untouched)
+ *   Step 2 → chatExpiresAt passed  →  chatStatus = 'closed'    (card untouched)
+ *
+ * Legacy `status` field kept for backward compat with old Android builds.
  */
+
 const mongoose = require("mongoose");
 
 const ReactionSchema = new mongoose.Schema({
@@ -14,7 +31,7 @@ const ReactionSchema = new mongoose.Schema({
 const ChatMessageSchema = new mongoose.Schema({
   senderId:       { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
   senderUsername: { type: String, required: true },
-  senderAvatar:   { type: String, default: null },   // profilePhoto URL at send time
+  senderAvatar:   { type: String, default: null },
   text:           { type: String, required: true, maxlength: 500 },
   sentAt:         { type: Date, default: Date.now },
   isPinned:       { type: Boolean, default: false },
@@ -28,6 +45,7 @@ const MutedPlayerSchema = new mongoose.Schema({
 }, { _id: false });
 
 const GamingSessionSchema = new mongoose.Schema({
+
   creatorId:       { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
   creatorUsername: { type: String, default: "User" },
   city:            { type: String, required: true, trim: true, index: true },
@@ -36,89 +54,69 @@ const GamingSessionSchema = new mongoose.Schema({
   playersNeeded:   { type: Number, required: true, min: 2, max: 6 },
   playersJoined:   [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
 
-  // Timing
+  // ── Timing ─────────────────────────────────────────────────
   startTime:     { type: Date, required: true },
-  chatExpiresAt: { type: Date, required: true },   // startTime + 3h
+  chatExpiresAt: { type: Date, required: true },   // startTime + 3h  → chat window
+  cardExpiresAt: { type: Date },                   // createdAt + 10min → card window (set by pre-save)
 
-  // Status
-  status: {
+  // ── CARD STATUS ─────────────────────────────────────────────
+  // Controls ONLY the feed card — never affects chat access
+  cardStatus: {
     type:    String,
-    enum:    [
-      // ── Active states (card visible in feed) ──────────────
-      'waiting_for_players',  // accepting players
-      'full',                 // all spots taken
-      'starting',             // host initiated start
-      'in_progress',          // session underway
-
-      // ── Post-card states (card gone, chat may still run) ──
-      'live',                 // card expired from feed BUT chat still open (startTime + 3h)
-                              // set by expiryJob when expiresAt passes & chatExpiresAt hasn't
-      'completed',            // session ended normally
-
-      // ── Terminal states ───────────────────────────────────
-      'expired',              // card AND chat both closed (chatExpiresAt passed)
-      'cancelled',            // host cancelled — hard stop, chat closes immediately
-
-      // ── Legacy uppercase aliases (kept for old DB documents) ──
-      'ACTIVE', 'STARTED', 'EXPIRED', 'CANCELLED'
-    ],
-    default: 'waiting_for_players',
+    enum:    ['waiting', 'full', 'started', 'expired', 'cancelled'],
+    default: 'waiting',
     index:   true,
   },
 
-  dismissedBy:   [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
-  optionalMessage: { type: String, maxlength: 120, default: null },
-
-  // ── §11: boostLevel ───────────────────────────────────────
-  boostLevel: {
+  // ── CHAT STATUS ─────────────────────────────────────────────
+  // Controls ONLY chat access — never affects feed card
+  chatStatus: {
     type:    String,
-    enum:    ['normal', 'boost20', 'boost50'],
-    default: 'normal'
+    enum:    ['open', 'closed'],
+    default: 'open',
+    index:   true,
   },
 
-  // ── §12: notInterestedUsers ───────────────────────────────
-  notInterestedUsers: {
-    type:    [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
-    default: []
+  // ── Legacy status (kept for old Android clients) ────────────
+  status: {
+    type:    String,
+    enum:    ['waiting_for_players', 'full', 'started', 'in_progress',
+              'live', 'expired', 'cancelled', 'completed',
+              'ACTIVE', 'STARTED', 'EXPIRED', 'CANCELLED'],
+    default: 'waiting_for_players',
   },
 
-  // ── §4, §13: expiresAt = createdAt + 10min ────────────────
-  // Controls when the feed card disappears (not the chat).
-  // Set by pre-save hook below.
-  expiresAt: {
-    type:  Date,
-    index: true
-  },
+  // ── Extra fields ────────────────────────────────────────────
+  dismissedBy:        [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
+  notInterestedUsers: { type: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }], default: [] },
+  optionalMessage:    { type: String, maxlength: 120, default: null },
+  boostLevel:         { type: String, enum: ['normal', 'boost20', 'boost50'], default: 'normal' },
+  likedBy:            { type: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }], default: [] },
 
-  // ── Like system ───────────────────────────────────────────
-  likedBy: {
-    type:    [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
-    default: []
-  },
-
-  // Host powers
+  // ── Host powers ─────────────────────────────────────────────
   kickedPlayers:   [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
   mutedPlayers:    { type: [MutedPlayerSchema], default: [] },
   pinnedMessageId: { type: mongoose.Schema.Types.ObjectId, default: null },
 
-  // Chat
-  messages: { type: [ChatMessageSchema], default: [] },
-
-  // Per-user rate limit: Map<userId → lastSentAt>
+  // ── Chat ────────────────────────────────────────────────────
+  messages:      { type: [ChatMessageSchema], default: [] },
   lastMessageAt: { type: Map, of: Date, default: {} },
+
 }, { timestamps: true });
 
-GamingSessionSchema.index({ city: 1, status: 1, startTime: 1 });
-// TTL: MongoDB auto-deletes documents 3h after chatExpiresAt
+// ── Indexes ─────────────────────────────────────────────────
+GamingSessionSchema.index({ city: 1, cardStatus: 1, startTime: 1 });
+GamingSessionSchema.index({ cardStatus: 1, cardExpiresAt: 1 });   // Step 1 expiry query
+GamingSessionSchema.index({ chatStatus: 1, chatExpiresAt: 1 });   // Step 2 expiry query
+
+// TTL: MongoDB auto-removes document 3h after chatExpiresAt
 GamingSessionSchema.index({ chatExpiresAt: 1 }, { expireAfterSeconds: 3 * 60 * 60 });
 
-// ── Pre-save: auto-set expiresAt = createdAt + 10min ─────────
-// expiresAt controls when the feed CARD disappears.
-// The chat stays open until chatExpiresAt (startTime + 3h).
+// ── Pre-save: auto-set cardExpiresAt = now + 10min ──────────
 const TEN_MIN_MS = 10 * 60 * 1000;
 GamingSessionSchema.pre('save', function (next) {
-  if (this.isNew && !this.expiresAt) {
-    this.expiresAt = new Date(Date.now() + TEN_MIN_MS);
+  if (this.isNew && !this.cardExpiresAt) {
+    this.cardExpiresAt = new Date(Date.now() + TEN_MIN_MS);
   }
   next();
 });
