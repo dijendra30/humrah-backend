@@ -119,21 +119,27 @@ exports.createPost = async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 exports.getFeedCards = async (req, res) => {
   try {
-    // ✅ Always prefer user's profile city over query param — same normalisation as createPost
+    // Collect all possible city variations to cast a wider net:
+    //   - user's profile city   e.g. "delhi"
+    //   - Places API locality   e.g. "north delhi", "new delhi", "central delhi"
+    // We match ANY post whose city contains the profile city OR is contained by it.
     const profileCity = (req.user?.questionnaire?.city || req.user?.city || '').toLowerCase().trim();
     const queryCity   = (req.query.city || '').toLowerCase().trim();
     const city        = profileCity || queryCity;
 
     if (!city) return res.status(400).json({ success: false, message: 'city is required' });
 
-    const requestingUserId = req.userId;
     const baseQuery = { isActive: true, expiresAt: { $gt: new Date() } };
 
-    // ── Step 1: fresh posts (< 24h) in user's city ────────────
+    // ── City regex: matches "delhi", "north delhi", "new delhi" etc. ──
+    // Uses a case-insensitive regex so "delhi" matches any city containing that word.
+    const cityRegex = new RegExp(city, 'i');
+
+    // ── Step 1: fresh posts (< 24h) matching city (broad regex) ──
+    // ✅ Own posts included — user should see their own food discoveries
     let posts = await FoodPost.find({
       ...baseQuery,
-      city,
-      userId:    { $ne: requestingUserId },
+      city:      { $regex: cityRegex },
       createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
     })
       .sort({ createdAt: -1 })
@@ -141,14 +147,13 @@ exports.getFeedCards = async (req, res) => {
       .populate('userId', 'firstName lastName profilePhoto')
       .lean();
 
-    // ── Step 2: any active posts in city if fewer than 3 fresh ─
+    // ── Step 2: any active posts matching city (not just fresh) ──
     if (posts.length < 3) {
       const freshIds = posts.map(p => p._id);
       const older = await FoodPost.find({
         ...baseQuery,
-        city,
-        userId:    { $ne: requestingUserId },
-        _id:       { $nin: freshIds },
+        city:  { $regex: cityRegex },
+        _id:   { $nin: freshIds },
       })
         .sort({ createdAt: -1 })
         .limit(3 - posts.length)
@@ -157,13 +162,10 @@ exports.getFeedCards = async (req, res) => {
       posts = [...posts, ...older];
     }
 
-    // ── Step 3: ✅ Fallback — if still 0, return the 3 most recent posts ANY city ──
-    // This handles city name mismatches (e.g. post saved as "new delhi", user city "delhi")
+    // ── Step 3: last resort — any active posts regardless of city ──
+    // Handles total city mismatch (e.g. profile city blank, or no match at all)
     if (posts.length === 0) {
-      posts = await FoodPost.find({
-        ...baseQuery,
-        userId: { $ne: requestingUserId },
-      })
+      posts = await FoodPost.find({ ...baseQuery })
         .sort({ createdAt: -1 })
         .limit(3)
         .populate('userId', 'firstName lastName profilePhoto')
