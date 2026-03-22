@@ -1,4 +1,4 @@
-// routes/auth.js - UPDATED WITH LEGAL ACCEPTANCE
+// routes/auth.js - UPDATED WITH LEGAL ACCEPTANCE + PASSWORD VALIDATION
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
@@ -6,6 +6,7 @@ const User = require('../models/User');
 const LegalAcceptance = require('../models/LegalAcceptance');
 const LegalVersion = require('../models/LegalVersion');
 const { sendOTPEmail, sendWelcomeEmail } = require('../config/email');
+const { isStrongPassword } = require('../utils/passwordValidator');
 
 // Import auth middleware (use 'auth' for backward compatibility)
 let authenticate, superAdminOnly, auditLog;
@@ -73,6 +74,15 @@ router.post('/register', async (req, res) => {
       return res.status(400).json({
         success: false,
         message: 'All fields are required'
+      });
+    }
+
+    // ✅ PASSWORD STRENGTH VALIDATION (server always validates, never trusts client)
+    const passwordCheck = isStrongPassword(password);
+    if (!passwordCheck.valid) {
+      return res.status(400).json({
+        success: false,
+        message: passwordCheck.message
       });
     }
 
