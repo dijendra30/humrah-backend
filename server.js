@@ -470,6 +470,9 @@ const connectDB = async () => {
     // ── Gaming session expiry cron (every 60s) ──
     startExpiryJob(io);
 
+    // ── Movie session expiry cron (every 60s) ──
+    startMovieSessionExpiryJob();
+
     // ── Auto-moderation: clean existing dirty profiles on every deploy ──
     await runStartupCleanup();   // scans all users 5s after DB connect
     scheduleDailyCleanup();      // daily cron at 3:00 AM IST
@@ -519,7 +522,9 @@ const reviewRoutes = require('./routes/reviews');
 const paymentRoutes = require('./routes/payment');
 const foodRoutes = require('./routes/foodRoutes');
 const settingsRoutes = require('./routes/settings');
-const activityRoutes = require('./routes/activityRoutes');
+// ✅ MOVIE HANGOUT ROUTES
+const movieSessionRoutes = require('./routes/movieSessionRoutes');
+const { startMovieSessionExpiryJob } = require('./jobs/movieSessionExpiryJob');
 // ✅ PUBLIC ROUTES (No legal enforcement)
 app.use('/api/auth', authRoutes);
 app.use('/api/legal', legalRoutes);
@@ -540,7 +545,7 @@ app.use('/api/payment', authenticate, enforceLegalAcceptance, paymentRoutes);
 app.use('/api/random-booking', authenticate, enforceLegalAcceptance, require('./routes/randomBooking'));
 app.use('/api/verification', authenticate, enforceLegalAcceptance, require('./routes/verification'));
 app.use('/api/settings', authenticate, enforceLegalAcceptance, settingsRoutes);
-app.use('/api/activity', authenticate, enforceLegalAcceptance, activityRoutes);
+
 app.use('/api/settings', require('./routes/settings'));
 // ✅ ADMIN ROUTES (No legal enforcement needed for admins performing admin duties)
 app.use('/api/admin', authenticate, require('./routes/admin'));
@@ -553,6 +558,8 @@ app.use('/api/voice-call', authenticate, enforceLegalAcceptance, require('./rout
 // ✅ GAMING SESSION ROUTES (auth + legal enforcement)
 app.use('/api/session', authenticate, enforceLegalAcceptance, gamingRoutes);
 app.use('/api/food', authenticate, enforceLegalAcceptance, foodRoutes);
+// ✅ MOVIE HANGOUT — /api/movies, /api/theatres, /api/movie-session/*
+app.use('/api', authenticate, enforceLegalAcceptance, movieSessionRoutes);
 // Cron jobs
 require('./cronJobs');
 
