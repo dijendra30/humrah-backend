@@ -695,9 +695,9 @@ router.post("/sessions/:id/react", async (req, res) => {
 
     const existIdx = msg.reactions.findIndex(r => r.userId.toString() === uid && r.emoji === emoji);
     if (existIdx !== -1) {
-      msg.reactions.splice(existIdx, 1);  // toggle off
+      msg.reactions.splice(existIdx, 1);
     } else {
-      msg.reactions = msg.reactions.filter(r => r.userId.toString() !== uid); // remove old
+      msg.reactions = msg.reactions.filter(r => r.userId.toString() !== uid);
       msg.reactions.push({ userId: req.user._id, emoji });
     }
     await session.save();
