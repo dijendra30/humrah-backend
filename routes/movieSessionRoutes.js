@@ -12,6 +12,9 @@ router.get('/theatres', ctrl.getNearbyTheatres);
 // POST /api/movie-session/create
 router.post('/movie-session/create', ctrl.createSession);
 
+// GET  /api/movie-session/debug   ← temporary, remove after confirming flow
+router.get('/movie-session/debug', ctrl.debugSessions);
+
 // GET  /api/movie-session/nearby
 router.get('/movie-session/nearby', ctrl.getNearbySessions);
 
