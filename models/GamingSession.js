@@ -38,33 +38,42 @@ const GamingSessionSchema = new mongoose.Schema({
 
   // Timing
   startTime:     { type: Date, required: true },
-  chatExpiresAt: { type: Date, required: true },   // startTime + 3h — chat timer
-  cardExpiresAt: { type: Date },                   // createdAt + 10min — card timer (set by pre-save)
+  // chatExpiresAt = startTime + 3h — chat stays open for 3 hours after session starts
+  chatExpiresAt: { type: Date, required: true },
+  // cardExpiresAt = startTime exactly — card disappears when session begins
+  // Set by the route on create: cardExpiresAt = startTime
+  cardExpiresAt: { type: Date },
 
-  // ── CARD STATUS — controls feed card visibility only ────────
-  // Set independently by the expiry job. Never read by chat logic.
+  // ── CARD STATUS — controls feed card only ────────────────────
+  // 'waiting'  → card visible, taking players
+  // 'full'     → card visible, session full
+  // 'started'  → host started early
+  // 'expired'  → startTime reached, card gone — chat still open
+  // 'cancelled'→ host cancelled hard stop
   cardStatus: {
     type:    String,
-    enum:    ["waiting", "full", "started", "expired", "cancelled"],
-    default: "waiting",
+    enum:    ['waiting', 'full', 'started', 'expired', 'cancelled'],
+    default: 'waiting',
     index:   true,
   },
 
-  // ── CHAT STATUS — controls chat access only ───────────────
-  // Set independently by the expiry job. Never read by card logic.
-  // Card expiry (cardStatus="expired") NEVER touches this field.
+  // ── CHAT STATUS — controls chat access only ───────────────────
+  // 'open'   → chat accessible until chatExpiresAt (startTime + 3h)
+  // 'closed' → chatExpiresAt passed OR host cancelled
+  // Card expiry NEVER touches this field.
   chatStatus: {
     type:    String,
-    enum:    ["open", "closed"],
-    default: "open",
+    enum:    ['open', 'closed'],
+    default: 'open',
     index:   true,
   },
 
-  // Legacy status field — kept for backward compat, do not use for logic
+  // Legacy status — kept for backward compat only, do not use for logic
   status: {
     type:    String,
     enum:    ["ACTIVE", "STARTED", "EXPIRED", "CANCELLED",
-              "waiting_for_players", "full", "expired", "cancelled"],
+              "waiting_for_players", "full", "started",
+              "expired", "cancelled"],
     default: "ACTIVE",
     index:   true,
   },
@@ -85,20 +94,15 @@ const GamingSessionSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 GamingSessionSchema.index({ city: 1, cardStatus: 1, startTime: 1 });
-GamingSessionSchema.index({ cardStatus: 1, cardExpiresAt: 1 });   // Step 1 expiry query
-GamingSessionSchema.index({ chatStatus: 1, chatExpiresAt: 1 });   // Step 2 expiry query
-// TTL: MongoDB auto-deletes document exactly at chatExpiresAt.
-// chatExpiresAt = startTime + 3h, so document lives for 3h after session start.
-// expireAfterSeconds: 0 means "delete at chatExpiresAt" (no extra delay).
-GamingSessionSchema.index({ chatExpiresAt: 1 }, { expireAfterSeconds: 0 });
-
-// Pre-save: auto-set cardExpiresAt = createdAt + 10min on new documents
-const TEN_MIN_MS = 10 * 60 * 1000;
-GamingSessionSchema.pre("save", function (next) {
-  if (this.isNew && !this.cardExpiresAt) {
-    this.cardExpiresAt = new Date(Date.now() + TEN_MIN_MS);
-  }
-  next();
-});
+GamingSessionSchema.index({ cardStatus: 1, cardExpiresAt: 1 });   // card expiry query
+GamingSessionSchema.index({ chatStatus: 1, chatExpiresAt: 1 });   // chat expiry query
+// ✅ NO TTL INDEX — documents are kept in the database permanently.
+// The card and chat expiry is managed by cardStatus/chatStatus fields only.
+// MongoDB will NOT auto-delete any GamingSession documents.
+// (If you want cleanup later, run a manual archival job — never a TTL here)
+//
+// GamingSessionSchema.index({ chatExpiresAt: 1 }, { expireAfterSeconds: ... })
+// ↑ INTENTIONALLY REMOVED — TTL was deleting documents when chat ended,
+//   losing all message history. Use status fields to control visibility instead.
 
 module.exports = mongoose.model("GamingSession", GamingSessionSchema);
