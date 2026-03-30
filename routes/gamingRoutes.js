@@ -20,10 +20,16 @@
  *     'open' | 'closed'
  *
  *   Expiry job now runs TWO independent steps:
- *     Step 1: cardExpiresAt passed → cardStatus = 'expired'   (chatStatus untouched)
- *     Step 2: chatExpiresAt passed → chatStatus = 'closed'    (cardStatus untouched)
+ *     Step 1: cardExpiresAt (= startTime) passed → cardStatus = 'expired'
+ *             chatStatus is NEVER touched here
+ *     Step 2: chatExpiresAt (= startTime + 3h) passed → chatStatus = 'closed'
+ *             cardStatus is NEVER touched here
  *
  *   isChatOpen() reads chatStatus ONLY — card expiry can NEVER kill the chat.
+ *
+ *   Example — session starts at 9:00pm:
+ *     9:00pm  → Step 1 → cardStatus='expired'  (card gone, chat still open)
+ *     12:00am → Step 2 → chatStatus='closed'   (chat ends, document kept in DB)
  */
 
 const express       = require("express");
@@ -126,7 +132,8 @@ function formatSession(s) {
     likedBy:            (s.likedBy || []).map(String),
     startTime:          s.startTime.toISOString(),
     chatExpiresAt:      s.chatExpiresAt.toISOString(),
-    cardExpiresAt:      s.cardExpiresAt?.toISOString() || null,
+    // cardExpiresAt = startTime (card expires when session begins)
+    cardExpiresAt:      s.cardExpiresAt?.toISOString() || s.startTime.toISOString(),
     createdAt:          s.createdAt.toISOString(),
     // ✅ Both status fields returned to Android
     cardStatus:         s.cardStatus  || 'waiting',
@@ -222,7 +229,9 @@ router.get("/sessions", async (req, res) => {
     }).sort({ startTime: 1 }).limit(20);
 
     // ── Query 2: User's own sessions where chat is still open ──
-    // Card may be expired but chat runs for 3h independently
+    // Card expires at startTime, but chat runs for startTime + 3h.
+    // These sessions won't appear in feed (cardStatus=expired) but
+    // the user still needs access to their chat.
     const mySessions = await GamingSession.find({
       // ✅ chatStatus filter — never cardStatus
       chatStatus:    "open",
@@ -276,8 +285,15 @@ router.post("/sessions", async (req, res) => {
       nextAllowedAt: new Date(existing.createdAt.getTime() + TWO_HOURS_MS).toISOString(),
     });
 
-    const sessionCity   = resolveCity(req, city);
-    const chatExpiresAt = new Date(start.getTime() + THREE_HOURS_MS);
+    const sessionCity = resolveCity(req, city);
+
+    // ── Timing ─────────────────────────────────────────────────
+    // cardExpiresAt = startTime exactly
+    //   → card disappears from community feed when session begins (9pm → card gone at 9pm)
+    // chatExpiresAt = startTime + 3h
+    //   → chat stays open for 3 hours after session starts (9pm → chat open until 12am)
+    const cardExpiresAt = new Date(start.getTime());                  // = startTime
+    const chatExpiresAt = new Date(start.getTime() + THREE_HOURS_MS); // = startTime + 3h
 
     const session = await GamingSession.create({
       creatorId:       req.user._id,
@@ -287,16 +303,17 @@ router.post("/sessions", async (req, res) => {
       customGameName:  gameType === "OTHER" ? (customGameName || "").trim() : null,
       playersNeeded:   Number(playersNeeded),
       startTime:       start,
-      chatExpiresAt,
+      cardExpiresAt,   // ✅ = startTime — card timer
+      chatExpiresAt,   // ✅ = startTime + 3h — chat timer
       optionalMessage: optionalMessage?.trim() || null,
       boostLevel:      (boostLevel || "normal").toLowerCase(),
-      // ✅ Set both status fields independently on create
-      cardStatus:      "waiting",
-      chatStatus:      "open",
+      // ✅ Both status fields set independently on create
+      cardStatus:      "waiting",   // card visible in feed
+      chatStatus:      "open",      // chat accessible
       status:          "waiting_for_players",   // legacy field kept in sync
     });
 
-    console.log(`[gaming] Created ${session._id} by ${req.user._id} in ${sessionCity}`);
+    console.log(`[gaming] Created ${session._id} — card expires at startTime (${start.toISOString()}), chat expires at startTime+3h (${chatExpiresAt.toISOString()})`);
     const io = req.app.get("io");
     if (io) emitSessionCreated(io, session.city, formatSession(session));
 
@@ -396,7 +413,7 @@ router.post("/sessions/:id/leave", async (req, res) => {
       return res.status(400).json({ error: "You are not in this session" });
 
     session.playersJoined = session.playersJoined.filter(id => id.toString() !== uid);
-    // ✅ Revert cardStatus if was full
+    // ✅ Revert cardStatus if was full — chatStatus untouched
     if (session.cardStatus === "full") {
       session.cardStatus = "waiting";
       session.status     = "waiting_for_players";
@@ -425,7 +442,7 @@ router.post("/sessions/:id/start-early", async (req, res) => {
     if (!session) return res.status(404).json({ error: "Session not found" });
     if (!isHost(session, req.user._id.toString()))
       return res.status(403).json({ error: "Only the host can start the session" });
-    // ✅ Check cardStatus
+    // ✅ Check cardStatus only
     if (!isCardActive(session))
       return res.status(400).json({ error: "Session card is no longer active" });
 
@@ -453,10 +470,9 @@ router.post("/sessions/:id/cancel", async (req, res) => {
     if (session.cardStatus === "cancelled")
       return res.status(400).json({ error: "Session already cancelled" });
 
-    // ✅ Cancel is the ONLY action that sets BOTH statuses
-    // Card gone AND chat closed immediately
+    // ✅ Cancel is the ONLY action that sets BOTH statuses (hard stop)
     session.cardStatus = "cancelled";
-    session.chatStatus = "closed";
+    session.chatStatus = "closed";   // chat also closes immediately on cancel
     session.status     = "cancelled";
     session.messages.push({
       senderId: req.user._id, senderUsername: session.creatorUsername,
@@ -485,6 +501,7 @@ router.post("/sessions/:id/kick", async (req, res) => {
 
     session.playersJoined  = session.playersJoined.filter(id => id.toString() !== targetUserId);
     session.kickedPlayers.push(targetUserId);
+    // ✅ Revert cardStatus if was full — chatStatus untouched
     if (session.cardStatus === "full") {
       session.cardStatus = "waiting";
       session.status     = "waiting_for_players";
@@ -767,7 +784,14 @@ async function sendNewSessionNotifications(session, hostUserId) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  EXPIRY JOB — two independent steps, no cross-contamination
+//  EXPIRY JOB — two completely independent steps
+//
+//  Example — session starts at 9:00pm:
+//    9:00pm  → Step 1 → cardStatus='expired'   card gone from community feed
+//                        chatStatus untouched   chat still fully open
+//    12:00am → Step 2 → chatStatus='closed'    chat ends
+//                        cardStatus untouched   (already expired)
+//                        Document kept in DB    no deletion ever happens
 // ═══════════════════════════════════════════════════════════════
 
 function startExpiryJob(io) {
@@ -775,43 +799,55 @@ function startExpiryJob(io) {
     try {
       const now = new Date();
 
-      // ── Step 1: Expire the CARD ──────────────────────────────
-      // cardExpiresAt (= createdAt + 10min) passed AND card still active.
-      // chatStatus is NOT touched — chat keeps running for 3h independently.
+      // ── Step 1: Expire the CARD at startTime ─────────────────
+      // cardExpiresAt = startTime (set on create).
+      // cardStatus set to "expired" — chatStatus is NOT in $set.
+      // Chat keeps running independently for 3 more hours.
       const cardResult = await GamingSession.updateMany(
         {
           cardStatus:    { $in: ["waiting", "full"] },
-          cardExpiresAt: { $lte: now },
+          cardExpiresAt: { $lte: now },              // startTime has passed
         },
-        { $set: { cardStatus: "expired", status: "expired" } }
+        {
+          $set: { cardStatus: "expired" }
+          // ⚠️ chatStatus intentionally omitted — NEVER touched by card expiry
+        }
       );
       if (cardResult.modifiedCount > 0) {
-        console.log(`[gaming] Step 1: ${cardResult.modifiedCount} card(s) expired → chatStatus untouched`);
+        console.log(`[gaming] Step 1: ${cardResult.modifiedCount} card(s) expired at startTime — chatStatus untouched`);
         if (io) {
           const justExpired = await GamingSession.find({
             cardStatus: "expired",
-            updatedAt:  { $gte: new Date(now - 70_000) }
+            updatedAt:  { $gte: new Date(now.getTime() - 70_000) }
           }).select("_id city");
-          for (const s of justExpired) emitSessionExpired(io, s._id.toString(), s.city);
+          for (const s of justExpired) {
+            emitSessionExpired(io, s._id.toString(), s.city);
+          }
         }
       }
 
-      // ── Step 2: Close the CHAT ───────────────────────────────
-      // chatExpiresAt (= startTime + 3h) passed AND chat still open.
-      // cardStatus is NOT touched — already 'expired' or 'cancelled'.
+      // ── Step 2: Close the CHAT at startTime + 3h ─────────────
+      // chatExpiresAt = startTime + 3h (set on create).
+      // chatStatus set to "closed" — cardStatus is NOT in $set.
+      // Documents are NEVER deleted here — kept in DB permanently.
       const chatResult = await GamingSession.updateMany(
         {
           chatStatus:    "open",
-          chatExpiresAt: { $lte: now },
+          chatExpiresAt: { $lte: now },              // startTime + 3h has passed
         },
-        { $set: { chatStatus: "closed" } }
+        {
+          $set: { chatStatus: "closed" }
+          // ⚠️ cardStatus intentionally omitted — never touched by chat expiry
+          // ⚠️ No deleteOne / deleteMany — document stays in DB forever
+        }
       );
-      if (chatResult.modifiedCount > 0)
-        console.log(`[gaming] Step 2: ${chatResult.modifiedCount} chat(s) closed`);
+      if (chatResult.modifiedCount > 0) {
+        console.log(`[gaming] Step 2: ${chatResult.modifiedCount} chat(s) closed at startTime+3h — documents kept in DB`);
+      }
 
     } catch (e) { console.error("[gaming] Expiry job error:", e.message); }
   }, 60_000);
-  console.log("[gaming] Dual-status expiry job started (60s interval)");
+  console.log("[gaming] Dual-status expiry job started (60s interval, no document deletion)");
 }
 
 module.exports = router;
