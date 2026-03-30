@@ -95,8 +95,11 @@ async function resolveLocation(queryLat, queryLng, userId) {
 // This ensures re-fetch after generation always returns data even if the
 // 2dsphere index isn't warmed up yet or the theatre is slightly outside radius.
 async function fetchSessionsFromDB(loc, baseQuery) {
+  // ✅ FIX 1: Do NOT populate 'createdBy' here.
+  // When createdBy = 'system' (a plain string), Mongoose tries to cast it to
+  // ObjectId for the User model → CastError crashes the entire re-fetch.
+  // formatSession() already handles createdBy=system via isSystemGenerated flag.
   const populate = [
-    { path: 'createdBy',    select: 'firstName lastName profilePhoto' },
     { path: 'participants', select: 'firstName lastName profilePhoto' },
   ];
 
@@ -171,6 +174,9 @@ async function fetchTrendingMovies() {
 }
 
 // ─── Fetch nearby theatres (Google Places → fallback at user coords) ──────────
+// ✅ FIX 3: New Google Places API v1 (POST, not GET)
+// Old nearbysearch endpoint returns REQUEST_DENIED with new API keys.
+// New endpoint: POST https://places.googleapis.com/v1/places:searchNearby
 async function fetchNearbyTheatres(lat, lng, radius = 8000) {
   if (lat === null || lng === null) return buildFallbackTheatres(0, 0);
 
@@ -181,34 +187,60 @@ async function fetchNearbyTheatres(lat, lng, radius = 8000) {
   }
 
   try {
-    const url =
-      `https://maps.googleapis.com/maps/api/place/nearbysearch/json` +
-      `?location=${lat},${lng}&radius=${radius}&type=movie_theater&key=${KEY}`;
-    const res  = await fetch(url);
-    if (!res.ok) throw new Error(`Places HTTP ${res.status}`);
+    const res = await fetch('https://places.googleapis.com/v1/places:searchNearby', {
+      method: 'POST',
+      headers: {
+        'Content-Type':    'application/json',
+        'X-Goog-Api-Key':  KEY,
+        // Only request the fields we actually use (billed per field)
+        'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.rating,places.location',
+      },
+      body: JSON.stringify({
+        includedTypes:    ['movie_theater'],
+        maxResultCount:   20,
+        locationRestriction: {
+          circle: {
+            center: { latitude: lat, longitude: lng },
+            radius: parseFloat(radius),
+          },
+        },
+      }),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      throw new Error(`Places API HTTP ${res.status}: ${errText.slice(0, 200)}`);
+    }
+
     const data = await res.json();
 
-    if (data.status === 'REQUEST_DENIED' || data.status === 'INVALID_REQUEST') {
-      throw new Error(`Places API: ${data.status} — ${data.error_message}`);
-    }
+    // New API returns { places: [...] }, NOT { results: [...] }
+    const results = data.places || [];
 
-    const list = (data.results || []).map(p => ({
-      placeId:  p.place_id,
-      name:     p.name,
-      address:  p.vicinity || '',
-      rating:   p.rating || null,
-      distance: Math.round(haversineDistance(lat, lng, p.geometry.location.lat, p.geometry.location.lng)),
-      lat:      p.geometry.location.lat,
-      lng:      p.geometry.location.lng,
-    })).sort((a, b) => a.distance - b.distance);
-
-    if (!list.length) {
-      console.warn('Google Places returned 0 theatres — using fallback');
+    if (!results.length) {
+      console.warn('Google Places v1 returned 0 theatres — using fallback');
       return buildFallbackTheatres(lat, lng);
     }
+
+    const list = results.map(p => {
+      const pLat = p.location?.latitude  || 0;
+      const pLng = p.location?.longitude || 0;
+      return {
+        placeId:  p.id                     || '',
+        name:     p.displayName?.text      || 'Cinema',
+        address:  p.formattedAddress       || '',
+        rating:   p.rating                 || null,
+        distance: Math.round(haversineDistance(lat, lng, pLat, pLng)),
+        lat:      pLat,
+        lng:      pLng,
+      };
+    }).sort((a, b) => a.distance - b.distance);
+
+    console.log(`📍 Google Places v1: ${list.length} theatre(s) found`);
     return list;
+
   } catch (err) {
-    console.warn(`Google Places failed (${err.message}) — using fallback theatres`);
+    console.warn(`Google Places v1 failed (${err.message}) — using fallback theatres`);
     return buildFallbackTheatres(lat, lng);
   }
 }
@@ -216,7 +248,11 @@ async function fetchNearbyTheatres(lat, lng, radius = 8000) {
 // ─── Score a session for feed ranking ────────────────────────────────────────
 function scoreSession(session, now, userLang, userLat, userLng) {
   let score = 0;
-  if (session.language === userLang) score += 100;
+  // ✅ FIX 2: "Both" means the user accepts any language → always match
+  const langMatches = userLang === 'Both'
+    || session.language === 'Both'
+    || session.language === userLang;
+  if (langMatches) score += 100;
   if (session.isBoosted) score += 40;
 
   if (userLat !== null && userLng !== null && session.theatreLocation?.coordinates) {
@@ -551,8 +587,10 @@ exports.getNearbySessions = async (req, res) => {
       return { ...formatSession(s.toObject ? s.toObject() : s, userId, d), _score: score };
     });
 
-    const langMatch = formatted.filter(x => x.language === userLang).sort((a, b) => b._score - a._score);
-    const otherLang = formatted.filter(x => x.language !== userLang).sort((a, b) => b._score - a._score);
+    // ✅ FIX 2b: treat "Both" as wildcard in bucket sort too
+    const isLangMatch = (s) => userLang === 'Both' || s.language === 'Both' || s.language === userLang;
+    const langMatch = formatted.filter(isLangMatch).sort((a, b) => b._score - a._score);
+    const otherLang = formatted.filter(s => !isLangMatch(s)).sort((a, b) => b._score - a._score);
     const sorted    = [...langMatch, ...otherLang].slice(0, 10);
     sorted.forEach(s => delete s._score);
 
