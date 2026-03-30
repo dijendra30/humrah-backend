@@ -10,7 +10,9 @@ const chatMessageSchema = new mongoose.Schema({
 });
 
 const movieChatSchema = new mongoose.Schema({
-  sessionId:    { type: mongoose.Schema.Types.ObjectId, ref: 'MovieSession', required: true },
+  // ✅ NOT required — sessionId is set after the session is created to avoid
+  //    a circular dependency (session needs chatId, chat needs sessionId).
+  sessionId:    { type: mongoose.Schema.Types.ObjectId, ref: 'MovieSession', default: null },
   participants: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   messages:     [chatMessageSchema],
   expiresAt:    { type: Date, required: true },
