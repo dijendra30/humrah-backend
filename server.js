@@ -522,6 +522,7 @@ const reviewRoutes = require('./routes/reviews');
 const paymentRoutes = require('./routes/payment');
 const foodRoutes = require('./routes/foodRoutes');
 const settingsRoutes = require('./routes/settings');
+const profileAssistantRoutes = require('./routes/profileAssistant');
 // ✅ MOVIE HANGOUT ROUTES
 const movieSessionRoutes = require('./routes/movieSessionRoutes');
 const { startMovieSessionExpiryJob } = require('./jobs/movieSessionExpiryJob');
@@ -545,6 +546,7 @@ app.use('/api/payment', authenticate, enforceLegalAcceptance, paymentRoutes);
 app.use('/api/random-booking', authenticate, enforceLegalAcceptance, require('./routes/randomBooking'));
 app.use('/api/verification', authenticate, enforceLegalAcceptance, require('./routes/verification'));
 app.use('/api/settings', authenticate, enforceLegalAcceptance, settingsRoutes);
+app.use('/api/profile-assistant', profileAssistantRoutes);
 
 app.use('/api/settings', require('./routes/settings'));
 // ✅ ADMIN ROUTES (No legal enforcement needed for admins performing admin duties)
