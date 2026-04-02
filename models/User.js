@@ -149,7 +149,11 @@ deletionRequestedAt: {
   type: Date,
   default: null
 },
-  
+  // are ever read. Phone, email, chats, and exact location are never accessed.
+profileBotConsent: {
+  type:    Boolean,
+  default: false,
+},
   // =============================================
   // ✅ USER TYPE SYSTEM
   // =============================================
