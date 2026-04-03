@@ -16,6 +16,7 @@
 const MovieSession = require('../models/MovieSession');
 const MovieChat    = require('../models/MovieChat');
 const { sendPostSessionNotifications } = require('../services/movieSessionService');
+const { isAfterEndHour }                = require('../utils/timeLabel');
 
 function startMovieSessionExpiryJob() {
   setInterval(async () => {
@@ -54,6 +55,28 @@ function startMovieSessionExpiryJob() {
       );
       if (chatResult.modifiedCount > 0) {
         console.log(`💬 [expiry] Expired ${chatResult.modifiedCount} chat(s)`);
+      }
+
+      // ── STEP 4: After 8 PM — expire ALL today's active sessions ──────────
+      // Spec: "If current time >= 8 PM → expire all today's sessions"
+      // This catches any sessions that were created earlier today and
+      // somehow survived past the 8 PM boundary.
+      if (isAfterEndHour()) {
+        const todayStart = new Date();
+        todayStart.setHours(0, 0, 0, 0);
+        const todayEnd = new Date();
+        todayEnd.setHours(23, 59, 59, 999);
+
+        const lateResult = await MovieSession.updateMany(
+          {
+            status:   'active',
+            showTime: { $gte: todayStart, $lte: todayEnd },
+          },
+          { $set: { status: 'expired' } }
+        );
+        if (lateResult.modifiedCount > 0) {
+          console.log(`🌙 [expiry] 8 PM sweep — expired ${lateResult.modifiedCount} today session(s)`);
+        }
       }
 
     } catch (err) {
