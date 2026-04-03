@@ -1,19 +1,24 @@
 // routes/profileAssistant.js
 // ─────────────────────────────────────────────────────────────────────────────
-// Profile Assistant — full logic + AI backend.
+// Profile Assistant — hybrid logic + AI backend.
+//
+// ⚠️  MODEL FIX: llama3-8b-8192 was DECOMMISSIONED (all calls returned 400).
+//     Replaced with: llama-3.1-8b-instant  (Groq's official drop-in successor)
 //
 // Endpoints:
-//   POST /consent    — store profileBotConsent = true
-//   POST /analyze    — button tap  → LOGIC only (Groq polishes wording only)
-//   POST /chat       — typed msg   → intent match → logic, else Groq fallback
-//   POST /ai-fix     — "Let AI fix it" → Groq generates field values → applies
-//                      to the user's profile automatically
+//   POST /consent   → store profileBotConsent = true
+//   POST /analyze   → button tap   → LOGIC ONLY (Groq only polishes wording)
+//   POST /chat      → typed input  → keyword intent → LOGIC, else Groq fallback
+//   POST /ai-fix    → "Let AI fix it" → Groq generates & saves field values
 //
 // Security:
-//   • AI never has direct DB access
-//   • Only ALLOWED_FIELDS ever leave buildSafeProfileSummary()
-//   • AI-generated values go through the same field validation before save
-//   • Max 5 Groq calls/user/day (shared across /chat and /ai-fix)
+//   • AI has NO direct DB access
+//   • Only ALLOWED_FIELDS leave buildSafeProfileSummary()
+//   • AI-generated values validated before saving
+//   • Max 5 Groq calls / user / day (shared across all endpoints)
+//
+// Groq request format (per spec):
+//   { model, messages: [{ role:"system", content }, { role:"user", content }] }
 // ─────────────────────────────────────────────────────────────────────────────
 
 const express = require('express');
@@ -23,43 +28,51 @@ const { auth } = require('../middleware/auth');
 const User    = require('../models/User');
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CONSTANTS
+// CONFIG
 // ─────────────────────────────────────────────────────────────────────────────
 
-const ALLOWED_FIELDS   = ['hasProfilePhoto', 'bio', 'preferences', 'availability', 'completionScore', 'missingFields'];
+// ✅ FIXED: llama3-8b-8192 → llama-3.1-8b-instant
+const GROQ_MODEL      = 'llama-3.1-8b-instant';
 const GROQ_DAILY_LIMIT = 5;
-const groqDailyUsage   = new Map(); // userId → { date: 'YYYY-MM-DD', count }
+const AI_FIXABLE_FIELDS = ['bio', 'interests', 'availableTimes'];
+const ALLOWED_FIELDS    = ['hasProfilePhoto', 'bio', 'preferences', 'availability', 'completionScore', 'missingFields'];
 
-// Fields that Groq is allowed to suggest new values for
-const AI_FIXABLE_FIELDS = ['bio', 'preferences', 'availability'];
+// In-memory daily usage tracker  (swap for Redis in production)
+const groqDailyUsage = new Map(); // userId → { date: 'YYYY-MM-DD', count }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// RATE LIMITER
+// RATE LIMIT HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
 
-function getTodayStr() { return new Date().toISOString().slice(0, 10); }
+const getTodayStr = () => new Date().toISOString().slice(0, 10);
 
 function groqCallsToday(userId) {
   const e = groqDailyUsage.get(userId);
   return (!e || e.date !== getTodayStr()) ? 0 : e.count;
 }
 
-function incrementGroqUsage(userId) {
+function incrementGroq(userId) {
   const today = getTodayStr();
-  const e = groqDailyUsage.get(userId);
-  if (!e || e.date !== today) groqDailyUsage.set(userId, { date: today, count: 1 });
-  else e.count += 1;
+  const e     = groqDailyUsage.get(userId);
+  groqDailyUsage.set(userId, (!e || e.date !== today)
+    ? { date: today, count: 1 }
+    : { ...e, count: e.count + 1 });
+}
+
+function overGroqLimit(userId) {
+  return groqCallsToday(userId) >= GROQ_DAILY_LIMIT;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// STEP 1 — Safe profile summary (ALLOWED_FIELDS only)
+// STEP 1  —  Build safe profile summary (ALLOWED_FIELDS only)
 // ─────────────────────────────────────────────────────────────────────────────
 
 function buildSafeProfileSummary(user) {
-  const q            = user.questionnaire || {};
+  const q = user.questionnaire || {};
+
   const hasProfilePhoto = !!user.profilePhoto;
-  const bio          = (q.bio || '').trim();
-  const preferences  = [
+  const bio             = (q.bio || '').trim();
+  const preferences     = [
     ...(Array.isArray(q.hangoutPreferences) ? q.hangoutPreferences : []),
     ...(Array.isArray(q.interests)          ? q.interests          : []),
     ...(Array.isArray(q.comfortActivity)    ? q.comfortActivity    : []),
@@ -79,50 +92,82 @@ function buildSafeProfileSummary(user) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// STEP 2 — Logic engine (deterministic, no AI)
+// STEP 2  —  Keyword intent matcher (for typed messages)
+// Returns: 'improve_profile' | 'booking_help' | 'complete_profile' |
+//          'bio_help' | 'first_improve' | null
+// ─────────────────────────────────────────────────────────────────────────────
+
+function matchIntent(msg) {
+  const l = msg.toLowerCase().trim();
+  if (/\b(booking|bookings|not getting|no booking|why.{0,20}book|more booking|get booking)\b/.test(l))
+    return 'booking_help';
+  if (/\b(bio|write bio|better bio|help.*bio|bio help)\b/.test(l))
+    return 'bio_help';
+  if (/\b(first|priority|what.*improve|where.*start|start with)\b/.test(l))
+    return 'first_improve';
+  if (/\b(complet|missing|fill|incomplete|finish|setup|set up|percent|%)\b/.test(l))
+    return 'complete_profile';
+  if (/\b(improv|better|tips|help|profile|enhance|update|how to|what should|suggestion)\b/.test(l))
+    return 'improve_profile';
+  return null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STEP 3  —  Logic engine (deterministic, no AI called here)
+//            Returns: { intro, bullets, callToAction, completionScore,
+//                       showOptionsAfter }
 // ─────────────────────────────────────────────────────────────────────────────
 
 function runLogicEngine(intent, s) {
   const { missingFields, completionScore, hasProfilePhoto, bio, preferences, availability } = s;
 
+  const FIELD_TIPS = {
+    profilePhoto: 'Add a clear profile photo — profiles with photos get 3× more views.',
+    bio:          'Write a short bio (at least 10 characters) so people know who they are meeting.',
+    availability: 'Set your available time slots so people can see when you are free.',
+    preferences:  'Add at least 2 interests or hangout preferences.',
+    ageGroup:     'Set your age group to get better match suggestions.',
+    city:         'Add your city so nearby users can discover you.',
+  };
+
   switch (intent) {
+
+    // ── Complete my profile ─────────────────────────────────────────────────
     case 'complete_profile': {
       if (missingFields.length === 0) {
         return { intro: `You're ${completionScore}% complete — all set! 🎉`,
-          bullets: ['Refresh your bio every few weeks.', 'Keep availability updated.'],
+          bullets: ['Refresh your bio every few weeks to stay relevant.',
+            'Keep your availability updated to attract more bookings.'],
           callToAction: null, completionScore, showOptionsAfter: true };
       }
       return {
         intro: `You're ${completionScore}% complete.`,
-        bullets: missingFields.slice(0, 5).map(f => ({
-          profilePhoto: 'Add a profile photo — profiles with photos get 3× more views.',
-          bio:          'Add a bio (at least 10 characters) so others know who you are.',
-          availability: 'Set your available time slots so people know when you can meet.',
-          preferences:  'Add at least 2 interests or hangout preferences.',
-          ageGroup:     'Set your age group for better match suggestions.',
-          city:         'Add your city so nearby users can discover you.',
-        }[f] || `Fill in your ${f}.`)),
+        bullets: missingFields.slice(0, 5).map(f => FIELD_TIPS[f] || `Fill in your ${f}.`),
         callToAction: 'Fix Now', completionScore, showOptionsAfter: false,
       };
     }
+
+    // ── Improve my profile ──────────────────────────────────────────────────
     case 'improve_profile': {
       const tips = [];
       tips.push(!hasProfilePhoto
-        ? 'Add a real, well-lit profile photo — it is the first thing people notice.'
-        : 'Your photo looks good. Make sure it is recent and clearly shows your face.');
+        ? 'Add a real, well-lit photo — it is the first thing people notice.'
+        : 'Your photo looks good. Make sure it is recent and shows your face clearly.');
       tips.push(bio.length < 10
-        ? 'Write a 2–3 sentence bio. Share what you enjoy and what kind of meetup you are open to.'
-        : bio.length < 60 ? 'Your bio is a bit short. Add a hobby or your favourite activity.'
+        ? 'Write a 2–3 sentence bio. Share what you enjoy and what meetup you are open to.'
+        : bio.length < 60 ? 'Your bio is a bit short. Add a hobby or favourite activity to make it personal.'
         : 'Your bio is solid. Keep it authentic and refresh it when your interests change.');
       tips.push(availability.length === 0
         ? 'Set your availability so people know when to reach out.'
         : 'You have availability set — update it whenever your schedule changes.');
       tips.push(preferences.length < 2
-        ? 'Add at least 2 interests to improve your discovery ranking.'
-        : preferences.length < 5 ? 'A few more interests will help people find common ground with you.'
+        ? 'Add at least 2 interests to boost your discovery ranking.'
+        : preferences.length < 5 ? 'A few more interests help people find common ground with you.'
         : 'Great variety of interests! Keep them current.');
       return { intro: null, bullets: tips.slice(0, 5), callToAction: 'Edit Profile', completionScore, showOptionsAfter: false };
     }
+
+    // ── Why no bookings? ────────────────────────────────────────────────────
     case 'booking_help': {
       const reasons = [];
       if (!hasProfilePhoto)          reasons.push('No profile photo — the top reason people skip a profile.');
@@ -130,36 +175,87 @@ function runLogicEngine(intent, s) {
       if (availability.length === 0) reasons.push('No availability set — people cannot see when you are free.');
       if (preferences.length < 2)   reasons.push('Too few interests — add more so the system matches you better.');
       if (reasons.length === 0) {
-        return { intro: 'Your profile looks complete! 👍 Tips to boost bookings:',
-          bullets: ['Log in regularly — active profiles appear higher in search.',
-            'Update your availability often.', 'Refresh your bio occasionally.'],
+        return { intro: 'Your profile looks great! 👍 Tips to boost bookings further:',
+          bullets: ['Log in regularly — active profiles rank higher.',
+            'Update your availability often so people know you are reachable.',
+            'Refresh your bio occasionally to keep it feeling current.'],
           callToAction: null, completionScore, showOptionsAfter: true };
       }
       return { intro: 'Here are the likely reasons you are not getting bookings:',
         bullets: reasons.slice(0, 5), callToAction: 'Fix Issues', completionScore, showOptionsAfter: false };
     }
+
+    // ── Help me write a better bio ──────────────────────────────────────────
+    case 'bio_help': {
+      const bioTips = [];
+      if (bio.length === 0) {
+        bioTips.push('You have not written a bio yet. Start with what kind of person you are and what you enjoy.');
+        bioTips.push('Example: "I love exploring cafes and weekend hikes. Looking for chill meetups to try new places!"');
+      } else if (bio.length < 30) {
+        bioTips.push(`Your bio is only ${bio.length} characters. Aim for at least 50–100 characters.`);
+        bioTips.push('Mention 1–2 things you enjoy doing and what kind of meetup you are open to.');
+      } else {
+        bioTips.push('Your bio is a good length. Consider mentioning a specific interest or local spot you love.');
+        bioTips.push('End with something that invites people to connect — e.g. "Always down for a coffee and good conversation!"');
+      }
+      bioTips.push('Keep it genuine, warm, and under 140 characters for best results.');
+      return { intro: 'Here are some tips for writing a great bio:', bullets: bioTips, callToAction: 'Edit Profile', completionScore, showOptionsAfter: false };
+    }
+
+    // ── What should I improve first? ────────────────────────────────────────
+    case 'first_improve': {
+      // Priority order: photo → bio → availability → preferences → ageGroup → city
+      const priority = ['profilePhoto', 'bio', 'availability', 'preferences', 'ageGroup', 'city'];
+      const topMissing = priority.filter(f => missingFields.includes(f));
+      if (topMissing.length === 0) {
+        return { intro: 'Your profile is complete! Focus on staying active:',
+          bullets: ['Update your availability weekly.', 'Refresh your bio every month.',
+            'Log in regularly to appear at the top of search.'],
+          callToAction: null, completionScore, showOptionsAfter: true };
+      }
+      const top = topMissing[0];
+      return {
+        intro: `Start with your ${top === 'profilePhoto' ? 'profile photo' : top} — it has the biggest impact right now.`,
+        bullets: [FIELD_TIPS[top], ...topMissing.slice(1, 3).map(f => FIELD_TIPS[f])],
+        callToAction: 'Fix Now', completionScore, showOptionsAfter: false,
+      };
+    }
+
+    // ── How can I get more bookings? (alias of booking_help) ────────────────
+    case 'more_bookings':
+      return runLogicEngine('booking_help', s);
+
+    // ── Fallback ────────────────────────────────────────────────────────────
     default:
       return { intro: null, bullets: [], callToAction: null, completionScore, showOptionsAfter: true };
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// STEP 3 — Groq: polish logic bullets (wording only, no data sent)
+// STEP 4A  —  Groq: polish logic bullets (wording only, no profile data sent)
+//             Prompt: "Rewrite this in a friendly, short, and helpful tone: ${bullet}"
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function polishBulletsWithGroq(bullets) {
-  if (!process.env.GROQ_API_KEY || bullets.length === 0) return bullets;
+async function polishBullets(bullets) {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey || bullets.length === 0) return bullets;
+
   const polished = [];
   for (const bullet of bullets) {
     try {
-      const res = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
-        model: 'llama3-8b-8192',
-        messages: [
-          { role: 'system', content: 'Rewrite the sentence in a warm, concise, actionable tone. Return ONLY the sentence, no extra text.' },
-          { role: 'user',   content: `Rewrite this in a friendly, short, and helpful tone: ${bullet}` },
-        ],
-        max_tokens: 80, temperature: 0.5,
-      }, { headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' }, timeout: 4000 });
+      const res = await axios.post(
+        'https://api.groq.com/openai/v1/chat/completions',
+        {
+          model: GROQ_MODEL,  // ✅ uses live model
+          messages: [
+            { role: 'system', content: 'You help improve user profiles. Keep answers short, actionable, and friendly.' },
+            { role: 'user',   content: `Rewrite this in a friendly, short, and helpful tone: ${bullet}` },
+          ],
+          max_tokens: 80,
+          temperature: 0.5,
+        },
+        { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 4000 }
+      );
       const r = res.data?.choices?.[0]?.message?.content?.trim();
       polished.push(r && r.length > 0 && r.length < 200 ? r : bullet);
     } catch { polished.push(bullet); }
@@ -168,19 +264,17 @@ async function polishBulletsWithGroq(bullets) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// STEP 4 — Groq: chat fallback for unmatched typed messages
+// STEP 4B  —  Groq: fallback for unmatched typed messages
+//             Spec-compliant request format:
+//             { model, messages: [system, user] }
+//             Profile data = filtered summary only (ALLOWED_FIELDS)
 // ─────────────────────────────────────────────────────────────────────────────
 
-function matchIntent(msg) {
-  const l = msg.toLowerCase();
-  if (/\b(booking|bookings|not getting|no booking|why.{0,20}book)\b/.test(l)) return 'booking_help';
-  if (/\b(complet|missing|fill|incomplete|finish|setup|set up)\b/.test(l))     return 'complete_profile';
-  if (/\b(improv|better|tips|help|profile|enhance|update|how to|what should)\b/.test(l)) return 'improve_profile';
-  return null;
-}
+async function groqFallback(userMessage, summary) {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) return null;
 
-async function callGroqFallback(userMessage, summary) {
-  if (!process.env.GROQ_API_KEY) return null;
+  // Build filteredData string — ALLOWED_FIELDS values only
   const filteredData = [
     `Profile photo: ${summary.hasProfilePhoto ? 'yes' : 'no'}`,
     `Bio length: ${summary.bio.length} characters`,
@@ -189,104 +283,103 @@ async function callGroqFallback(userMessage, summary) {
     `Completion: ${summary.completionScore}%`,
     `Missing: ${summary.missingFields.join(', ') || 'none'}`,
   ].join('\n');
-  const prompt = `User profile data:\n${filteredData}\n\nUser message:\n${userMessage}\n\nGive short, helpful suggestions to improve profile.\nMax 3–4 lines. No extra explanation.`;
-  const res = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
-    model: 'llama3-8b-8192',
-    messages: [
-      { role: 'system', content: 'You are a friendly profile improvement assistant for a social app. Give concise, actionable tips. 3–4 sentences max.' },
-      { role: 'user', content: prompt },
-    ],
-    max_tokens: 150, temperature: 0.6,
-  }, { headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' }, timeout: 8000 });
-  return res.data?.choices?.[0]?.message?.content?.trim() || null;
+
+  try {
+    const res = await axios.post(
+      'https://api.groq.com/openai/v1/chat/completions',
+      {
+        model: GROQ_MODEL,  // ✅ uses live model
+        messages: [
+          {
+            role: 'system',
+            content: 'You help improve user profiles. Keep answers short, actionable, and friendly.',
+          },
+          {
+            role: 'user',
+            content: `User profile: ${filteredData}\nUser message: ${userMessage}`,
+          },
+        ],
+        max_tokens: 150,
+        temperature: 0.6,
+      },
+      { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 8000 }
+    );
+    return res.data?.choices?.[0]?.message?.content?.trim() || null;
+  } catch (err) {
+    console.error('[ProfileAssistant] Groq fallback error:', err?.response?.data || err.message);
+    return null;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// STEP 5 — AI Fix: Groq generates actual field values and applies them
-//
-// What Groq generates:
-//   bio        → a 2–3 sentence bio suggestion based on questionnaire context
-//   preferences → 3 interest suggestions
-//   availability → 2–3 time slot suggestions
-//
-// What Groq is NOT allowed to touch:
-//   profilePhoto, ageGroup, city, email, phone, location, any internal field
-//
-// After generation, values are saved to user.questionnaire via the same
-// Mongoose path as regular profile updates — no special bypass.
+// STEP 5  —  Groq AI-Fix: generate & apply field values automatically
+//            Groq gets: safe context (no PII) + list of fixable missing fields
+//            Returns: applied patches + new completion score
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function generateAndApplyAiFix(user, summary) {
-  if (!process.env.GROQ_API_KEY) {
-    return { success: false, message: 'AI fix requires GROQ_API_KEY to be configured on the server.' };
-  }
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) return { success: false, message: 'AI fix requires GROQ_API_KEY on the server.' };
 
-  const fixable = summary.missingFields.filter(f => AI_FIXABLE_FIELDS.includes(f));
+  const fixable = summary.missingFields.filter(f =>
+    ['bio', 'preferences', 'availability'].includes(f)
+  );
   if (fixable.length === 0) {
-    return {
-      success: true,
-      message: 'Your profile data looks complete — no AI fixes needed for these fields!',
-      applied: [],
-    };
+    return { success: true, message: 'Your profile data looks complete — no AI fixes needed!', applied: [] };
   }
 
-  // Build context from safe questionnaire fields only (no PII)
+  // Build safe context — no PII ever
   const q = user.questionnaire || {};
-  const safeContext = [
-    q.hangoutPreferences?.length ? `Hangout preferences: ${q.hangoutPreferences.join(', ')}` : null,
-    q.interests?.length           ? `Interests: ${q.interests.join(', ')}`                   : null,
-    q.mood                        ? `Mood/vibe: ${q.mood}`                                   : null,
-    q.personalityType             ? `Personality: ${q.personalityType}`                      : null,
-    q.lookingForOnHumrah?.length  ? `Looking for: ${q.lookingForOnHumrah.join(', ')}`        : null,
-    q.comfortZones?.length        ? `Comfort zones: ${q.comfortZones.join(', ')}`            : null,
+  const ctxLines = [
+    q.hangoutPreferences?.length ? `Hangout: ${q.hangoutPreferences.join(', ')}` : null,
+    q.interests?.length           ? `Interests: ${q.interests.join(', ')}`        : null,
+    q.mood                        ? `Mood: ${q.mood}`                             : null,
+    q.personalityType             ? `Personality: ${q.personalityType}`           : null,
+    q.lookingForOnHumrah?.length  ? `Looking for: ${q.lookingForOnHumrah.join(', ')}` : null,
   ].filter(Boolean).join('\n');
 
-  const fieldsToFix = fixable.map(f => {
-    switch (f) {
-      case 'bio':          return 'bio: write a warm, genuine 2–3 sentence bio (max 140 characters) based on the context. No emojis.';
-      case 'preferences':  return 'interests: suggest exactly 3 relevant interests as a JSON array of strings.';
-      case 'availability': return 'availableTimes: suggest 2–3 time slots as a JSON array of strings like ["Weekday evenings", "Weekend mornings"].';
-      default:             return null;
-    }
+  const fieldInstructions = fixable.map(f => {
+    if (f === 'bio')          return 'bio: a warm 2–3 sentence bio (max 140 chars). No emojis.';
+    if (f === 'preferences')  return 'interests: exactly 3 interests as a JSON string array.';
+    if (f === 'availability') return 'availableTimes: 2–3 time slots as a JSON string array, e.g. ["Weekday evenings","Weekends"].';
+    return null;
   }).filter(Boolean);
 
-  const prompt = `You are helping a user on a social companion app complete their profile.
+  const prompt = `You are helping a user on a social companion app fill in missing profile fields.
 
-User context (safe, non-PII):
-${safeContext || 'No additional context available.'}
+Context (no personal info):
+${ctxLines || 'No additional context.'}
 
-Missing fields to generate:
-${fieldsToFix.join('\n')}
+Generate values for these missing fields:
+${fieldInstructions.join('\n')}
 
-Return a single JSON object with ONLY these keys: ${fixable.join(', ')}.
-For bio: a string.
-For interests: an array of strings.
-For availableTimes: an array of strings.
-No explanation, no markdown, no extra keys. Just the JSON object.`;
+Return ONLY a valid JSON object with keys: ${fixable.join(', ')}.
+No markdown, no explanation, no extra keys. Just the JSON.`;
 
   let generated;
   try {
-    const res = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
-      model: 'llama3-8b-8192',
-      messages: [
-        { role: 'system', content: 'Return only a valid JSON object. No markdown. No explanation.' },
-        { role: 'user',   content: prompt },
-      ],
-      max_tokens: 300, temperature: 0.7,
-    }, { headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' }, timeout: 10000 });
-
-    const raw = res.data?.choices?.[0]?.message?.content?.trim() || '{}';
-    // Strip markdown code fences if Groq wraps it anyway
+    const res = await axios.post(
+      'https://api.groq.com/openai/v1/chat/completions',
+      {
+        model: GROQ_MODEL,  // ✅ uses live model
+        messages: [
+          { role: 'system', content: 'You help improve user profiles. Keep answers short, actionable, and friendly.' },
+          { role: 'user',   content: prompt },
+        ],
+        max_tokens: 300,
+        temperature: 0.7,
+      },
+      { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 12000 }
+    );
+    const raw   = res.data?.choices?.[0]?.message?.content?.trim() || '{}';
     const clean = raw.replace(/```json|```/g, '').trim();
-    generated = JSON.parse(clean);
+    generated   = JSON.parse(clean);
   } catch (err) {
-    console.error('[AI Fix] Groq generation failed:', err.message);
+    console.error('[ProfileAssistant] AI-fix generation error:', err?.response?.data || err.message);
     return { success: false, message: 'AI could not generate suggestions right now. Please try again.' };
   }
 
-  // ── Apply generated values to the user document ──────────────────────────
   if (!user.questionnaire) user.questionnaire = {};
-
   const applied = [];
 
   // bio — string, max 140 chars, no URLs
@@ -298,12 +391,9 @@ No explanation, no markdown, no extra keys. Just the JSON object.`;
     }
   }
 
-  // interests — array of strings, max 5
+  // interests — string array, max 5 items
   if (Array.isArray(generated.interests) && generated.interests.length > 0) {
-    const interests = generated.interests
-      .filter(i => typeof i === 'string' && i.trim().length > 0)
-      .slice(0, 5)
-      .map(i => i.trim());
+    const interests = generated.interests.filter(i => typeof i === 'string' && i.trim()).slice(0, 5).map(i => i.trim());
     if (interests.length > 0) {
       const existing = Array.isArray(user.questionnaire.interests) ? user.questionnaire.interests : [];
       user.questionnaire.interests = [...new Set([...existing, ...interests])].slice(0, 8);
@@ -311,12 +401,9 @@ No explanation, no markdown, no extra keys. Just the JSON object.`;
     }
   }
 
-  // availableTimes — array of strings, max 5
+  // availableTimes — string array, max 5 items
   if (Array.isArray(generated.availableTimes) && generated.availableTimes.length > 0) {
-    const times = generated.availableTimes
-      .filter(t => typeof t === 'string' && t.trim().length > 0)
-      .slice(0, 5)
-      .map(t => t.trim());
+    const times = generated.availableTimes.filter(t => typeof t === 'string' && t.trim()).slice(0, 5).map(t => t.trim());
     if (times.length > 0) {
       user.questionnaire.availableTimes = times;
       applied.push({ field: 'availability', value: times });
@@ -330,11 +417,12 @@ No explanation, no markdown, no extra keys. Just the JSON object.`;
   user.markModified('questionnaire');
   await user.save();
 
+  const newSummary = buildSafeProfileSummary(user);
   return {
     success: true,
     message: `AI updated ${applied.length} field${applied.length > 1 ? 's' : ''} on your profile! ✅`,
     applied,
-    newCompletionScore: Math.round(((6 - buildSafeProfileSummary(user).missingFields.length) / 6) * 100),
+    newCompletionScore: newSummary.completionScore,
   };
 }
 
@@ -342,7 +430,7 @@ No explanation, no markdown, no extra keys. Just the JSON object.`;
 // ROUTES
 // ─────────────────────────────────────────────────────────────────────────────
 
-// POST /api/profile-assistant/consent
+// ── POST /api/profile-assistant/consent ──────────────────────────────────────
 router.post('/consent', auth, async (req, res) => {
   try {
     const user = await User.findById(req.userId);
@@ -351,116 +439,159 @@ router.post('/consent', auth, async (req, res) => {
     await user.save();
     res.json({ success: true, message: 'Access granted.' });
   } catch (err) {
-    console.error('[Assistant] consent error:', err);
+    console.error('[ProfileAssistant] consent:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
-// POST /api/profile-assistant/analyze   (button tap → logic only)
+// ── POST /api/profile-assistant/analyze ──────────────────────────────────────
+// Button tap → LOGIC ONLY. Groq polishes wording only (no data sent to Groq).
+// Body: { intent: string }
 router.post('/analyze', auth, async (req, res) => {
   try {
     const { intent } = req.body;
-    const valid = ['improve_profile', 'booking_help', 'complete_profile'];
+    const valid = ['improve_profile', 'booking_help', 'complete_profile', 'bio_help', 'first_improve', 'more_bookings'];
+
     if (!intent || !valid.includes(intent)) {
       return res.status(400).json({ success: false, code: 'INVALID_INTENT',
         message: "I didn't understand that. Try one of the options.", showOptions: true });
     }
+
     const user = await User.findById(req.userId);
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
     if (!user.profileBotConsent) {
       return res.status(403).json({ success: false, code: 'CONSENT_REQUIRED',
         message: 'We need permission to access your profile data to help you better.' });
     }
+
     const summary = buildSafeProfileSummary(user);
     const result  = runLogicEngine(intent, summary);
-    const bullets = await polishBulletsWithGroq(result.bullets);
-    return res.json({ success: true, source: 'logic', intent,
-      completionScore: result.completionScore, intro: result.intro,
-      bullets, callToAction: result.callToAction, showOptionsAfter: result.showOptionsAfter });
+    // Polish wording via Groq — no user data ever sent to Groq here
+    const bullets = await polishBullets(result.bullets);
+
+    return res.json({
+      success: true, source: 'logic', intent,
+      completionScore: result.completionScore,
+      intro: result.intro, bullets,
+      callToAction: result.callToAction,
+      showOptionsAfter: result.showOptionsAfter,
+    });
   } catch (err) {
-    console.error('[Assistant] analyze error:', err);
+    console.error('[ProfileAssistant] analyze:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
-// POST /api/profile-assistant/chat   (typed message → intent match → logic, else Groq)
+// ── POST /api/profile-assistant/chat ─────────────────────────────────────────
+// Typed input → keyword match → LOGIC, else Groq fallback.
+// Body: { message: string, groqCallCount?: number }
 router.post('/chat', auth, async (req, res) => {
   try {
     const { message, groqCallCount = 0 } = req.body;
+
     if (!message?.trim()) {
       return res.status(400).json({ success: false, code: 'EMPTY_MESSAGE',
         message: "I didn't catch that.", showOptions: true });
     }
+
     const user = await User.findById(req.userId);
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
     if (!user.profileBotConsent) {
       return res.status(403).json({ success: false, code: 'CONSENT_REQUIRED',
         message: 'We need permission to access your profile data to help you better.' });
     }
+
     const summary = buildSafeProfileSummary(user);
     const matched = matchIntent(message.trim());
+
+    // ── Intent matched → LOGIC (never call Groq for this path) ───────────
     if (matched) {
       const result  = runLogicEngine(matched, summary);
-      const bullets = await polishBulletsWithGroq(result.bullets);
-      return res.json({ success: true, source: 'logic', intent: matched,
-        completionScore: result.completionScore, intro: result.intro,
-        bullets, callToAction: result.callToAction,
-        showOptionsAfter: result.showOptionsAfter || groqCallCount >= 2 });
+      const bullets = await polishBullets(result.bullets);
+      return res.json({
+        success: true, source: 'logic', intent: matched,
+        completionScore: result.completionScore,
+        intro: result.intro, bullets,
+        callToAction: result.callToAction,
+        showOptionsAfter: result.showOptionsAfter || groqCallCount >= 2,
+      });
     }
+
+    // ── No match → Groq fallback ──────────────────────────────────────────
     const userId = req.userId.toString();
-    if (groqCallsToday(userId) >= GROQ_DAILY_LIMIT) {
-      return res.json({ success: true, source: 'limit',
+
+    if (overGroqLimit(userId)) {
+      return res.json({
+        success: true, source: 'limit',
         intro: "You've reached today's AI assist limit.",
-        bullets: ['Try one of the quick options below.', 'Your daily AI limit resets at midnight.'],
-        callToAction: null, showOptionsAfter: true, completionScore: summary.completionScore });
+        bullets: ["Try one of the quick options below.", "Your daily AI limit resets at midnight."],
+        callToAction: null, showOptionsAfter: true, completionScore: summary.completionScore,
+      });
     }
+
     if (!process.env.GROQ_API_KEY) {
-      return res.json({ success: true, source: 'fallback',
+      return res.json({
+        success: true, source: 'fallback',
         intro: "I didn't fully understand that. Try one of these:",
-        bullets: [], callToAction: null, showOptionsAfter: true, completionScore: summary.completionScore });
+        bullets: [], callToAction: null, showOptionsAfter: true,
+        completionScore: summary.completionScore,
+      });
     }
-    incrementGroqUsage(userId);
-    let groqReply = null;
-    try { groqReply = await callGroqFallback(message.trim(), summary); } catch {}
+
+    incrementGroq(userId);
+    const groqReply = await groqFallback(message.trim(), summary);
+
     if (!groqReply) {
-      return res.json({ success: true, source: 'fallback',
+      return res.json({
+        success: true, source: 'fallback',
         intro: "I didn't fully understand that. Try one of these:",
-        bullets: [], callToAction: null, showOptionsAfter: true, completionScore: summary.completionScore });
+        bullets: [], callToAction: null, showOptionsAfter: true,
+        completionScore: summary.completionScore,
+      });
     }
-    return res.json({ success: true, source: 'groq', groqReply,
-      groqCallCount: groqCallCount + 1,
-      showOptionsAfter: groqCallCount + 1 >= 2, completionScore: summary.completionScore });
+
+    const newCount = groqCallCount + 1;
+    return res.json({
+      success: true, source: 'groq',
+      groqReply, groqCallCount: newCount,
+      showOptionsAfter: newCount >= 2,
+      completionScore: summary.completionScore,
+    });
+
   } catch (err) {
-    console.error('[Assistant] chat error:', err);
+    console.error('[ProfileAssistant] chat:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
-// POST /api/profile-assistant/ai-fix
-// Groq reads safe profile data, generates field values, saves them to the DB.
-// Called when user taps "Let AI fix it" in the Fix bottom sheet.
+// ── POST /api/profile-assistant/ai-fix ───────────────────────────────────────
+// Groq reads safe profile context, generates values, saves to DB.
+// Called when user taps "Let AI fix it" in the fix bottom sheet.
 router.post('/ai-fix', auth, async (req, res) => {
   try {
     const user = await User.findById(req.userId);
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
     if (!user.profileBotConsent) {
       return res.status(403).json({ success: false, code: 'CONSENT_REQUIRED',
         message: 'We need permission to access your profile data to help you better.' });
     }
 
     const userId = req.userId.toString();
-    if (groqCallsToday(userId) >= GROQ_DAILY_LIMIT) {
+    if (overGroqLimit(userId)) {
       return res.status(429).json({ success: false, code: 'DAILY_LIMIT',
         message: "You've reached today's AI assist limit. Try again tomorrow or fix manually." });
     }
 
-    incrementGroqUsage(userId);
+    incrementGroq(userId);
     const summary = buildSafeProfileSummary(user);
     const result  = await generateAndApplyAiFix(user, summary);
 
     return res.status(result.success ? 200 : 400).json(result);
   } catch (err) {
-    console.error('[Assistant] ai-fix error:', err);
+    console.error('[ProfileAssistant] ai-fix:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
