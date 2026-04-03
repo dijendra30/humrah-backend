@@ -19,7 +19,8 @@
 const mongoose     = require('mongoose');
 const MovieSession = require('../models/MovieSession');
 const MovieChat    = require('../models/MovieChat');
-const { getTimeLabel, getParticipantDisplay, getPostSessionMessage } = require('../utils/timeLabel');
+const { getTimeLabel, getParticipantDisplay, getPostSessionMessage,
+        getNextShowTime, isCreationAllowed, validateShowTime, isAfterEndHour } = require('../utils/timeLabel');
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const DEFAULT_LANGUAGE  = 'Hindi';
@@ -443,13 +444,15 @@ async function generateSystemSessions(userCtx, lat, lng) {
       // Session 0 always matches user language
       const lang    = i === 0 ? userLang : (langPool[i % langPool.length] || DEFAULT_LANGUAGE);
 
-      // Spread times: +30, +50, +70 min
-      const offsetMin = 30 + i * 20;
-      const showTime  = new Date(now.getTime() + offsetMin * 60_000);
+      // ── getNextShowTime() enforces 9 AM–8 PM window per spec ──────────────
+      // Offsets: 20, 40, 60 min from now — each automatically snaps to
+      // tomorrow 10 AM if the offset would push past 8 PM.
+      const offsetMin = 20 + i * 20;
+      const showTime  = getNextShowTime(offsetMin);
       const expiresAt = new Date(showTime.getTime() +  15 * 60_000);
       const chatExpAt = new Date(showTime.getTime() + 180 * 60_000);
-      const dateStr   = showTime.toISOString().slice(0, 10);
-      const timeStr   = showTime.toTimeString().slice(0, 5);
+      const dateStr   = showTime.toLocaleDateString('en-CA');      // YYYY-MM-DD in local tz
+      const timeStr   = `${String(showTime.getHours()).padStart(2,'0')}:${String(showTime.getMinutes()).padStart(2,'0')}`;
 
       console.log(`   [${i}] "${movie.title}" @ "${theatre.name}" (${lang}, ${timeStr})`);
 
@@ -639,8 +642,24 @@ async function createSession(userId, data) {
   const [h, mi]    = time.split(':').map(Number);
   const showTime   = new Date(y, mo - 1, d, h, mi, 0);
 
-  if (isNaN(showTime.getTime()) || showTime <= new Date()) {
-    return { success: false, status: 400, message: 'Show time must be in the future' };
+  // ── Time rules: 9 AM–8 PM window + 7:30 PM creation cutoff ─────────────
+  // validateShowTime() checks future + 9 AM–8 PM bounds
+  const timeCheck = validateShowTime(showTime);
+  if (!timeCheck.valid) {
+    return { success: false, status: 400, message: timeCheck.reason };
+  }
+
+  // Creation cutoff: reject today-sessions after 7:30 PM
+  if (!isCreationAllowed()) {
+    // Check if the requested showTime is today
+    const isToday = showTime.toDateString() === new Date().toDateString();
+    if (isToday) {
+      return {
+        success: false,
+        status:  400,
+        message: "It's past 7:30 PM — you can only create sessions for tomorrow now.",
+      };
+    }
   }
 
   const expiresAt = new Date(showTime.getTime() +  15 * 60_000);
