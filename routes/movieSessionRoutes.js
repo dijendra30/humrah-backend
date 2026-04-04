@@ -24,6 +24,10 @@ router.get('/theatres/search', ctrl.searchTheatres);
 // GET /api/movie-session/debug  ← TEMPORARY, remove in prod
 router.get('/movie-session/debug', ctrl.debugSessions);
 
+// GET /api/movie-session/my — sessions the current user joined or created
+// Used by Messages → Sessions tab to show movie hangout chats
+router.get('/movie-session/my', ctrl.getMySessions);
+
 // GET /api/movie-session/nearby?lat=&lng=
 // 4-step flow: fetch → generate if sparse → re-fetch → sort → top 5
 router.get('/movie-session/nearby', ctrl.getNearbySessions);
