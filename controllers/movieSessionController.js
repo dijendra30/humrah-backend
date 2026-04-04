@@ -128,6 +128,19 @@ exports.sendMessage = async (req, res) => {
 };
 
 // =============================================================================
+// GET /api/movie-session/my
+// Sessions the user is a participant in — for Messages → Sessions tab
+// =============================================================================
+exports.getMySessions = async (req, res) => {
+  try {
+    return send(res, await svc.getMySessions(uid(req)));
+  } catch (err) {
+    console.error('[ctrl] getMySessions:', err.message);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+// =============================================================================
 // GET /api/movie-session/debug  ← TEMPORARY — remove after confirming data flow
 // =============================================================================
 exports.debugSessions = async (req, res) => {
