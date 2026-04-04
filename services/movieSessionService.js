@@ -966,6 +966,81 @@ async function debugSessions() {
   };
 }
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// getMySessions
+//
+// Returns all sessions where the user is a participant (created or joined).
+// Used by the MessageActivity Sessions tab.
+//
+// Chat visibility rule (per spec):
+//  • chat is accessible while status = 'active'  (showTime + 3 hrs)
+//  • after 3 hrs: chat document still exists, status becomes 'expired'
+//    → returned but flagged chatReadOnly = true so UI disables input
+//
+// IMPORTANT: we do NOT filter by session status — even expired-card sessions
+// are returned as long as the chat window is still open.
+// ─────────────────────────────────────────────────────────────────────────────
+async function getMySessions(userId) {
+  const sessions = await MovieSession.find({
+    participants: userId,
+  })
+    .populate('participants', 'firstName lastName profilePhoto')
+    .sort({ showTime: -1 })
+    .limit(50)
+    .lean();
+
+  // Attach chat status for each session
+  const chatIds = sessions
+    .map(s => s.chatId)
+    .filter(Boolean);
+
+  const chats = await MovieChat.find({ _id: { $in: chatIds } })
+    .select('_id status expiresAt')
+    .lean();
+
+  const chatMap = {};
+  chats.forEach(c => { chatMap[c._id.toString()] = c; });
+
+  const now = new Date();
+
+  return {
+    success: true,
+    sessions: sessions.map(s => {
+      const chat     = s.chatId ? chatMap[s.chatId.toString()] : null;
+      const chatOpen = chat && chat.status === 'active' && new Date(chat.expiresAt) > now;
+
+      return {
+        id:                 s._id.toString(),
+        movieId:            s.movieId,
+        title:              s.movieTitle,
+        posterPath:         s.poster || null,
+        theatreName:        s.theatreName,
+        theatreAddress:     s.theatreAddress,
+        showTime:           s.showTime?.toISOString()     || null,
+        expiresAt:          s.expiresAt?.toISOString()    || null,
+        chatExpiresAt:      s.chatExpiresAt?.toISOString() || null,
+        date:               s.date || '',
+        time:               s.time || '',
+        participants:       (s.participants || []).map(p => ({
+          id:           p._id.toString(),
+          firstName:    p.firstName || '',
+          profilePhoto: p.profilePhoto || null,
+        })),
+        participantsCount:  s.participants?.length || 0,
+        maxParticipants:    s.maxParticipants,
+        isSystemGenerated:  s.isSystemGenerated,
+        sessionStatus:      s.status,             // 'active' | 'expired'  (card)
+        chatId:             s.chatId?.toString() || null,
+        chatStatus:         chat?.status || 'expired',
+        chatOpen,           // true = user can type; false = read-only
+        isCreator:          s.createdBy?.toString?.() === userId.toString(),
+        timeLabel:          getTimeLabel(s.showTime),
+      };
+    }),
+  };
+}
+
 module.exports = {
   getMovies,
   getNearbyTheatres,
@@ -977,6 +1052,7 @@ module.exports = {
   sendMessage,
   sendPostSessionNotifications,
   debugSessions,
+  getMySessions,
   // Exported for use by expiry job
   fetchTrendingMovies,
   generateSystemSessions,
