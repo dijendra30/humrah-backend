@@ -151,36 +151,40 @@ async function _fetchSessionsFromDB(loc, baseQuery) {
 }
 
 // ─── Scoring for sort ─────────────────────────────────────────────────────────
-// Priority (per spec): language → boosted → distance → time → participants
+// ── SMART PRIORITY SCORING (per spec) ────────────────────────────────────────
+//
+//  1. Real-user sessions always beat system sessions (+200 base)
+//  2. More real participants → higher rank (+10 each, max +40)
+//     → "If system session gets users → increase its priority" — handled here
+//  3. Earlier show time → higher rank (+2 to +20)
+//  4. Language match bonus (+15)
+//  5. Boosted bonus (+10)
+//
 function _scoreSession(session, now, userLang, userLat, userLng) {
   let score = 0;
 
-  // 1. Language match — 'Both' is wildcard
+  // 1. Real-user sessions always dominate
+  if (!session.isSystemGenerated) score += 200;
+
+  // 2. Real participant count (dynamic — system sessions climb as users join)
+  const realCount = session.participants?.length || 0;
+  score += Math.min(realCount * 10, 40);
+
+  // 3. Time proximity — soonest first
+  const hrs = (new Date(session.showTime) - now) / 3_600_000;
+  if (hrs > 0 && hrs < 2)        score += 20;
+  else if (hrs >= 2 && hrs < 6)  score += 14;
+  else if (hrs >= 6 && hrs < 12) score += 8;
+  else if (hrs >= 12)            score += 2;
+
+  // 4. Language match bonus
   const langMatch = userLang === 'Both'
     || session.language === 'Both'
     || session.language === userLang;
-  if (langMatch) score += 100;
+  if (langMatch) score += 15;
 
-  // 2. Boosted
-  if (session.isBoosted) score += 40;
-
-  // 3. Distance (closer = more points, max 30)
-  if (userLat !== null && userLng !== null && session.location?.coordinates) {
-    const distM = _haversine(
-      userLat, userLng,
-      session.location.coordinates[1], session.location.coordinates[0]
-    );
-    score += Math.max(0, 30 - distM / 1000);
-  }
-
-  // 4. Time proximity — soonest shows first
-  const hrs = (new Date(session.showTime) - now) / 3_600_000;
-  if (hrs > 0 && hrs < 2)       score += 20;
-  else if (hrs >= 2 && hrs < 6)  score += 12;
-  else if (hrs >= 6 && hrs < 12) score += 5;
-
-  // 5. Participants count descending (social proof)
-  score += Math.min(session.participants.length * 3, 12);
+  // 5. Boosted bonus
+  if (session.isBoosted) score += 10;
 
   return score;
 }
@@ -410,14 +414,28 @@ async function searchTheatres(query, lat = null, lng = null) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// generateSystemSessions
+// SYSTEM_SHOW_TIMES — fixed daily schedule for auto-generated sessions
+//   11 AM · 3 PM · 7 PM  (tomorrow, always)
+// Only created when real-user nearby sessions <= 1
+// ─────────────────────────────────────────────────────────────────────────────
+const SYSTEM_SHOW_TIMES = [
+  { hour: 11, minute: 0,  label: '11 AM' },
+  { hour: 15, minute: 0,  label: '3 PM'  },
+  { hour: 19, minute: 0,  label: '7 PM'  },
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// generateSystemSessions(userCtx, lat, lng)
 //
-// GUARANTEES:
-//  • Always has movies   (TMDB → FALLBACK_MOVIES)
-//  • Always has theatres (Places API v1 → fallback at user coords)
-//  • participants = [] — NEVER fake user IDs
-//  • adminId = null — first joiner gets assigned atomically
-//  • At least session[0] matches user's language
+// Creates exactly 3 system sessions for TOMORROW at 11 AM, 3 PM, 7 PM.
+//
+// Rules:
+//  • Called when real-user sessions nearby <= 1 (never "just in case")
+//  • participants = [] always — NEVER fake users
+//  • adminId = null — first real joiner gets assigned atomically
+//  • session[0] (11 AM) matches user's language
+//  • Duplicate guard: skips if same movie+theatre+date+time already active
+//  • Returns the count of sessions created
 // ─────────────────────────────────────────────────────────────────────────────
 async function generateSystemSessions(userCtx, lat, lng) {
   console.log('\n🤖 generateSystemSessions START');
@@ -430,40 +448,45 @@ async function generateSystemSessions(userCtx, lat, lng) {
 
   console.log(`   movies=${movies.length}, theatres=${theatres.length}`);
 
-  const now      = new Date();
   const userLang = userCtx?.languagePreference || DEFAULT_LANGUAGE;
   const langPool = [userLang, 'Hindi', 'English', 'Tamil']
     .filter((v, i, a) => a.indexOf(v) === i);
   let created    = 0;
 
-  for (let i = 0; i < Math.min(3, movies.length); i++) {
+  // Sessions are always for TOMORROW at fixed times
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const tomorrowDateStr = tomorrow.toLocaleDateString('en-CA'); // YYYY-MM-DD
+
+  for (let i = 0; i < SYSTEM_SHOW_TIMES.length && i < movies.length; i++) {
     try {
       const movie   = movies[i];
       const theatre = theatres[i % theatres.length];
+      const slot    = SYSTEM_SHOW_TIMES[i];
 
-      // Session 0 always matches user language
+      // session[0] = 11 AM matches user language; others cycle the pool
       const lang    = i === 0 ? userLang : (langPool[i % langPool.length] || DEFAULT_LANGUAGE);
 
-      // ── getNextShowTime() enforces 9 AM–8 PM window per spec ──────────────
-      // Offsets: 20, 40, 60 min from now — each automatically snaps to
-      // tomorrow 10 AM if the offset would push past 8 PM.
-      const offsetMin = 20 + i * 20;
-      const showTime  = getNextShowTime(offsetMin);
-      const expiresAt = new Date(showTime.getTime() +  15 * 60_000);
-      const chatExpAt = new Date(showTime.getTime() + 180 * 60_000);
-      const dateStr   = showTime.toLocaleDateString('en-CA');      // YYYY-MM-DD in local tz
-      const timeStr   = `${String(showTime.getHours()).padStart(2,'0')}:${String(showTime.getMinutes()).padStart(2,'0')}`;
+      // Build showTime for tomorrow at this fixed slot
+      const showTime = new Date(tomorrow);
+      showTime.setHours(slot.hour, slot.minute, 0, 0);
+      const timeStr   = `${String(slot.hour).padStart(2,'0')}:${String(slot.minute).padStart(2,'0')}`;
+      const expiresAt = new Date(showTime.getTime() +  15 * 60_000);  // card gone +15 min
+      const chatExpAt = new Date(showTime.getTime() + 180 * 60_000);  // chat gone +3 hr
 
-      console.log(`   [${i}] "${movie.title}" @ "${theatre.name}" (${lang}, ${timeStr})`);
+      console.log(`   [${i}] "${movie.title}" @ "${theatre.name}" (${lang}, tomorrow ${slot.label})`);
 
       // Duplicate guard
       const exists = await MovieSession.exists({
-        movieId: movie.id.toString(), theatreName: theatre.name,
-        date: dateStr, time: timeStr, status: 'active',
+        movieId:     movie.id.toString(),
+        theatreName: theatre.name,
+        date:        tomorrowDateStr,
+        time:        timeStr,
+        status:      'active',
       });
       if (exists) { console.log(`   [${i}] skip — duplicate`); continue; }
 
-      // Create session first — no circular reference
+      // Create session first (chat needs session._id)
       const session = await MovieSession.create({
         movieId:           movie.id.toString(),
         movieTitle:        movie.title,
@@ -476,14 +499,14 @@ async function generateSystemSessions(userCtx, lat, lng) {
           type:        'Point',
           coordinates: [parseFloat(theatre.lng), parseFloat(theatre.lat)],
         },
-        date:              dateStr,
+        date:              tomorrowDateStr,
         time:              timeStr,
         showTime,
         expiresAt,
         chatExpiresAt:     chatExpAt,
         createdBy:         'system',
-        participants:      [],         // EMPTY — never fake users
-        adminId:           null,       // assigned atomically on first join
+        participants:      [],    // EMPTY — never fake users
+        adminId:           null,  // first real joiner gets admin atomically
         maxParticipants:   4,
         isBoosted:         false,
         isSystemGenerated: true,
@@ -491,9 +514,8 @@ async function generateSystemSessions(userCtx, lat, lng) {
         chatId:            null,
       });
 
-      console.log(`   [${i}] ✅ session ${session._id}`);
+      console.log(`   [${i}] ✅ session ${session._id} (tomorrow ${slot.label})`);
 
-      // Create chat (sessionId now available)
       try {
         const chat = await MovieChat.create({
           sessionId:    session._id,
@@ -506,7 +528,7 @@ async function generateSystemSessions(userCtx, lat, lng) {
         await session.save();
         console.log(`   [${i}] ✅ chat ${chat._id}`);
       } catch (chatErr) {
-        console.warn(`   [${i}] ⚠️ chat failed: ${chatErr.message}`);
+        console.warn(`   [${i}] ⚠️ chat failed (non-fatal): ${chatErr.message}`);
       }
 
       created++;
@@ -519,11 +541,42 @@ async function generateSystemSessions(userCtx, lat, lng) {
   }
 
   console.log(`🤖 generateSystemSessions END — ${created} created\n`);
+  return created;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// countNearbyRealUserSessions(loc)
+//
+// Counts active sessions within 20 km that were created by real users.
+// Used by the daily job to decide whether to generate system sessions.
+// ─────────────────────────────────────────────────────────────────────────────
+async function countNearbyRealUserSessions(loc) {
+  const now = new Date();
+  const baseQuery = {
+    status:            'active',
+    expiresAt:         { $gt: now },
+    isSystemGenerated: false,
+  };
+
+  if (loc && loc.lat !== null && loc.lng !== null) {
+    try {
+      const count = await MovieSession.countDocuments({
+        ...baseQuery,
+        location: {
+          $nearSphere: {
+            $geometry:    { type: 'Point', coordinates: [loc.lng, loc.lat] },
+            $maxDistance: 20_000,
+          },
+        },
+      });
+      return count;
+    } catch (_) { /* geo index not ready — fall through */ }
+  }
+  return MovieSession.countDocuments(baseQuery);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // getMovies — public API response
-// ─────────────────────────────────────────────────────────────────────────────
 async function getMovies() {
   const movies = await fetchTrendingMovies();
   return { success: true, movies };
@@ -570,9 +623,13 @@ async function getNearbySessions(userId, queryLat, queryLng) {
   let sessions = await _fetchSessionsFromDB(loc, baseQuery);
   console.log(`STEP 1: ${sessions.length} session(s)`);
 
-  // STEP 2
-  if (sessions.length < 2) {
-    console.log('STEP 2: feed sparse → generateSystemSessions()');
+  // STEP 2 — Generate system sessions only when real-user sessions <= 1
+  // (spec: "If real user sessions <= 1 → create 3 system sessions")
+  const realUserCount = sessions.filter(s => !s.isSystemGenerated).length;
+  console.log(`STEP 1 detail: ${realUserCount} real-user, ${sessions.length - realUserCount} system`);
+
+  if (realUserCount <= 1) {
+    console.log('STEP 2: real sessions sparse → generateSystemSessions()');
     const genLat = loc.lat ?? userCtx?.lat ?? null;
     const genLng = loc.lng ?? userCtx?.lng ?? null;
 
@@ -585,9 +642,22 @@ async function getNearbySessions(userId, queryLat, queryLng) {
     // STEP 3 — re-fetch
     sessions = await _fetchSessionsFromDB(loc, baseQuery);
     console.log(`STEP 3: ${sessions.length} session(s) after generation`);
+  } else {
+    console.log('STEP 2: enough real sessions — skipping generation');
   }
 
-  // STEP 4 — score, sort, top 5
+  // STEP 4 — Score, sort, cap at 4 (per spec: "max 4 sessions visible")
+  //
+  // Sort priority (per spec):
+  //   1. Real-user sessions first  (score +200)
+  //   2. More real participants     (score +10 each, max +40)
+  //   3. Earlier show time         (score +2 to +20)
+  //   4. Language match + boosted  (score bonus)
+  //
+  // Fill strategy:
+  //   Take all real-user sessions (up to 4), fill remainder with system sessions
+  //   until total = 4.  This ensures real users always dominate.
+
   const scored = sessions.map(s => {
     const distM = (loc.lat !== null && s.location?.coordinates)
       ? _haversine(loc.lat, loc.lng, s.location.coordinates[1], s.location.coordinates[0])
@@ -595,24 +665,26 @@ async function getNearbySessions(userId, queryLat, queryLng) {
     return {
       formatted: _formatSession(s, userId, distM),
       score:     _scoreSession(s, now, userLang, loc.lat, loc.lng),
+      isSystem:  s.isSystemGenerated || false,
     };
   });
 
-  // Language-match bucket first, then others — both sorted by score
-  const isMatch = (x) => {
-    const lang = x.formatted.language;
-    return userLang === 'Both' || lang === 'Both' || lang === userLang;
-  };
-  const langMatch = scored.filter(isMatch).sort((a, b) => b.score - a.score);
-  const others    = scored.filter(x => !isMatch(x)).sort((a, b) => b.score - a.score);
+  // Split into buckets
+  const realSessions   = scored.filter(x => !x.isSystem).sort((a, b) => b.score - a.score);
+  const systemSessions = scored.filter(x =>  x.isSystem).sort((a, b) => b.score - a.score);
 
-  const top5 = [...langMatch, ...others]
-    .slice(0, 5)
-    .map(x => x.formatted);
+  // Fill up to 4: real first, system fills gaps
+  const MAX_VISIBLE = 4;
+  const combined = [
+    ...realSessions.slice(0, MAX_VISIBLE),
+    ...systemSessions.slice(0, Math.max(0, MAX_VISIBLE - realSessions.length)),
+  ].slice(0, MAX_VISIBLE);
 
-  console.log(`STEP 4: returning ${top5.length} session(s)\n`);
+  const result = combined.map(x => x.formatted);
 
-  return { success: true, userLanguage: userLang, sessions: top5 };
+  console.log(`STEP 4: ${realSessions.length} real + ${systemSessions.length} system → returning ${result.length}\n`);
+
+  return { success: true, userLanguage: userLang, sessions: result };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1056,4 +1128,5 @@ module.exports = {
   // Exported for use by expiry job
   fetchTrendingMovies,
   generateSystemSessions,
+  countNearbyRealUserSessions,
 };
