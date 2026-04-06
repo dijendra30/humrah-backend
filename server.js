@@ -518,6 +518,7 @@ const postRoutes = require('./routes/posts');
 const spotlightRoutes = require('./routes/spotlight.route');
 const safetyReportRoutes = require('./routes/safetyReports');
 const profileRoutes = require('./routes/profile');
+const activityRoutes = require('./routes/activityRoutes');
 const reviewRoutes = require('./routes/reviews');
 const paymentRoutes = require('./routes/payment');
 const foodRoutes = require('./routes/foodRoutes');
@@ -552,6 +553,7 @@ app.use('/api/settings', require('./routes/settings'));
 // ✅ ADMIN ROUTES (No legal enforcement needed for admins performing admin duties)
 app.use('/api/admin', authenticate, require('./routes/admin'));
 app.use('/api/moderation', authenticate, adminOnly, moderationRoutes);
+app.use('/api/activity', authenticate, enforceLegalAcceptance, activityRoutes);
 
 // ✅ CALL ROUTES (Legal enforcement applied)
 app.use('/api/agora', authenticate, enforceLegalAcceptance, require('./routes/agora'));
