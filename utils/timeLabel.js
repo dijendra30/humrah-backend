@@ -103,6 +103,17 @@ function validateShowTime(showTime) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // getTimeLabel(showTime) → urgency label for UI
+//
+// Labels are based on BOTH time-until AND the actual hour of the show,
+// so "Tonight" is never shown for morning or afternoon sessions.
+//
+//  < 2 hrs away               → "⚡ Starting soon · In X mins"
+//  same day, show hour < 12   → "☀️ This morning"
+//  same day, show hour < 17   → "🌤️ This afternoon"
+//  same day, show hour < 20   → "🌆 This evening"
+//  same day (fallback)        → "🌆 Tonight"
+//  tomorrow                   → "📅 Tomorrow"
+//  else                       → formatted date
 // ─────────────────────────────────────────────────────────────────────────────
 function getTimeLabel(showTime) {
   const now     = new Date();
@@ -112,18 +123,25 @@ function getTimeLabel(showTime) {
 
   if (diffHrs < 0) return '🔴 Passed';
 
+  // < 2 hours away — show countdown regardless of time of day
   if (diffHrs < 2) {
     const minsLeft = Math.max(1, Math.round(diffMs / 60_000));
     return `⚡ Starting soon · In ${minsLeft} min${minsLeft !== 1 ? 's' : ''}`;
   }
 
-  if (diffHrs < 6) return '🕒 Later today';
-
   const today    = new Date();
   const tomorrow = new Date();
   tomorrow.setDate(today.getDate() + 1);
+  const showHour = show.getHours();
 
-  if (_sameDay(show, today))    return '🌆 Tonight';
+  if (_sameDay(show, today)) {
+    // Use the ACTUAL show hour to pick the right label
+    if (showHour < 12)  return '☀️ This morning';
+    if (showHour < 17)  return '🌤️ This afternoon';
+    if (showHour < 20)  return '🌆 This evening';
+    return '🌆 Tonight';
+  }
+
   if (_sameDay(show, tomorrow)) return '📅 Tomorrow';
 
   return `📅 ${show.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}`;
