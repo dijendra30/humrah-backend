@@ -453,10 +453,43 @@ async function generateSystemSessions(userCtx, lat, lng) {
     .filter((v, i, a) => a.indexOf(v) === i);
   let created    = 0;
 
-  // Sessions are always for TOMORROW at fixed times
-  const tomorrow = new Date();
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  const tomorrowDateStr = tomorrow.toLocaleDateString('en-CA'); // YYYY-MM-DD
+  // Sessions are always for TOMORROW at fixed times.
+  //
+  // TIMEZONE FIX: Render servers run in UTC. setHours() sets UTC time,
+  // so setHours(11,0,0,0) = 11:00 UTC = 16:30 IST — wrong for Indian users.
+  //
+  // Solution: build the showTime using the IST offset (UTC+5:30 = +330 min).
+  // _istDayAt() creates the Date in UTC such that it reads as the correct
+  // IST hour when displayed to the user.
+  //
+  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // +05:30 in ms
+
+  // Returns a Date whose UTC value corresponds to (today+daysAhead) at
+  // (hour:minute) IST.
+  function _istDayAt(daysAhead, hour, minute) {
+    const now = new Date();
+    // Midnight IST today = midnight UTC today + 5:30 offset ← no, simpler:
+    // Build as a UTC date then subtract offset so toISOString shows correct IST
+    const d = new Date(Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate() + daysAhead,
+      hour - 5,           // IST hour → UTC: subtract 5h 30m
+      minute - 30 < 0 ? (minute + 30) : (minute - 30),
+      0, 0
+    ));
+    // Handle minute underflow → borrow an hour
+    if (minute < 30) {
+      d.setUTCHours(d.getUTCHours() - 1);
+      d.setUTCMinutes(minute + 30);
+    }
+    return d;
+  }
+
+  const tomorrowIST = _istDayAt(1, 0, 0); // midnight IST tomorrow
+  // For date string use IST date, not UTC date
+  const tomorrowISTDate = new Date(tomorrowIST.getTime() + IST_OFFSET_MS);
+  const tomorrowDateStr = tomorrowISTDate.toISOString().slice(0, 10); // YYYY-MM-DD in IST
 
   for (let i = 0; i < SYSTEM_SHOW_TIMES.length && i < movies.length; i++) {
     try {
@@ -467,9 +500,9 @@ async function generateSystemSessions(userCtx, lat, lng) {
       // session[0] = 11 AM matches user language; others cycle the pool
       const lang    = i === 0 ? userLang : (langPool[i % langPool.length] || DEFAULT_LANGUAGE);
 
-      // Build showTime for tomorrow at this fixed slot
-      const showTime = new Date(tomorrow);
-      showTime.setHours(slot.hour, slot.minute, 0, 0);
+      // Build showTime: tomorrow IST at slot.hour:slot.minute
+      // Stored as UTC internally; displays correctly in IST to user.
+      const showTime = _istDayAt(1, slot.hour, slot.minute);
       const timeStr   = `${String(slot.hour).padStart(2,'0')}:${String(slot.minute).padStart(2,'0')}`;
       const expiresAt = new Date(showTime.getTime() +  15 * 60_000);  // card gone +15 min
       const chatExpAt = new Date(showTime.getTime() + 180 * 60_000);  // chat gone +3 hr
@@ -673,7 +706,11 @@ async function getNearbySessions(userId, queryLat, queryLng) {
   const realSessions   = scored.filter(x => !x.isSystem).sort((a, b) => b.score - a.score);
   const systemSessions = scored.filter(x =>  x.isSystem).sort((a, b) => b.score - a.score);
 
-  // Fill up to 4: real first, system fills gaps
+  // ── Display cap: max 4 sessions visible ──────────────────────────────────
+  // IMPORTANT: system generates exactly 3 sessions (11AM, 3PM, 7PM).
+  // MAX_VISIBLE = 4 means: if 1 real-user session exists, show it + 3 system = 4.
+  // If 2 real-user sessions exist, show 2 real + 2 system = 4.
+  // System NEVER creates a 4th session — max it generates is 3.
   const MAX_VISIBLE = 4;
   const combined = [
     ...realSessions.slice(0, MAX_VISIBLE),
