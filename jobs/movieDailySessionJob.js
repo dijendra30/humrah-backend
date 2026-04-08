@@ -1,86 +1,71 @@
 // jobs/movieDailySessionJob.js
 // ─────────────────────────────────────────────────────────────────────────────
-// TWO DAILY CRON TASKS:
+// DAILY CRON — three tasks, all city-aware:
 //
-// TASK 1 — Daily 7 PM check (runs every minute, fires once at 19:00)
-//   If real-user nearby sessions <= 1 → create 3 system sessions for tomorrow:
-//     11 AM · 3 PM · 7 PM
-//   Uses the same generateSystemSessions() as the on-demand fallback,
-//   so duplicate guard prevents double-creation.
+// TASK 1 — 7 PM generation check  (19:00 IST = 13:30 UTC on Render)
+//   For each city that has active users:
+//     Count USER-created sessions for TOMORROW
+//     IF user sessions >= 3 → do nothing (real users filled all slots)
+//     IF user sessions < 3  → call generateSystemSessions() to fill missing slots
+//   generateSystemSessions() uses slot-fill logic: only creates sessions for
+//   slots that are still empty. Duplicate guard prevents double-creation.
 //
-// TASK 2 — Midnight label refresh (runs every minute, fires once at 00:00)
-//   Does NOT recreate any sessions.
-//   Simply logs that "Tomorrow" sessions are now "Today" sessions.
-//   The Android client recomputes the label client-side from showTime,
-//   so no DB write is needed — this task just produces a log confirmation
-//   that the system is aware of the date change.
+// TASK 2 — Midnight label refresh  (00:00 IST = 18:30 UTC previous day)
+//   No DB writes. Logs "Tomorrow → Today" transition.
+//   Android computes labels from showTime at runtime.
 //
-// TASK 3 — 7 PM re-check after expiry sweep
-//   After the 8 PM expiry sweep has run (handled by movieSessionExpiryJob),
-//   the daily job re-checks if any real sessions remain. If not, it generates
-//   for the next day. This is the "After 7 PM → re-check" spec requirement.
+// TASK 3 — Post-8PM re-check  (20:01 IST = 14:31 UTC)
+//   After the 8 PM expiry sweep, re-check if real sessions exist for tomorrow.
+//   If not, fill missing slots.
 //
-// INTEGRATION:
-//   Call startMovieDailySessionJob() from inside connectDB() in server.js,
-//   alongside startMovieSessionExpiryJob().
+// TIMEZONE: Render runs UTC. All hour checks compare against IST hour.
+//   IST hour = UTC hour + 5 (taking floor; +30min handled by minute check).
+//   7 PM IST = 13:30 UTC → h_utc===13 && m_utc>=30 && m_utc<31
 // ─────────────────────────────────────────────────────────────────────────────
 'use strict';
 
 const MovieSession = require('../models/MovieSession');
 const { generateSystemSessions, countNearbyRealUserSessions } = require('../services/movieSessionService');
 
-// Track which hours we've already fired this task (resets each process restart)
-// This prevents duplicate fires within the same minute window.
-let _lastGenerationDate  = null;  // 'YYYY-MM-DD' of last generation run
-let _lastMidnightDate    = null;  // 'YYYY-MM-DD' of last midnight log
+// Once-per-day fire guards
+let _lastGenerationDate = null;
+let _lastMidnightDate   = null;
 
-// ─── Default centre-of-India coordinates for cityless generation ─────────────
-// Used when no user lat/lng available (centre of Delhi)
+// ─── Fallback: Delhi centre (used when no city coords available) ─────────────
 const DEFAULT_LAT = 28.6139;
 const DEFAULT_LNG = 77.2090;
-
-// ─── User language pool for daily generation (no specific user context) ──────
-const DAILY_LANG_CONTEXTS = [
-  { languagePreference: 'Hindi'   },
-  { languagePreference: 'English' },
-  { languagePreference: 'Hindi'   },
-];
+const DEFAULT_CITY = 'delhi';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // startMovieDailySessionJob
 // ─────────────────────────────────────────────────────────────────────────────
 function startMovieDailySessionJob() {
-  // Check every 60 seconds — but each task fires only once per day
   setInterval(async () => {
     try {
-      const now   = new Date();
-      const h     = now.getHours();
-      const m     = now.getMinutes();
-      const today = now.toLocaleDateString('en-CA');
+      const now     = new Date();
+      const h_utc   = now.getUTCHours();
+      const m_utc   = now.getUTCMinutes();
 
-      // ── TASK 1: 7 PM daily generation ─────────────────────────────────────
-      // Fires in the window 19:00–19:01 (first 60s of 7 PM), once per day.
-      if (h === 19 && m === 0 && _lastGenerationDate !== today) {
+      // IST today string for guard keys
+      const istNow  = new Date(now.getTime() + 5.5 * 3_600_000);
+      const today   = istNow.toISOString().slice(0, 10); // YYYY-MM-DD IST
+
+      // ── TASK 1: 7 PM IST = 13:30 UTC ──────────────────────────────────────
+      if (h_utc === 13 && m_utc === 30 && _lastGenerationDate !== today) {
         _lastGenerationDate = today;
-        await _runDailyGeneration('7PM-daily');
+        await _runDailyGeneration('7PM-IST');
       }
 
-      // ── TASK 2: Midnight label refresh ─────────────────────────────────────
-      // Fires in the window 00:00–00:01, once per day.
-      // "Tomorrow" sessions are now "Today" — no DB write needed,
-      // the showTime field is already the correct absolute datetime.
-      if (h === 0 && m === 0 && _lastMidnightDate !== today) {
+      // ── TASK 2: Midnight IST = 18:30 UTC (previous calendar day) ──────────
+      if (h_utc === 18 && m_utc === 30 && _lastMidnightDate !== today) {
         _lastMidnightDate = today;
         await _midnightRefresh(today);
       }
 
-      // ── TASK 3: Post-8PM re-check ───────────────────────────────────────────
-      // After the expiry sweep runs at 8 PM, check if real user sessions still
-      // exist for tomorrow. If not, generate. Fires at 20:01 (one minute after
-      // the expiry sweep's first 8 PM run).
-      if (h === 20 && m === 1 && _lastGenerationDate !== today + '_post8pm') {
+      // ── TASK 3: 8:01 PM IST = 14:31 UTC (post-expiry re-check) ───────────
+      if (h_utc === 14 && m_utc === 31 && _lastGenerationDate !== today + '_post8pm') {
         _lastGenerationDate = today + '_post8pm';
-        await _runDailyGeneration('post-8PM-recheck');
+        await _runDailyGeneration('post-8PM-IST');
       }
 
     } catch (err) {
@@ -88,67 +73,86 @@ function startMovieDailySessionJob() {
     }
   }, 60_000);
 
-  console.log('✅ Movie daily session job started (7PM generation + midnight refresh)');
+  console.log('✅ Movie daily session job started');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // _runDailyGeneration(trigger)
 //
-// Core logic: check real-user session count, generate if needed.
+// Spec:
+//  IF user sessions for tomorrow >= 3 → do NOTHING
+//  IF user sessions for tomorrow < 3  → fill missing slots only
+//
+// City-aware: queries per city. Falls back to Delhi if no cities found.
 // ─────────────────────────────────────────────────────────────────────────────
 async function _runDailyGeneration(trigger) {
-  console.log(`\n📅 [daily-job] ${trigger} — checking real user sessions`);
+  console.log(`\n📅 [daily-job] ${trigger}`);
 
-  // Build a fake "loc" object for the count query
-  // In production you could query against all major cities;
-  // we use Delhi centre as the reference point.
-  const loc = { lat: DEFAULT_LAT, lng: DEFAULT_LNG };
+  // Build tomorrow date string in IST
+  const now          = new Date();
+  const istNow       = new Date(now.getTime() + 5.5 * 3_600_000);
+  const istTomorrow  = new Date(istNow.getTime() + 24 * 3_600_000);
+  const tomorrowStr  = istTomorrow.toISOString().slice(0, 10);
 
-  const realCount = await countNearbyRealUserSessions(loc);
-  console.log(`   Real-user sessions nearby: ${realCount}`);
+  // Find all cities that have active sessions or users
+  // Simplest approach: find distinct cities in the session collection
+  const cities = await MovieSession.distinct('city', {
+    status:   'active',
+    city:     { $nin: ['', null] },
+  });
 
-  if (realCount <= 1) {
-    console.log('   ≤1 real sessions — generating 3 system sessions for tomorrow');
+  // Always include default city even if no sessions yet
+  if (!cities.includes(DEFAULT_CITY)) cities.push(DEFAULT_CITY);
 
-    // Generate once per language context (3 sessions across 3 language slots)
-    // generateSystemSessions() uses SYSTEM_SHOW_TIMES internally so all 3
-    // slots are filled in a single call.
-    const ctx     = DAILY_LANG_CONTEXTS[0]; // first context defines session[0] language
-    const created = await generateSystemSessions(ctx, DEFAULT_LAT, DEFAULT_LNG);
+  console.log(`   Cities to process: ${cities.join(', ')}`);
 
-    console.log(`📅 [daily-job] ${trigger} complete — ${created} session(s) created`);
-  } else {
-    console.log(`   ${realCount} real sessions exist — no generation needed`);
+  for (const city of cities) {
+    // Count USER-created sessions for tomorrow in this city
+    const userCount = await MovieSession.countDocuments({
+      status:            'active',
+      isSystemGenerated: false,
+      date:              tomorrowStr,
+      city,
+    });
+
+    console.log(`   [${city}] user sessions tomorrow: ${userCount}`);
+
+    // Spec: IF user sessions >= 3 → do NOTHING
+    if (userCount >= 3) {
+      console.log(`   [${city}] ≥3 real sessions — skipping generation`);
+      continue;
+    }
+
+    // IF < 3 → fill missing slots
+    console.log(`   [${city}] <3 real sessions — filling missing slots`);
+    const created = await generateSystemSessions(
+      { languagePreference: 'Hindi', city },
+      DEFAULT_LAT, DEFAULT_LNG
+    );
+    console.log(`   [${city}] ${created} slot(s) filled`);
   }
+
+  console.log(`📅 [daily-job] ${trigger} complete\n`);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // _midnightRefresh(today)
-//
-// Logs that "Tomorrow" sessions are now "Today".
-// Queries sessions whose showTime is today (formerly "tomorrow" sessions).
-// No DB writes — showTime is already the correct absolute timestamp.
-// The Android client derives the "Today / Tomorrow" label from showTime at runtime.
+// No DB writes. Logs "Tomorrow" sessions that are now "Today".
 // ─────────────────────────────────────────────────────────────────────────────
 async function _midnightRefresh(today) {
-  console.log(`\n🌙 [daily-job] midnight refresh — ${today}`);
+  console.log(`\n🌙 [daily-job] midnight — ${today}`);
 
-  const todayStart = new Date();
-  todayStart.setHours(0, 0, 0, 0);
-  const todayEnd = new Date();
-  todayEnd.setHours(23, 59, 59, 999);
-
-  const todaysSessions = await MovieSession.find({
-    status:   'active',
-    showTime: { $gte: todayStart, $lte: todayEnd },
+  const todaySessions = await MovieSession.find({
+    status: 'active',
+    date:   today,
   }).lean();
 
-  if (todaysSessions.length > 0) {
-    console.log(`   ${todaysSessions.length} session(s) now show as "Today":`);
-    todaysSessions.forEach(s => {
-      const h = new Date(s.showTime).getHours();
-      const label = h < 12 ? 'Morning (11 AM)' : h < 16 ? 'Afternoon (3 PM)' : 'Evening (7 PM)';
-      console.log(`     • ${s.movieTitle} @ ${s.theatreName} — ${label}`);
+  if (todaySessions.length) {
+    console.log(`   ${todaySessions.length} session(s) now show as "Today":`);
+    todaySessions.forEach(s => {
+      const h = new Date(s.showTime).getUTCHours() + 5; // rough IST hour
+      const slot = h < 12 ? '11 AM' : h < 16 ? '3 PM' : '7 PM';
+      console.log(`     • [${s.city}] ${s.movieTitle} — ${slot}`);
     });
   } else {
     console.log('   No sessions scheduled for today.');
