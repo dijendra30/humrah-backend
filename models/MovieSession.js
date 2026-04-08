@@ -22,6 +22,10 @@ const movieSessionSchema = new mongoose.Schema({
   theatreAddress: { type: String, required: true },
   theatrePlaceId: { type: String, default: null },
 
+  // City — used for same-city filtering. Normalised to lowercase trim.
+  // Populated from user.questionnaire.city at session creation time.
+  city: { type: String, default: '', index: true },
+
   // GeoJSON Point — stored as [lng, lat] per MongoDB spec
   location: {
     type:        { type: String, enum: ['Point'], default: 'Point' },
@@ -63,6 +67,10 @@ movieSessionSchema.index({ location: '2dsphere' });
 movieSessionSchema.index({ status: 1, expiresAt: 1 });
 movieSessionSchema.index({ language: 1, status: 1 });
 movieSessionSchema.index({ createdBy: 1, status: 1 });
+// City-scoped slot uniqueness: (city, date, time) — used by slot-fill logic
+movieSessionSchema.index({ city: 1, date: 1, time: 1, status: 1 });
+// Diversity guard: (city, movieId, date) — no same movie twice in one day
+movieSessionSchema.index({ city: 1, movieId: 1, date: 1, status: 1 });
 
 // MongoDB TTL — auto-delete expired docs after 24 hrs (keeps collection clean)
 movieSessionSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 86400 });
