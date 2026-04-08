@@ -553,12 +553,10 @@ app.use('/api/settings', require('./routes/settings'));
 // ✅ ADMIN ROUTES (No legal enforcement needed for admins performing admin duties)
 app.use('/api/admin', authenticate, require('./routes/admin'));
 app.use('/api/moderation', authenticate, adminOnly, moderationRoutes);
-app.use('/api/activity', authenticate, enforceLegalAcceptance, activityRoutes);
-
 // ✅ CALL ROUTES (Legal enforcement applied)
 app.use('/api/agora', authenticate, enforceLegalAcceptance, require('./routes/agora'));
 app.use('/api/voice-call', authenticate, enforceLegalAcceptance, require('./routes/voice-call'));
-
+app.use('/api/activity', authenticate, enforceLegalAcceptance, activityRoutes);
 // ✅ GAMING SESSION ROUTES (auth + legal enforcement)
 app.use('/api/session', authenticate, enforceLegalAcceptance, gamingRoutes);
 app.use('/api/food', authenticate, enforceLegalAcceptance, foodRoutes);
