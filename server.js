@@ -557,7 +557,7 @@ app.use('/api/moderation', authenticate, adminOnly, moderationRoutes);
 app.use('/api/agora', authenticate, enforceLegalAcceptance, require('./routes/agora'));
 app.use('/api/voice-call', authenticate, enforceLegalAcceptance, require('./routes/voice-call'));
 app.use('/api/activity', authenticate, enforceLegalAcceptance, activityRoutes);
-// ✅ GAMING SESSION ROUTES (auth + legal enforcement)
+//✅ GAMING SESSION ROUTES (auth + legal enforcement)
 app.use('/api/session', authenticate, enforceLegalAcceptance, gamingRoutes);
 app.use('/api/food', authenticate, enforceLegalAcceptance, foodRoutes);
 // ✅ MOVIE HANGOUT — /api/movies, /api/theatres, /api/movie-session/*
