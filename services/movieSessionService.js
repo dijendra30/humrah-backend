@@ -68,15 +68,17 @@ async function _fetchUserContext(userId) {
   try {
     const User = mongoose.model('User');
     const user = await User.findById(userId)
-      .select('questionnaire last_known_lat last_known_lng firstName lastName profilePhoto')
+      .select('questionnaire last_known_lat last_known_lng firstName lastName profilePhoto isVerified')
       .lean();
     if (!user) return null;
     return {
       languagePreference: user.questionnaire?.languagePreference
                        || user.questionnaire?.language
                        || DEFAULT_LANGUAGE,
+      city:      (user.questionnaire?.city || '').trim().toLowerCase(),
       lat:       user.last_known_lat || null,
       lng:       user.last_known_lng || null,
+      isVerified: user.isVerified || false,
       firstName: user.firstName      || 'User',
       lastName:  user.lastName       || '',
       profilePhoto: user.profilePhoto|| null,
@@ -439,7 +441,7 @@ const SYSTEM_SHOW_TIMES = [
 // ─────────────────────────────────────────────────────────────────────────────
 async function generateSystemSessions(userCtx, lat, lng) {
   console.log('\n🤖 generateSystemSessions START');
-  console.log(`   lat=${lat}, lng=${lng}, lang=${userCtx?.languagePreference}`);
+  console.log(`   lat=${lat}, lng=${lng}, lang=${userCtx?.languagePreference}, city=${userCtx?.city}`);
 
   const [movies, theatres] = await Promise.all([
     fetchTrendingMovies(),
@@ -449,82 +451,112 @@ async function generateSystemSessions(userCtx, lat, lng) {
   console.log(`   movies=${movies.length}, theatres=${theatres.length}`);
 
   const userLang = userCtx?.languagePreference || DEFAULT_LANGUAGE;
+  const city     = (userCtx?.city || '').trim().toLowerCase();
   const langPool = [userLang, 'Hindi', 'English', 'Tamil']
     .filter((v, i, a) => a.indexOf(v) === i);
   let created    = 0;
 
-  // Sessions are always for TOMORROW at fixed times.
-  //
-  // TIMEZONE FIX: Render servers run in UTC. setHours() sets UTC time,
-  // so setHours(11,0,0,0) = 11:00 UTC = 16:30 IST — wrong for Indian users.
-  //
-  // Solution: build the showTime using the IST offset (UTC+5:30 = +330 min).
-  // _istDayAt() creates the Date in UTC such that it reads as the correct
-  // IST hour when displayed to the user.
-  //
-  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // +05:30 in ms
+  // ── IST timezone helpers ──────────────────────────────────────────────────
+  // Render servers run UTC. _istDayAt converts IST slot hours to correct UTC.
+  // 11 AM IST = 05:30 UTC · 3 PM IST = 09:30 UTC · 7 PM IST = 13:30 UTC
+  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
-  // Returns a Date whose UTC value corresponds to (today+daysAhead) at
-  // (hour:minute) IST.
   function _istDayAt(daysAhead, hour, minute) {
     const now = new Date();
-    // Midnight IST today = midnight UTC today + 5:30 offset ← no, simpler:
-    // Build as a UTC date then subtract offset so toISOString shows correct IST
-    const d = new Date(Date.UTC(
-      now.getUTCFullYear(),
-      now.getUTCMonth(),
-      now.getUTCDate() + daysAhead,
-      hour - 5,           // IST hour → UTC: subtract 5h 30m
-      minute - 30 < 0 ? (minute + 30) : (minute - 30),
-      0, 0
+    const d   = new Date(Date.UTC(
+      now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + daysAhead,
+      hour - 5, 0, 0, 0
     ));
-    // Handle minute underflow → borrow an hour
     if (minute < 30) {
       d.setUTCHours(d.getUTCHours() - 1);
       d.setUTCMinutes(minute + 30);
+    } else {
+      d.setUTCMinutes(minute - 30);
     }
     return d;
   }
 
-  const tomorrowIST = _istDayAt(1, 0, 0); // midnight IST tomorrow
-  // For date string use IST date, not UTC date
+  const tomorrowIST     = _istDayAt(1, 0, 0);
   const tomorrowISTDate = new Date(tomorrowIST.getTime() + IST_OFFSET_MS);
-  const tomorrowDateStr = tomorrowISTDate.toISOString().slice(0, 10); // YYYY-MM-DD in IST
+  const tomorrowDateStr = tomorrowISTDate.toISOString().slice(0, 10); // YYYY-MM-DD IST
 
-  for (let i = 0; i < SYSTEM_SHOW_TIMES.length && i < movies.length; i++) {
+  // ── SLOT-FILL LOGIC ───────────────────────────────────────────────────────
+  // For each fixed slot (11 AM, 3 PM, 7 PM):
+  //   IF any session (real or system) already exists for that date+time+city → skip
+  //   ELSE → create a system session
+  // This means: if a real user already created a 3 PM session, we do NOT
+  // create a system 3 PM session alongside it.
+
+  // Track movies already used in this generation run → diversity rule
+  const usedMovieIds = new Set();
+
+  // Also collect already-used movies from EXISTING tomorrow sessions in this city
+  // so we don't clash with real-user-created sessions either
+  const existingTomorrowQuery = {
+    status:   'active',
+    date:     tomorrowDateStr,
+    ...(city ? { city } : {}),
+  };
+  const existingTomorrow = await MovieSession.find(existingTomorrowQuery)
+    .select('movieId time')
+    .lean();
+
+  const existingSlotTimes = new Set(existingTomorrow.map(s => s.time));
+  existingTomorrow.forEach(s => usedMovieIds.add(s.movieId));
+
+  console.log(`   existing tomorrow: ${existingTomorrow.length} session(s), slots taken: ${[...existingSlotTimes].join(', ')}`);
+
+  // Build a pool of distinct movies (different from already-used ones)
+  const moviePool = movies.filter(m => !usedMovieIds.has(m.id.toString()));
+  let movieIdx    = 0;
+
+  for (let i = 0; i < SYSTEM_SHOW_TIMES.length; i++) {
+    const slot    = SYSTEM_SHOW_TIMES[i];
+    const timeStr = `${String(slot.hour).padStart(2,'0')}:${String(slot.minute).padStart(2,'0')}`;
+
+    // SLOT-FILL: skip if this slot already has a session
+    if (existingSlotTimes.has(timeStr)) {
+      console.log(`   [${slot.label}] skip — slot already filled`);
+      continue;
+    }
+
+    // Pick next unused movie (diversity rule)
+    if (movieIdx >= moviePool.length) {
+      console.log(`   [${slot.label}] skip — no more distinct movies available`);
+      continue;
+    }
+
+    const movie   = moviePool[movieIdx++];
+    const theatre = theatres[i % theatres.length];
+    const lang    = i === 0 ? userLang : (langPool[i % langPool.length] || DEFAULT_LANGUAGE);
+
+    // Build showTime in IST
+    const showTime  = _istDayAt(1, slot.hour, slot.minute);
+    const expiresAt = new Date(showTime.getTime() +  15 * 60_000);
+    const chatExpAt = new Date(showTime.getTime() + 180 * 60_000);
+
+    console.log(`   [${slot.label}] "${movie.title}" @ "${theatre.name}" (${lang})`);
+
+    // Final duplicate guard: (movieId + city + date + time)
+    const dupExists = await MovieSession.exists({
+      movieId:  movie.id.toString(),
+      date:     tomorrowDateStr,
+      time:     timeStr,
+      status:   'active',
+      ...(city ? { city } : {}),
+    });
+    if (dupExists) {
+      console.log(`   [${slot.label}] skip — exact duplicate found`);
+      continue;
+    }
+
     try {
-      const movie   = movies[i];
-      const theatre = theatres[i % theatres.length];
-      const slot    = SYSTEM_SHOW_TIMES[i];
-
-      // session[0] = 11 AM matches user language; others cycle the pool
-      const lang    = i === 0 ? userLang : (langPool[i % langPool.length] || DEFAULT_LANGUAGE);
-
-      // Build showTime: tomorrow IST at slot.hour:slot.minute
-      // Stored as UTC internally; displays correctly in IST to user.
-      const showTime = _istDayAt(1, slot.hour, slot.minute);
-      const timeStr   = `${String(slot.hour).padStart(2,'0')}:${String(slot.minute).padStart(2,'0')}`;
-      const expiresAt = new Date(showTime.getTime() +  15 * 60_000);  // card gone +15 min
-      const chatExpAt = new Date(showTime.getTime() + 180 * 60_000);  // chat gone +3 hr
-
-      console.log(`   [${i}] "${movie.title}" @ "${theatre.name}" (${lang}, tomorrow ${slot.label})`);
-
-      // Duplicate guard
-      const exists = await MovieSession.exists({
-        movieId:     movie.id.toString(),
-        theatreName: theatre.name,
-        date:        tomorrowDateStr,
-        time:        timeStr,
-        status:      'active',
-      });
-      if (exists) { console.log(`   [${i}] skip — duplicate`); continue; }
-
-      // Create session first (chat needs session._id)
       const session = await MovieSession.create({
         movieId:           movie.id.toString(),
         movieTitle:        movie.title,
         poster:            movie.posterPath || null,
         language:          lang,
+        city,
         theatreName:       theatre.name,
         theatreAddress:    theatre.address || 'Nearby Cinema',
         theatrePlaceId:    theatre.placeId || null,
@@ -538,16 +570,15 @@ async function generateSystemSessions(userCtx, lat, lng) {
         expiresAt,
         chatExpiresAt:     chatExpAt,
         createdBy:         'system',
-        participants:      [],    // EMPTY — never fake users
-        adminId:           null,  // first real joiner gets admin atomically
+        participants:      [],
+        adminId:           null,
         maxParticipants:   4,
         isBoosted:         false,
         isSystemGenerated: true,
         status:            'active',
         chatId:            null,
       });
-
-      console.log(`   [${i}] ✅ session ${session._id} (tomorrow ${slot.label})`);
+      console.log(`   [${slot.label}] ✅ session ${session._id}`);
 
       try {
         const chat = await MovieChat.create({
@@ -559,41 +590,37 @@ async function generateSystemSessions(userCtx, lat, lng) {
         });
         session.chatId = chat._id;
         await session.save();
-        console.log(`   [${i}] ✅ chat ${chat._id}`);
       } catch (chatErr) {
-        console.warn(`   [${i}] ⚠️ chat failed (non-fatal): ${chatErr.message}`);
+        console.warn(`   [${slot.label}] ⚠️ chat failed: ${chatErr.message}`);
       }
 
+      usedMovieIds.add(movie.id.toString());
       created++;
     } catch (err) {
-      console.error(`   [${i}] ❌ failed: ${err.message}`);
-      if (err.name === 'ValidationError') {
-        console.error('   Validation:', JSON.stringify(err.errors, null, 2));
-      }
+      console.error(`   [${slot.label}] ❌ ${err.message}`);
     }
   }
 
-  console.log(`🤖 generateSystemSessions END — ${created} created\n`);
+  console.log(`🤖 generateSystemSessions END — ${created} slot(s) filled\n`);
   return created;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// countNearbyRealUserSessions(loc)
-//
-// Counts active sessions within 20 km that were created by real users.
-// Used by the daily job to decide whether to generate system sessions.
+// countNearbyRealUserSessions(loc, city)
+// City-aware count of active real-user sessions. Used by STEP 2 + daily job.
 // ─────────────────────────────────────────────────────────────────────────────
-async function countNearbyRealUserSessions(loc) {
+async function countNearbyRealUserSessions(loc, city) {
   const now = new Date();
   const baseQuery = {
     status:            'active',
     expiresAt:         { $gt: now },
     isSystemGenerated: false,
+    ...(city ? { city: city.trim().toLowerCase() } : {}),
   };
 
   if (loc && loc.lat !== null && loc.lng !== null) {
     try {
-      const count = await MovieSession.countDocuments({
+      return await MovieSession.countDocuments({
         ...baseQuery,
         location: {
           $nearSphere: {
@@ -602,13 +629,11 @@ async function countNearbyRealUserSessions(loc) {
           },
         },
       });
-      return count;
-    } catch (_) { /* geo index not ready — fall through */ }
+    } catch (_) { /* geo index not ready */ }
   }
   return MovieSession.countDocuments(baseQuery);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // getMovies — public API response
 async function getMovies() {
   const movies = await fetchTrendingMovies();
@@ -648,9 +673,15 @@ async function getNearbySessions(userId, queryLat, queryLng) {
   ]);
 
   const userLang = userCtx?.languagePreference || DEFAULT_LANGUAGE;
-  console.log(`\n📡 getNearbySessions — lang="${userLang}" loc=(${loc.lat},${loc.lng}) via ${loc.source}`);
+  const userCity = (userCtx?.city || '').trim().toLowerCase();
+  console.log(`\n📡 getNearbySessions — lang="${userLang}" city="${userCity}" loc=(${loc.lat},${loc.lng}) via ${loc.source}`);
 
-  const baseQuery = { status: 'active', expiresAt: { $gt: now } };
+  // City-scoped base query — NEVER show cross-city sessions
+  const baseQuery = {
+    status:    'active',
+    expiresAt: { $gt: now },
+    ...(userCity ? { city: userCity } : {}),
+  };
 
   // STEP 1
   let sessions = await _fetchSessionsFromDB(loc, baseQuery);
@@ -667,7 +698,10 @@ async function getNearbySessions(userId, queryLat, queryLng) {
     const genLng = loc.lng ?? userCtx?.lng ?? null;
 
     if (genLat !== null && genLng !== null) {
-      await generateSystemSessions(userCtx || { languagePreference: userLang }, genLat, genLng);
+      await generateSystemSessions(
+        { languagePreference: userLang, city: userCity },
+        genLat, genLng
+      );
     } else {
       console.warn('STEP 2: no coordinates — cannot generate');
     }
@@ -742,10 +776,21 @@ async function createSession(userId, data) {
     return { success: false, status: 400, message: 'Theatre location required' };
   }
 
-  // Language from profile — never from client
+  // Language + city from profile — never from client
   const userCtx  = await _fetchUserContext(userId);
   const language = userCtx?.languagePreference || DEFAULT_LANGUAGE;
-  console.log(`[create] lang from profile: "${language}"`);
+  const city     = (userCtx?.city || '').trim().toLowerCase();
+
+  // ── VERIFIED USER GATE ────────────────────────────────────────────────────
+  if (!userCtx?.isVerified) {
+    return {
+      success: false,
+      status:  403,
+      message: 'Only verified users can create a Movie Hangout. Complete your profile verification to continue.',
+    };
+  }
+
+  console.log(`[create] lang="${language}" city="${city}"`);
 
   const [y, mo, d] = date.split('-').map(Number);
   const [h, mi]    = time.split(':').map(Number);
@@ -774,11 +819,15 @@ async function createSession(userId, data) {
   const expiresAt = new Date(showTime.getTime() +  15 * 60_000);
   const chatExpAt = new Date(showTime.getTime() + 180 * 60_000);
 
-  // Duplicate guard
+  // Duplicate guard — (movieId + city + date + time) per spec
   const dup = await MovieSession.findOne({
-    createdBy: userId, movieId: movieId.toString(), date, time, status: 'active',
+    movieId:  movieId.toString(),
+    city,
+    date,
+    time,
+    status:   'active',
   });
-  if (dup) return { success: false, status: 409, message: 'You already have an active session for this movie at the same time' };
+  if (dup) return { success: false, status: 409, message: 'A session for this movie at this time already exists in your city.' };
 
   // Create session — creator is first (and only initial) participant
   const session = await MovieSession.create({
@@ -786,6 +835,7 @@ async function createSession(userId, data) {
     movieTitle:        title,
     poster:            posterPath || null,
     language,
+    city,
     theatreName,
     theatreAddress,
     theatrePlaceId:    theatrePlaceId || null,
@@ -840,6 +890,16 @@ async function createSession(userId, data) {
 //  6. If first joiner on system session: also send "You started this hangout 🎉"
 // ─────────────────────────────────────────────────────────────────────────────
 async function joinSession(userId, sessionId, io) {
+  // ── VERIFIED USER GATE ────────────────────────────────────────────────────
+  const joinerCtx = await _fetchUserContext(userId);
+  if (!joinerCtx?.isVerified) {
+    return {
+      success: false,
+      status:  403,
+      message: 'Only verified users can join a Movie Hangout. Complete your profile verification to continue.',
+    };
+  }
+
   const session = await MovieSession.findById(sessionId);
   if (!session) return { success: false, status: 404, message: 'Session not found' };
 
@@ -1150,6 +1210,126 @@ async function getMySessions(userId) {
   };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// getSuggestionForMovie(userId, movieId, movieTitle)
+//
+// Called when a user selects a movie in the create flow.
+// Checks if an active session exists for the same movie in the same city
+// within 10–15 km AND within the next 2 hours.
+//
+// Returns ONE suggestion at most (spec: "show ONLY ONE suggestion").
+//
+// If found → client shows the join-or-skip dialog:
+//   "A hangout for {movie} is happening nearby"
+//   📍 Meetup near {theatre}
+//   🕒 {time}
+//   👥 {participants}
+//   🎟️ Tickets not included. Please book separately.
+//   [Join ❤️]  [Skip]
+//
+// If not found → { suggestion: null } → client continues to create flow
+// ─────────────────────────────────────────────────────────────────────────────
+async function getSuggestionForMovie(userId, movieId, queryLat, queryLng) {
+  if (!movieId) return { success: false, message: 'movieId required' };
+
+  const [loc, userCtx] = await Promise.all([
+    _resolveLocation(queryLat, queryLng, userId),
+    _fetchUserContext(userId),
+  ]);
+
+  const city = (userCtx?.city || '').trim().toLowerCase();
+  const now  = new Date();
+  const in2h = new Date(now.getTime() + 2 * 3_600_000);
+
+  // Base filter: same movie, same city, active, starts within next 2 hours
+  const query = {
+    movieId:   movieId.toString(),
+    status:    'active',
+    expiresAt: { $gt: now },
+    showTime:  { $lte: in2h, $gt: now },
+    ...(city ? { city } : {}),
+  };
+
+  // Geo filter: within 15 km if we have coordinates
+  let sessions = [];
+  if (loc.lat !== null && loc.lng !== null) {
+    try {
+      sessions = await MovieSession.find({
+        ...query,
+        location: {
+          $nearSphere: {
+            $geometry:    { type: 'Point', coordinates: [loc.lng, loc.lat] },
+            $maxDistance: 15_000,  // 15 km
+          },
+        },
+      })
+        .populate('participants', 'firstName lastName profilePhoto')
+        .limit(5)
+        .lean();
+    } catch (_) {
+      // geo query failed — fall back to city-only
+    }
+  }
+
+  // Fallback: city-only if no geo or no geo results
+  if (!sessions.length) {
+    sessions = await MovieSession.find(query)
+      .populate('participants', 'firstName lastName profilePhoto')
+      .sort({ participants: -1, showTime: 1 })
+      .limit(5)
+      .lean();
+  }
+
+  if (!sessions.length) {
+    return { success: true, suggestion: null };
+  }
+
+  // Pick the best one: most participants, then earliest time
+  const best = sessions
+    .filter(s => s.participants.length < s.maxParticipants) // not full
+    .sort((a, b) => {
+      if (b.participants.length !== a.participants.length)
+        return b.participants.length - a.participants.length;
+      return new Date(a.showTime) - new Date(b.showTime);
+    })[0];
+
+  if (!best) return { success: true, suggestion: null };
+
+  const distM = (loc.lat !== null && best.location?.coordinates)
+    ? _haversine(loc.lat, loc.lng, best.location.coordinates[1], best.location.coordinates[0])
+    : null;
+
+  const participantCount = best.participants.length;
+  const participantText  = participantCount === 0
+    ? '👥 Be among the first to join'
+    : `👥 ${participantCount}/${best.maxParticipants} going`;
+
+  return {
+    success: true,
+    suggestion: {
+      sessionId:        best._id.toString(),
+      movieTitle:       best.movieTitle,
+      theatreName:      best.theatreName,
+      theatreAddress:   best.theatreAddress,
+      showTime:         best.showTime?.toISOString() || null,
+      date:             best.date,
+      time:             best.time,
+      timeLabel:        getTimeLabel(best.showTime),
+      participantText,
+      participantsCount: participantCount,
+      maxParticipants:  best.maxParticipants,
+      chatId:           best.chatId?.toString() || null,
+      distance:         distM !== null ? Math.round(distM) : null,
+      // UI copy — exactly per spec
+      headline:         `A hangout for ${best.movieTitle} is happening nearby`,
+      locationLine:     `📍 Meetup near ${best.theatreName}`,
+      timeLine:         `🕒 ${best.date}  ${best.time}`,
+      participantLine:  participantText,
+      ticketNote:       '🎟️ Tickets are not included. Please book separately.',
+    },
+  };
+}
+
 module.exports = {
   getMovies,
   getNearbyTheatres,
@@ -1162,6 +1342,7 @@ module.exports = {
   sendPostSessionNotifications,
   debugSessions,
   getMySessions,
+  getSuggestionForMovie,
   // Exported for use by expiry job
   fetchTrendingMovies,
   generateSystemSessions,
