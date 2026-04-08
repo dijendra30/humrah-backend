@@ -128,6 +128,22 @@ exports.sendMessage = async (req, res) => {
 };
 
 // =============================================================================
+// GET /api/movie-session/suggestion?movieId=&lat=&lng=
+// Called when user selects a movie in the create flow.
+// Returns at most ONE nearby session for the same movie (2 hrs + 15 km window).
+// Response: { suggestion: {...} } or { suggestion: null }
+// =============================================================================
+exports.getSuggestion = async (req, res) => {
+  try {
+    const { movieId, lat, lng } = req.query;
+    return send(res, await svc.getSuggestionForMovie(uid(req), movieId, lat, lng));
+  } catch (err) {
+    console.error('[ctrl] getSuggestion:', err.message);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+// =============================================================================
 // GET /api/movie-session/my
 // Sessions the user is a participant in — for Messages → Sessions tab
 // =============================================================================
