@@ -483,6 +483,9 @@ const connectDB = async () => {
   }
 };
 
+// ✅ Must be required BEFORE connectDB() so startMovieSessionExpiryJob is defined
+const { startMovieSessionExpiryJob } = require('./jobs/movieSessionExpiryJob');
+
 connectDB();
 
 // =============================================
@@ -526,7 +529,7 @@ const settingsRoutes = require('./routes/settings');
 const profileAssistantRoutes = require('./routes/profileAssistant');
 // ✅ MOVIE HANGOUT ROUTES
 const movieSessionRoutes = require('./routes/movieSessionRoutes');
-const { startMovieSessionExpiryJob } = require('./jobs/movieSessionExpiryJob');
+// startMovieSessionExpiryJob is required above connectDB() — do not require again here
 // ✅ PUBLIC ROUTES (No legal enforcement)
 app.use('/api/auth', authRoutes);
 app.use('/api/legal', legalRoutes);
@@ -557,7 +560,7 @@ app.use('/api/moderation', authenticate, adminOnly, moderationRoutes);
 app.use('/api/agora', authenticate, enforceLegalAcceptance, require('./routes/agora'));
 app.use('/api/voice-call', authenticate, enforceLegalAcceptance, require('./routes/voice-call'));
 app.use('/api/activity', authenticate, enforceLegalAcceptance, activityRoutes);
-//✅ GAMING SESSION ROUTES (auth + legal enforcement)
+// ✅ GAMING SESSION ROUTES (auth + legal enforcement)
 app.use('/api/session', authenticate, enforceLegalAcceptance, gamingRoutes);
 app.use('/api/food', authenticate, enforceLegalAcceptance, foodRoutes);
 // ✅ MOVIE HANGOUT — /api/movies, /api/theatres, /api/movie-session/*
