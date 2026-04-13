@@ -844,18 +844,7 @@ async function createSession(userId, data) {
     return { success: false, status: 400, message: timeCheck.reason };
   }
 
-  // Creation cutoff: reject today-sessions after 7:30 PM
-  if (!isCreationAllowed()) {
-    // Check if the requested showTime is today
-    const isToday = showTime.toDateString() === new Date().toDateString();
-    if (isToday) {
-      return {
-        success: false,
-        status:  400,
-        message: "It's past 7:30 PM — you can only create sessions for tomorrow now.",
-      };
-    }
-  }
+  // Creation cutoff removed — slot validation in validateShowTime() is the only gate now.
 
   const expiresAt = new Date(showTime.getTime() +  15 * 60_000);
   const chatExpAt = new Date(showTime.getTime() + 180 * 60_000);
