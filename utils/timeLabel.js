@@ -90,8 +90,20 @@ function isAfterEndHour() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ALLOWED_SLOT_HOURS — the only hours permitted for user-created sessions.
+// System sessions also use exactly these hours (11 AM, 3 PM, 7 PM IST).
+// Any other hour is rejected at creation time.
+// ─────────────────────────────────────────────────────────────────────────────
+const ALLOWED_SLOT_HOURS = [11, 15, 19];
+
+// ─────────────────────────────────────────────────────────────────────────────
 // validateShowTime(showTime)
-// Used by createSession() to reject times outside the 9 AM–8 PM window.
+// Used by createSession() to reject times outside allowed slots.
+//
+// Rules:
+//  1. Must be a valid future date
+//  2. IST hour must be exactly 11, 15, or 19 — nothing else allowed
+//  3. Minutes must be exactly 0
 // ─────────────────────────────────────────────────────────────────────────────
 function validateShowTime(showTime) {
   const now  = new Date();
@@ -104,16 +116,17 @@ function validateShowTime(showTime) {
     return { valid: false, reason: 'Show time must be in the future' };
   }
 
-  // showTime is stored as UTC. Convert to IST to check the hour window.
+  // showTime is stored as UTC. Convert to IST to check the slot.
   const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
   const showInIST     = new Date(show.getTime() + IST_OFFSET_MS);
   const hour          = showInIST.getUTCHours();
+  const minute        = showInIST.getUTCMinutes();
 
-  if (hour < START_HOUR) {
-    return { valid: false, reason: 'Sessions cannot start before 9:00 AM' };
-  }
-  if (hour >= END_HOUR) {
-    return { valid: false, reason: 'Sessions cannot start at or after 8:00 PM' };
+  if (!ALLOWED_SLOT_HOURS.includes(hour) || minute !== 0) {
+    return {
+      valid:  false,
+      reason: `Sessions can only start at 11:00 AM, 3:00 PM, or 7:00 PM IST. Received: ${hour}:${String(minute).padStart(2,'0')} IST`,
+    };
   }
 
   return { valid: true, reason: null };
@@ -245,6 +258,7 @@ module.exports = {
   getTimeLabel,
   getParticipantDisplay,
   getPostSessionMessage,
+  ALLOWED_SLOT_HOURS,
   START_HOUR,
   END_HOUR,
   CUTOFF_HOUR,
