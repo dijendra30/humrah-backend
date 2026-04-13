@@ -96,20 +96,17 @@ async function _runDailyGeneration(trigger) {
   const istTomorrow  = new Date(istNow.getTime() + 24 * 3_600_000);
   const tomorrowStr  = istTomorrow.toISOString().slice(0, 10);
 
-  // Find all cities that have active sessions or users
-  // Simplest approach: find distinct cities in the session collection
+  // Find all cities that have active sessions or recent users
   const cities = await MovieSession.distinct('city', {
-    status:   'active',
-    city:     { $nin: ['', null] },
+    status: 'active',
+    city:   { $nin: ['', null] },
   });
 
-  // Always include default city even if no sessions yet
   if (!cities.includes(DEFAULT_CITY)) cities.push(DEFAULT_CITY);
-
   console.log(`   Cities to process: ${cities.join(', ')}`);
 
   for (const city of cities) {
-    // Count USER-created sessions for tomorrow in this city
+    // Count USER-created sessions for TOMORROW in this city
     const userCount = await MovieSession.countDocuments({
       status:            'active',
       isSystemGenerated: false,
@@ -119,25 +116,21 @@ async function _runDailyGeneration(trigger) {
 
     console.log(`   [${city}] user sessions tomorrow: ${userCount}`);
 
-    // Spec: IF user sessions >= 3 → do NOTHING
-    if (userCount >= 3) {
-      console.log(`   [${city}] ≥3 real sessions — skipping generation`);
+    // Per spec: IF user sessions >= 1 → do NOT generate system sessions
+    if (userCount >= 1) {
+      console.log(`   [${city}] ≥1 real session — skipping generation`);
       continue;
     }
 
-    // IF < 3 → fill missing slots
-    // Fetch real coordinates from a recent user in this city so theatres
-    // match the actual city. Falls back to DEFAULT_LAT/LNG (Delhi) only
-    // if no user with stored coords is found in that city.
-    console.log(`   [${city}] <3 real sessions — filling missing slots`);
+    console.log(`   [${city}] 0 real sessions — filling missing slots`);
     let cityLat = DEFAULT_LAT;
     let cityLng = DEFAULT_LNG;
     try {
       const User = mongoose.model('User');
       const userWithLoc = await User.findOne({
         'questionnaire.city': city,
-        last_known_lat:  { $ne: null },
-        last_known_lng:  { $ne: null },
+        last_known_lat: { $ne: null },
+        last_known_lng: { $ne: null },
       }).select('last_known_lat last_known_lng').lean();
       if (userWithLoc) {
         cityLat = userWithLoc.last_known_lat;
@@ -149,6 +142,7 @@ async function _runDailyGeneration(trigger) {
     } catch (locErr) {
       console.warn(`   [${city}] coord lookup failed: ${locErr.message} — using Delhi defaults`);
     }
+
     const created = await generateSystemSessions(
       { languagePreference: 'Hindi', city },
       cityLat, cityLng

@@ -57,25 +57,26 @@ function startMovieSessionExpiryJob() {
         console.log(`💬 [expiry] Expired ${chatResult.modifiedCount} chat(s)`);
       }
 
-      // ── STEP 4: After 8 PM — expire ALL today's active sessions ──────────
-      // Spec: "If current time >= 8 PM → expire all today's sessions"
-      // This catches any sessions that were created earlier today and
-      // somehow survived past the 8 PM boundary.
+      // ── STEP 4: After 8 PM IST — expire ALL today’s active sessions ────────────
+      // Catches any sessions that were created earlier today and
+      // survived past the 8 PM IST boundary.
+      // Use IST date bounds: today IST start = yesterday UTC 18:30,
+      // today IST end = today UTC 18:29:59.
       if (isAfterEndHour()) {
-        const todayStart = new Date();
-        todayStart.setHours(0, 0, 0, 0);
-        const todayEnd = new Date();
-        todayEnd.setHours(23, 59, 59, 999);
+        const IST_OFFSET_MS  = 5.5 * 60 * 60 * 1000;
+        const nowIST         = new Date(now.getTime() + IST_OFFSET_MS);
+        const todayISTStr    = nowIST.toISOString().slice(0, 10); // YYYY-MM-DD in IST
 
         const lateResult = await MovieSession.updateMany(
           {
-            status:   'active',
-            showTime: { $gte: todayStart, $lte: todayEnd },
+            status:            'active',
+            isSystemGenerated: true,
+            date:              todayISTStr,  // match the IST date string stored on session
           },
           { $set: { status: 'expired' } }
         );
         if (lateResult.modifiedCount > 0) {
-          console.log(`🌙 [expiry] 8 PM sweep — expired ${lateResult.modifiedCount} today session(s)`);
+          console.log(`🌙 [expiry] 8 PM IST sweep — expired ${lateResult.modifiedCount} today system session(s)`);
         }
       }
 
