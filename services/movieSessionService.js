@@ -421,30 +421,76 @@ async function searchTheatres(query, lat = null, lng = null) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SYSTEM_SHOW_TIMES — fixed daily schedule for auto-generated sessions
-//   11 AM · 3 PM · 7 PM  (tomorrow, always)
-// Only created when real-user nearby sessions <= 1
+//   11 AM · 3 PM · 7 PM  (IST)
 // ─────────────────────────────────────────────────────────────────────────────
 const SYSTEM_SHOW_TIMES = [
-  { hour: 11, minute: 0,  label: '11 AM' },
-  { hour: 15, minute: 0,  label: '3 PM'  },
-  { hour: 19, minute: 0,  label: '7 PM'  },
+  { hour: 11, minute: 0, label: '11 AM' },
+  { hour: 15, minute: 0, label: '3 PM'  },
+  { hour: 19, minute: 0, label: '7 PM'  },
 ];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// _istNow() — current time as IST Date object
+// ─────────────────────────────────────────────────────────────────────────────
+function _istNow() {
+  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+  return new Date(Date.now() + IST_OFFSET_MS);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// _buildShowTimeUTC(istDateStr, hourIST, minuteIST)
+//
+// Given an IST date string (YYYY-MM-DD) and slot hour/minute in IST,
+// returns the correct UTC Date for that moment.
+// 11 AM IST = 05:30 UTC  |  3 PM IST = 09:30 UTC  |  7 PM IST = 13:30 UTC
+// ─────────────────────────────────────────────────────────────────────────────
+function _buildShowTimeUTC(istDateStr, hourIST, minuteIST) {
+  const [y, mo, d] = istDateStr.split('-').map(Number);
+  // IST − 5:30 = UTC
+  const utcMinutes = hourIST * 60 + minuteIST - 330; // 330 = 5*60+30
+  const utcHour    = Math.floor(utcMinutes / 60);
+  const utcMin     = utcMinutes % 60;
+  // Handle day boundary (e.g. 11 AM IST = 05:30 UTC, same day)
+  return new Date(Date.UTC(y, mo - 1, d, utcHour, utcMin, 0, 0));
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // generateSystemSessions(userCtx, lat, lng)
 //
-// Creates exactly 3 system sessions for TOMORROW at 11 AM, 3 PM, 7 PM.
+// Slot-fill logic — per updated spec:
+//
+//  BEFORE 7 PM IST:
+//    Target = TODAY. Only generate slots that are still in the future.
+//    (e.g. at 2 PM IST, only create 3 PM + 7 PM slots if missing)
+//
+//  AT/AFTER 7 PM IST:
+//    Target = TOMORROW. Generate all 3 slots for tomorrow if missing.
 //
 // Rules:
-//  • Called when real-user sessions nearby <= 1 (never "just in case")
 //  • participants = [] always — NEVER fake users
 //  • adminId = null — first real joiner gets assigned atomically
-//  • session[0] (11 AM) matches user's language
-//  • Duplicate guard: skips if same movie+theatre+date+time already active
-//  • Returns the count of sessions created
+//  • Diversity: different movie per slot
+//  • Duplicate guard: skip if same movie+city+date+time already active
+//  • Max 3 system sessions total across all slots — enforced by slot-fill logic
+//  • Returns count of sessions created
 // ─────────────────────────────────────────────────────────────────────────────
 async function generateSystemSessions(userCtx, lat, lng) {
-  console.log('\n🤖 generateSystemSessions START');
+  const nowIST    = _istNow();
+  const istHour   = nowIST.getUTCHours();
+  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+
+  // Determine target day: before 7 PM IST → today, else → tomorrow
+  const AFTER_7PM = istHour >= 19;
+  let targetIST;
+  if (AFTER_7PM) {
+    targetIST = new Date(nowIST.getTime() + 24 * 60 * 60 * 1000);
+  } else {
+    targetIST = nowIST;
+  }
+  const targetDateStr = targetIST.toISOString().slice(0, 10); // YYYY-MM-DD in IST
+
+  console.log(`\n🤖 generateSystemSessions START`);
+  console.log(`   IST hour=${istHour}, target=${AFTER_7PM ? 'TOMORROW' : 'TODAY'} (${targetDateStr})`);
   console.log(`   lat=${lat}, lng=${lng}, lang=${userCtx?.languagePreference}, city=${userCtx?.city}`);
 
   const [movies, theatres] = await Promise.all([
@@ -460,71 +506,51 @@ async function generateSystemSessions(userCtx, lat, lng) {
     .filter((v, i, a) => a.indexOf(v) === i);
   let created    = 0;
 
-  // ── IST timezone helpers ──────────────────────────────────────────────────
-  // Render servers run UTC. _istDayAt converts IST slot hours to correct UTC.
-  // 11 AM IST = 05:30 UTC · 3 PM IST = 09:30 UTC · 7 PM IST = 13:30 UTC
-  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
-
-  function _istDayAt(daysAhead, hour, minute) {
-    const now = new Date();
-    const d   = new Date(Date.UTC(
-      now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + daysAhead,
-      hour - 5, 0, 0, 0
-    ));
-    if (minute < 30) {
-      d.setUTCHours(d.getUTCHours() - 1);
-      d.setUTCMinutes(minute + 30);
-    } else {
-      d.setUTCMinutes(minute - 30);
-    }
-    return d;
-  }
-
-  const tomorrowIST     = _istDayAt(1, 0, 0);
-  const tomorrowISTDate = new Date(tomorrowIST.getTime() + IST_OFFSET_MS);
-  const tomorrowDateStr = tomorrowISTDate.toISOString().slice(0, 10); // YYYY-MM-DD IST
-
-  // ── SLOT-FILL LOGIC ───────────────────────────────────────────────────────
-  // For each fixed slot (11 AM, 3 PM, 7 PM):
-  //   IF any session (real or system) already exists for that date+time+city → skip
-  //   ELSE → create a system session
-  // This means: if a real user already created a 3 PM session, we do NOT
-  // create a system 3 PM session alongside it.
-
-  // Track movies already used in this generation run → diversity rule
-  const usedMovieIds = new Set();
-
-  // Also collect already-used movies from EXISTING tomorrow sessions in this city
-  // so we don't clash with real-user-created sessions either
-  const existingTomorrowQuery = {
-    status:   'active',
-    date:     tomorrowDateStr,
+  // Collect already-used slots + movies for target date in this city
+  const existingQuery = {
+    status: 'active',
+    date:   targetDateStr,
     ...(city ? { city } : {}),
   };
-  const existingTomorrow = await MovieSession.find(existingTomorrowQuery)
-    .select('movieId time')
+  const existingSessions = await MovieSession.find(existingQuery)
+    .select('movieId time isSystemGenerated')
     .lean();
 
-  const existingSlotTimes = new Set(existingTomorrow.map(s => s.time));
-  existingTomorrow.forEach(s => usedMovieIds.add(s.movieId));
+  // Count existing system sessions for this date+city (max 3 allowed)
+  const existingSystemCount = existingSessions.filter(s => s.isSystemGenerated).length;
+  if (existingSystemCount >= 3) {
+    console.log(`   ⚠️ already ${existingSystemCount} system sessions for ${targetDateStr} — skipping`);
+    return 0;
+  }
 
-  console.log(`   existing tomorrow: ${existingTomorrow.length} session(s), slots taken: ${[...existingSlotTimes].join(', ')}`);
+  const existingSlotTimes = new Set(existingSessions.map(s => s.time));
+  const usedMovieIds      = new Set(existingSessions.map(s => s.movieId));
 
-  // Build a pool of distinct movies (different from already-used ones)
+  console.log(`   existing: ${existingSessions.length} session(s), slots taken: ${[...existingSlotTimes].join(', ')}`);
+
   const moviePool = movies.filter(m => !usedMovieIds.has(m.id.toString()));
   let movieIdx    = 0;
 
   for (let i = 0; i < SYSTEM_SHOW_TIMES.length; i++) {
     const slot    = SYSTEM_SHOW_TIMES[i];
-    const timeStr = `${String(slot.hour).padStart(2,'0')}:${String(slot.minute).padStart(2,'0')}`;
+    const timeStr = `${String(slot.hour).padStart(2, '0')}:${String(slot.minute).padStart(2, '0')}`;
 
-    // SLOT-FILL: skip if this slot already has a session
+    // For TODAY: skip slots that are already in the past (IST)
+    if (!AFTER_7PM) {
+      const slotTotalMinutesIST = slot.hour * 60 + slot.minute;
+      const nowTotalMinutesIST  = nowIST.getUTCHours() * 60 + nowIST.getUTCMinutes();
+      if (slotTotalMinutesIST <= nowTotalMinutesIST) {
+        console.log(`   [${slot.label}] skip — already past in IST`);
+        continue;
+      }
+    }
+
+    // Skip if slot already has a session (user or system)
     if (existingSlotTimes.has(timeStr)) {
       console.log(`   [${slot.label}] skip — slot already filled`);
       continue;
     }
 
-    // Pick next unused movie (diversity rule)
     if (movieIdx >= moviePool.length) {
       console.log(`   [${slot.label}] skip — no more distinct movies available`);
       continue;
@@ -534,19 +560,19 @@ async function generateSystemSessions(userCtx, lat, lng) {
     const theatre = theatres[i % theatres.length];
     const lang    = i === 0 ? userLang : (langPool[i % langPool.length] || DEFAULT_LANGUAGE);
 
-    // Build showTime in IST
-    const showTime  = _istDayAt(1, slot.hour, slot.minute);
+    // Build correct UTC showTime from IST date + slot
+    const showTime  = _buildShowTimeUTC(targetDateStr, slot.hour, slot.minute);
     const expiresAt = new Date(showTime.getTime() +  15 * 60_000);
     const chatExpAt = new Date(showTime.getTime() + 180 * 60_000);
 
-    console.log(`   [${slot.label}] "${movie.title}" @ "${theatre.name}" (${lang})`);
+    console.log(`   [${slot.label}] "${movie.title}" @ "${theatre.name}" (${lang}) showTime=${showTime.toISOString()}`);
 
-    // Final duplicate guard: (movieId + city + date + time)
+    // Final duplicate guard
     const dupExists = await MovieSession.exists({
-      movieId:  movie.id.toString(),
-      date:     tomorrowDateStr,
-      time:     timeStr,
-      status:   'active',
+      movieId: movie.id.toString(),
+      date:    targetDateStr,
+      time:    timeStr,
+      status:  'active',
       ...(city ? { city } : {}),
     });
     if (dupExists) {
@@ -568,7 +594,7 @@ async function generateSystemSessions(userCtx, lat, lng) {
           type:        'Point',
           coordinates: [parseFloat(theatre.lng), parseFloat(theatre.lat)],
         },
-        date:              tomorrowDateStr,
+        date:              targetDateStr,
         time:              timeStr,
         showTime,
         expiresAt,
@@ -681,9 +707,13 @@ async function getNearbySessions(userId, queryLat, queryLng) {
   console.log(`\n📡 getNearbySessions — lang="${userLang}" city="${userCity}" loc=(${loc.lat},${loc.lng}) via ${loc.source}`);
 
   // City-scoped base query — NEVER show cross-city sessions
+  // expiresAt > now ensures past-slot sessions (e.g. 11 AM at 2 PM) are excluded.
+  // showTime > now is an additional guard so sessions whose slot hasn't started yet
+  // but whose expiresAt is in the future don't accidentally surface.
   const baseQuery = {
     status:    'active',
     expiresAt: { $gt: now },
+    showTime:  { $gt: new Date(now.getTime() - 15 * 60_000) }, // allow up to 15 min grace (expiresAt covers this)
     ...(userCity ? { city: userCity } : {}),
   };
 
