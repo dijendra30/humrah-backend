@@ -104,7 +104,10 @@ function validateShowTime(showTime) {
     return { valid: false, reason: 'Show time must be in the future' };
   }
 
-  const hour = show.getHours();
+  // showTime is stored as UTC. Convert to IST to check the hour window.
+  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+  const showInIST     = new Date(show.getTime() + IST_OFFSET_MS);
+  const hour          = showInIST.getUTCHours();
 
   if (hour < START_HOUR) {
     return { valid: false, reason: 'Sessions cannot start before 9:00 AM' };
