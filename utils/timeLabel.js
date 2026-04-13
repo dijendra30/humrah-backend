@@ -131,33 +131,51 @@ function validateShowTime(showTime) {
 //  else                       → formatted date
 // ─────────────────────────────────────────────────────────────────────────────
 function getTimeLabel(showTime) {
-  const now     = new Date();
-  const show    = new Date(showTime);
-  const diffMs  = show - now;
+  const now    = new Date();
+  const show   = new Date(showTime);
+  const diffMs = show - now;
   const diffHrs = diffMs / 3_600_000;
 
   if (diffHrs < 0) return '🔴 Passed';
 
-  // < 2 hours away — show countdown regardless of time of day
+  // < 2 hours — countdown
   if (diffHrs < 2) {
     const minsLeft = Math.max(1, Math.round(diffMs / 60_000));
     return `⚡ Starting soon · In ${minsLeft} min${minsLeft !== 1 ? 's' : ''}`;
   }
 
-  const today    = new Date();
-  const tomorrow = new Date();
-  tomorrow.setDate(today.getDate() + 1);
-  const showHour = show.getHours();
+  // Use IST for day comparison and show-hour labeling.
+  // show.getHours() would use server local time (UTC on Render) — wrong.
+  // We convert showTime to IST by offsetting +5:30 and reading UTC hours.
+  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+  const showInIST     = new Date(show.getTime() + IST_OFFSET_MS);
+  const nowInIST      = new Date(now.getTime()  + IST_OFFSET_MS);
 
-  if (_sameDay(show, today)) {
-    // Use the ACTUAL show hour to pick the right label
-    if (showHour < 12)  return '☀️ This morning';
-    if (showHour < 17)  return '🌤️ This afternoon';
-    if (showHour < 20)  return '🌆 This evening';
-    return '🌆 Tonight';
+  const showHourIST   = showInIST.getUTCHours();
+
+  // Build IST date strings for comparison (YYYY-MM-DD)
+  const showDateStr = showInIST.toISOString().slice(0, 10);
+  const todayStr    = nowInIST.toISOString().slice(0, 10);
+  const tomorrowIST = new Date(nowInIST.getTime() + 24 * 60 * 60 * 1000);
+  const tomorrowStr = tomorrowIST.toISOString().slice(0, 10);
+
+  if (showDateStr === todayStr) {
+    // Label based on actual IST slot hour — matches the 3 fixed slots
+    if (showHourIST === 11) return '☀️ This morning · 11 AM';
+    if (showHourIST === 15) return '🌤️ This afternoon · 3 PM';
+    if (showHourIST === 19) return '🌆 This evening · 7 PM';
+    // User-created sessions can be any hour in range
+    if (showHourIST < 12) return '☀️ This morning';
+    if (showHourIST < 17) return '🌤️ This afternoon';
+    return '🌆 This evening';
   }
 
-  if (_sameDay(show, tomorrow)) return '📅 Tomorrow';
+  if (showDateStr === tomorrowStr) {
+    if (showHourIST === 11) return '📅 Tomorrow · 11 AM';
+    if (showHourIST === 15) return '📅 Tomorrow · 3 PM';
+    if (showHourIST === 19) return '📅 Tomorrow · 7 PM';
+    return '📅 Tomorrow';
+  }
 
   return `📅 ${show.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}`;
 }
