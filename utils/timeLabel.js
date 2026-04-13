@@ -54,13 +54,28 @@ function getNextShowTime(offsetMinutes) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// _istHour() / _istMinute() — IST-safe time helpers
+// Render servers run UTC. Always derive IST from UTC + 5:30.
+// NEVER use getHours() / getMinutes() directly — those use server local time.
+// ─────────────────────────────────────────────────────────────────────────────
+function _istHour() {
+  const now = new Date();
+  const istMs = now.getTime() + 5.5 * 60 * 60 * 1000;
+  return new Date(istMs).getUTCHours();
+}
+function _istMinute() {
+  const now = new Date();
+  const istMs = now.getTime() + 5.5 * 60 * 60 * 1000;
+  return new Date(istMs).getUTCMinutes();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // isCreationAllowed()
-// Returns false after 7:30 PM — backend rejects new sessions for today.
+// Returns false after 7:30 PM IST — backend rejects new sessions for today.
 // ─────────────────────────────────────────────────────────────────────────────
 function isCreationAllowed() {
-  const now = new Date();
-  const h   = now.getHours();
-  const m   = now.getMinutes();
+  const h = _istHour();
+  const m = _istMinute();
   if (h > CUTOFF_HOUR) return false;
   if (h === CUTOFF_HOUR && m >= CUTOFF_MINUTE) return false;
   return true;
@@ -68,10 +83,10 @@ function isCreationAllowed() {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // isAfterEndHour()
-// Returns true at or after 8 PM — all today's sessions should be expired.
+// Returns true at or after 8 PM IST — all today’s sessions should be expired.
 // ─────────────────────────────────────────────────────────────────────────────
 function isAfterEndHour() {
-  return new Date().getHours() >= END_HOUR;
+  return _istHour() >= END_HOUR;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
