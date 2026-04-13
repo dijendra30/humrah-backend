@@ -25,11 +25,13 @@
 'use strict';
 
 const MovieSession = require('../models/MovieSession');
+const mongoose = require('mongoose');
 const { generateSystemSessions, countNearbyRealUserSessions } = require('../services/movieSessionService');
 
-// Once-per-day fire guards
-let _lastGenerationDate = null;
-let _lastMidnightDate   = null;
+// Once-per-day fire guards — separate variables so TASK 3 never blocks TASK 1
+let _lastGenerationDate  = null;   // TASK 1: 7 PM IST generation
+let _lastPost8pmDate     = null;   // TASK 3: post-8 PM re-check
+let _lastMidnightDate    = null;   // TASK 2: midnight label refresh
 
 // ─── Fallback: Delhi centre (used when no city coords available) ─────────────
 const DEFAULT_LAT = 28.6139;
@@ -63,8 +65,8 @@ function startMovieDailySessionJob() {
       }
 
       // ── TASK 3: 8:01 PM IST = 14:31 UTC (post-expiry re-check) ───────────
-      if (h_utc === 14 && m_utc === 31 && _lastGenerationDate !== today + '_post8pm') {
-        _lastGenerationDate = today + '_post8pm';
+      if (h_utc === 14 && m_utc === 31 && _lastPost8pmDate !== today) {
+        _lastPost8pmDate = today;
         await _runDailyGeneration('post-8PM-IST');
       }
 
@@ -124,10 +126,32 @@ async function _runDailyGeneration(trigger) {
     }
 
     // IF < 3 → fill missing slots
+    // Fetch real coordinates from a recent user in this city so theatres
+    // match the actual city. Falls back to DEFAULT_LAT/LNG (Delhi) only
+    // if no user with stored coords is found in that city.
     console.log(`   [${city}] <3 real sessions — filling missing slots`);
+    let cityLat = DEFAULT_LAT;
+    let cityLng = DEFAULT_LNG;
+    try {
+      const User = mongoose.model('User');
+      const userWithLoc = await User.findOne({
+        'questionnaire.city': city,
+        last_known_lat:  { $ne: null },
+        last_known_lng:  { $ne: null },
+      }).select('last_known_lat last_known_lng').lean();
+      if (userWithLoc) {
+        cityLat = userWithLoc.last_known_lat;
+        cityLng = userWithLoc.last_known_lng;
+        console.log(`   [${city}] using real user coords (${cityLat}, ${cityLng})`);
+      } else {
+        console.warn(`   [${city}] no user coords found — falling back to Delhi defaults`);
+      }
+    } catch (locErr) {
+      console.warn(`   [${city}] coord lookup failed: ${locErr.message} — using Delhi defaults`);
+    }
     const created = await generateSystemSessions(
       { languagePreference: 'Hindi', city },
-      DEFAULT_LAT, DEFAULT_LNG
+      cityLat, cityLng
     );
     console.log(`   [${city}] ${created} slot(s) filled`);
   }
