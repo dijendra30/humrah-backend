@@ -828,7 +828,14 @@ async function createSession(userId, data) {
 
   const [y, mo, d] = date.split('-').map(Number);
   const [h, mi]    = time.split(':').map(Number);
-  const showTime   = new Date(y, mo - 1, d, h, mi, 0);
+  // IMPORTANT: date and time from the frontend are in IST.
+  // new Date(y, mo-1, d, h, mi) uses server local time — UTC on Render.
+  // We must build the UTC Date that corresponds to the IST slot.
+  // IST = UTC + 5:30, so UTC = IST - 5:30 = subtract 330 minutes.
+  const utcMinutes = h * 60 + mi - 330; // 330 = 5*60+30
+  const utcHour    = Math.floor(utcMinutes / 60);
+  const utcMin     = utcMinutes % 60;
+  const showTime   = new Date(Date.UTC(y, mo - 1, d, utcHour, utcMin, 0, 0));
 
   // ── Time rules: 9 AM–8 PM window + 7:30 PM creation cutoff ─────────────
   // validateShowTime() checks future + 9 AM–8 PM bounds
@@ -856,30 +863,37 @@ async function createSession(userId, data) {
   // ── JOIN-FIRST CHECK ─────────────────────────────────────────────────────
   // Before creating, search for an existing active session with:
   //   • same movieId
-  //   • same theatrePlaceId (same theatre)
   //   • same city
   //   • showTime within ±30 minutes of the requested showTime
+  //   • not full
+  //
+  // NOTE: theatrePlaceId is intentionally NOT used as a match key.
+  //   Different users may pick different theatre objects for the same physical
+  //   cinema (fallback IDs vs real Places IDs). Using only movieId+city+time
+  //   window gives the correct "same hangout" signal.
+  //
   // If found AND not full → return a join-nudge response instead of creating.
-  // If full OR no match → fall through to creation.
+  // If full OR no match → fall through to duplicate guard then creation.
   const THIRTY_MIN_MS = 30 * 60 * 1000;
   const windowStart   = new Date(showTime.getTime() - THIRTY_MIN_MS);
   const windowEnd     = new Date(showTime.getTime() + THIRTY_MIN_MS);
 
-  const joinCandidate = theatrePlaceId
-    ? await MovieSession.findOne({
-        movieId:        movieId.toString(),
-        theatrePlaceId: theatrePlaceId,
-        city,
-        status:         'active',
-        expiresAt:      { $gt: new Date() },
-        showTime:       { $gte: windowStart, $lte: windowEnd },
-      })
-      .populate('participants', 'firstName')
-      .sort({ 'participants': -1 })   // prefer more-populated sessions
-      .lean()
-    : null;
+  const joinCandidates = await MovieSession.find({
+    movieId:   movieId.toString(),
+    city,
+    status:    'active',
+    expiresAt: { $gt: new Date() },
+    showTime:  { $gte: windowStart, $lte: windowEnd },
+  })
+    .populate('participants', 'firstName')
+    .lean();
 
-  if (joinCandidate && joinCandidate.participants.length < joinCandidate.maxParticipants) {
+  // Pick the best match: not full, most participants first
+  const joinCandidate = joinCandidates
+    .filter(s => s.participants.length < s.maxParticipants)
+    .sort((a, b) => b.participants.length - a.participants.length)[0] || null;
+
+  if (joinCandidate) {
     console.log(`[create] join-first: found session ${joinCandidate._id} with ${joinCandidate.participants.length} participant(s)`);
     return {
       success: true,
@@ -887,15 +901,15 @@ async function createSession(userId, data) {
       action:  'join',
       message: 'A hangout is already happening nearby. Join instead.',
       session: {
-        sessionId:    joinCandidate._id.toString(),
-        movieTitle:   joinCandidate.movieTitle,
-        theatreName:  joinCandidate.theatreName,
-        showTime:     joinCandidate.showTime?.toISOString() || null,
-        date:         joinCandidate.date,
-        time:         joinCandidate.time,
-        participants: joinCandidate.participants.length,
+        sessionId:       joinCandidate._id.toString(),
+        movieTitle:      joinCandidate.movieTitle,
+        theatreName:     joinCandidate.theatreName,
+        showTime:        joinCandidate.showTime?.toISOString() || null,
+        date:            joinCandidate.date,
+        time:            joinCandidate.time,
+        participants:    joinCandidate.participants.length,
         maxParticipants: joinCandidate.maxParticipants,
-        chatId:       joinCandidate.chatId?.toString() || null,
+        chatId:          joinCandidate.chatId?.toString() || null,
       },
     };
   }
