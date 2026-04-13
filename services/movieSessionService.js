@@ -68,7 +68,7 @@ async function _fetchUserContext(userId) {
   try {
     const User = mongoose.model('User');
     const user = await User.findById(userId)
-      .select('questionnaire last_known_lat last_known_lng firstName lastName profilePhoto isVerified')
+      .select('questionnaire last_known_lat last_known_lng firstName lastName profilePhoto photoVerificationStatus emailVerified')
       .lean();
     if (!user) return null;
     return {
@@ -78,7 +78,7 @@ async function _fetchUserContext(userId) {
       city:      (user.questionnaire?.city || '').trim().toLowerCase(),
       lat:       user.last_known_lat || null,
       lng:       user.last_known_lng || null,
-      isVerified: user.isVerified || false,
+      isVerified: user.photoVerificationStatus === 'approved',
       firstName: user.firstName      || 'User',
       lastName:  user.lastName       || '',
       profilePhoto: user.profilePhoto|| null,
@@ -141,9 +141,13 @@ async function _fetchSessionsFromDB(loc, baseQuery) {
     console.warn(`  [fetch] no-geo error: ${err.message}`);
   }
 
-  // Tier 4 — nuclear: no filters at all
+  // Tier 4 — nuclear: apply only city + status filter, NEVER zero filters
+  // Zero-filter find would return cross-city sessions and break isolation.
   try {
-    const rows = await MovieSession.find({}).populate(populateOpts).sort({ createdAt: -1 }).limit(10);
+    const nuclearQuery = baseQuery && Object.keys(baseQuery).length > 0
+      ? baseQuery
+      : { status: 'active' };
+    const rows = await MovieSession.find(nuclearQuery).populate(populateOpts).sort({ createdAt: -1 }).limit(10);
     console.log(`  [fetch] nuclear → ${rows.length} row(s)`);
     return rows;
   } catch (err) {
@@ -692,7 +696,7 @@ async function getNearbySessions(userId, queryLat, queryLng) {
   const realUserCount = sessions.filter(s => !s.isSystemGenerated).length;
   console.log(`STEP 1 detail: ${realUserCount} real-user, ${sessions.length - realUserCount} system`);
 
-  if (realUserCount <= 1) {
+  if (realUserCount < 3) {
     console.log('STEP 2: real sessions sparse → generateSystemSessions()');
     const genLat = loc.lat ?? userCtx?.lat ?? null;
     const genLng = loc.lng ?? userCtx?.lng ?? null;
