@@ -853,6 +853,53 @@ async function createSession(userId, data) {
   const expiresAt = new Date(showTime.getTime() +  15 * 60_000);
   const chatExpAt = new Date(showTime.getTime() + 180 * 60_000);
 
+  // ── JOIN-FIRST CHECK ─────────────────────────────────────────────────────
+  // Before creating, search for an existing active session with:
+  //   • same movieId
+  //   • same theatrePlaceId (same theatre)
+  //   • same city
+  //   • showTime within ±30 minutes of the requested showTime
+  // If found AND not full → return a join-nudge response instead of creating.
+  // If full OR no match → fall through to creation.
+  const THIRTY_MIN_MS = 30 * 60 * 1000;
+  const windowStart   = new Date(showTime.getTime() - THIRTY_MIN_MS);
+  const windowEnd     = new Date(showTime.getTime() + THIRTY_MIN_MS);
+
+  const joinCandidate = theatrePlaceId
+    ? await MovieSession.findOne({
+        movieId:        movieId.toString(),
+        theatrePlaceId: theatrePlaceId,
+        city,
+        status:         'active',
+        expiresAt:      { $gt: new Date() },
+        showTime:       { $gte: windowStart, $lte: windowEnd },
+      })
+      .populate('participants', 'firstName')
+      .sort({ 'participants': -1 })   // prefer more-populated sessions
+      .lean()
+    : null;
+
+  if (joinCandidate && joinCandidate.participants.length < joinCandidate.maxParticipants) {
+    console.log(`[create] join-first: found session ${joinCandidate._id} with ${joinCandidate.participants.length} participant(s)`);
+    return {
+      success: true,
+      status:  200,
+      action:  'join',
+      message: 'A hangout is already happening nearby. Join instead.',
+      session: {
+        sessionId:    joinCandidate._id.toString(),
+        movieTitle:   joinCandidate.movieTitle,
+        theatreName:  joinCandidate.theatreName,
+        showTime:     joinCandidate.showTime?.toISOString() || null,
+        date:         joinCandidate.date,
+        time:         joinCandidate.time,
+        participants: joinCandidate.participants.length,
+        maxParticipants: joinCandidate.maxParticipants,
+        chatId:       joinCandidate.chatId?.toString() || null,
+      },
+    };
+  }
+
   // Duplicate guard — (movieId + city + date + time) per spec
   const dup = await MovieSession.findOne({
     movieId:  movieId.toString(),
