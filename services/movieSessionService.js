@@ -889,7 +889,10 @@ async function createSession(userId, data) {
       status:  200,
       action:  'join',
       message: 'A hangout is already happening nearby. Join instead.',
-      session: {
+      // Key is 'joinInfo' NOT 'session' to avoid Gson type collision on Android.
+      // Android's MovieSession model maps participants as List<Participant> (array),
+      // but here participants is an Int count. Using a separate key prevents the crash.
+      joinInfo: {
         sessionId:       joinCandidate._id.toString(),
         movieTitle:      joinCandidate.movieTitle,
         theatreName:     joinCandidate.theatreName,
