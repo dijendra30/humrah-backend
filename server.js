@@ -9,6 +9,23 @@ const dotenv = require('dotenv');
 
 dotenv.config();
 
+// =============================================
+// STARTUP ENV VALIDATION — fail fast, fail loud
+// =============================================
+const REQUIRED_ENV_VARS = [
+  'JWT_SECRET',
+  'MONGODB_URI',
+  'AGORA_APP_ID',
+  'AGORA_APP_CERTIFICATE',
+];
+const missingVars = REQUIRED_ENV_VARS.filter(v => !process.env[v]);
+if (missingVars.length > 0) {
+  console.error('\n❌ SERVER STARTUP FAILED — missing required environment variables:');
+  missingVars.forEach(v => console.error(`   • ${v}`));
+  console.error('\nAdd these to your .env file and restart.\n');
+  process.exit(1);
+}
+
 // ✅ Initialize Firebase Admin SDK (MUST be before any push notification calls)
 try {
   require('./config/firebase');
@@ -66,7 +83,11 @@ io.use((socket, next) => {
       return next(new Error('Authentication error: No token provided'));
     }
     
-    const JWT_SECRET = process.env.JWT_SECRET || 'fallback_secret_change_in_production';
+    const JWT_SECRET = process.env.JWT_SECRET;
+    if (!JWT_SECRET) {
+      console.error('[server.js] JWT_SECRET env var is not set. Rejecting socket connection.');
+      return next(new Error('Authentication error: Server misconfiguration'));
+    }
     const decoded = jwt.verify(token, JWT_SECRET);
     
     socket.userId = decoded.userId;
@@ -464,7 +485,7 @@ global.getUserInfo = getUserInfo;
 // =============================================
 const connectDB = async () => {
   try {
-    await mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/humrah');
+    await mongoose.connect(process.env.MONGODB_URI);
     console.log('✅ MongoDB Connected');
 
     // ── Gaming session expiry cron (every 60s) ──
