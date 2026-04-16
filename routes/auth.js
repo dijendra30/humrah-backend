@@ -23,7 +23,7 @@ try {
       const token = req.header('Authorization')?.replace('Bearer ', '');
       if (!token) return res.status(401).json({ success: false, message: 'No token' });
       
-      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'fallback_secret_change_in_production');
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
       const user = await User.findById(decoded.userId).select('-password');
       if (!user) return res.status(401).json({ success: false, message: 'User not found' });
       
@@ -37,12 +37,23 @@ try {
 }
 
 // =============================================
+// ENV VALIDATION — fail fast if JWT_SECRET missing
+// =============================================
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  throw new Error(
+    '[auth.js route] JWT_SECRET environment variable is not set. ' +
+    'Add it to your .env file and restart the server.'
+  );
+}
+
+// =============================================
 // HELPER: GENERATE JWT TOKEN
 // =============================================
 const generateToken = (userId, role) => {
   return jwt.sign(
     { userId, role },
-    process.env.JWT_SECRET || 'fallback_secret_change_in_production',
+    JWT_SECRET,
     { expiresIn: '7d' }
   );
 };
