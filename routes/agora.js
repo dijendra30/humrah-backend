@@ -4,9 +4,16 @@ const router = express.Router();
 const { RtcTokenBuilder, RtcRole } = require('agora-access-token');
 const { auth } = require('../middleware/auth');
 
-// ✅ REPLACE WITH YOUR CREDENTIALS
-const AGORA_APP_ID = '183926da16b6416f98b50a78c6673c97';
-const AGORA_APP_CERTIFICATE = '4cc9dde943ca49a398fd120ebb1207ba';
+// ── Load & validate Agora credentials from environment ──────────────────────
+const AGORA_APP_ID          = process.env.AGORA_APP_ID;
+const AGORA_APP_CERTIFICATE = process.env.AGORA_APP_CERTIFICATE;
+
+if (!AGORA_APP_ID || !AGORA_APP_CERTIFICATE) {
+  throw new Error(
+    '[agora.js] Missing required env vars: AGORA_APP_ID and/or AGORA_APP_CERTIFICATE. ' +
+    'Add them to your .env file and restart the server.'
+  );
+}
 
 /**
  * Generate Agora RTC Token
