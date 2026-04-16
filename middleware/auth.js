@@ -25,10 +25,12 @@ const authenticate = async (req, res, next) => {
     }
 
     // Verify token
-    const decoded = jwt.verify(
-      token,
-      process.env.JWT_SECRET || 'fallback_secret_change_in_production'
-    );
+    const JWT_SECRET = process.env.JWT_SECRET;
+    if (!JWT_SECRET) {
+      console.error('[auth.js] JWT_SECRET env var is not set. Server misconfiguration.');
+      return res.status(500).json({ success: false, message: 'Server configuration error' });
+    }
+    const decoded = jwt.verify(token, JWT_SECRET);
 
     // Fetch user from database (CRITICAL: get fresh data including role)
     const user = await User.findById(decoded.userId).select('-password');
