@@ -24,7 +24,11 @@ const socketAuthMiddleware = (socket, next) => {
     }
     
     // ✅ Verify JWT token
-    const JWT_SECRET = process.env.JWT_SECRET || 'fallback_secret_change_in_production';
+    const JWT_SECRET = process.env.JWT_SECRET;
+    if (!JWT_SECRET) {
+      console.error('[socketAuth.js] JWT_SECRET env var is not set.');
+      return next(new Error('Authentication error: Server misconfiguration'));
+    }
     
     const decoded = jwt.verify(token, JWT_SECRET);
     
@@ -58,7 +62,8 @@ const socketAuthMiddleware = (socket, next) => {
  */
 const verifySocketToken = (token) => {
   try {
-    const JWT_SECRET = process.env.JWT_SECRET || 'fallback_secret_change_in_production';
+    const JWT_SECRET = process.env.JWT_SECRET;
+    if (!JWT_SECRET) return { success: false, error: 'Server misconfiguration: JWT_SECRET not set' };
     const decoded = jwt.verify(token, JWT_SECRET);
     return {
       success: true,
