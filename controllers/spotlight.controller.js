@@ -1,158 +1,141 @@
-// controllers/spotlight.controller.js - FIXED with correct Android field mapping
+// controllers/spotlight.controller.js
+// ─────────────────────────────────────────────────────────────────────────────
+// Hardened with structured [REQUEST] / [DB] / [RESPONSE] logging.
+// Every filter value is printed so you can see exactly why companions are
+// included or excluded.  Remove or gate behind NODE_ENV before shipping to prod.
+// ─────────────────────────────────────────────────────────────────────────────
 const User = require('../models/User');
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ✅ BLOCK FILTERING HELPER (Prompt §12)
+// BLOCK FILTERING HELPER
 // Returns IDs to exclude from every discovery query:
-//   • self
-//   • users I blocked
-//   • users who blocked me
+//   • self  •  users I blocked  •  users who blocked me
 // Also returns current user's hangout interests for overlap calculation.
 // ─────────────────────────────────────────────────────────────────────────────
 async function getExcludeIds(currentUserId) {
-  // Fetch my blockedUsers list AND questionnaire in one query
   const currentUser = await User.findById(currentUserId)
     .select('questionnaire blockedUsers');
 
-  const myBlockedIds = currentUser?.blockedUsers || [];
+  if (!currentUser) {
+    console.warn(`[DB] getExcludeIds — user ${currentUserId} not found`);
+    return { excludeIds: [currentUserId], userInterests: [] };
+  }
 
-  // Find users who have blocked me
+  const myBlockedIds = currentUser.blockedUsers || [];
+
   const usersWhoBlockedMe = await User.find(
     { blockedUsers: currentUserId },
     { _id: 1 }
   );
   const blockedMeIds = usersWhoBlockedMe.map(u => u._id);
 
-  return {
-    excludeIds:    [currentUserId, ...myBlockedIds, ...blockedMeIds],
-    userInterests: currentUser?.questionnaire?.hangoutPreferences || []
-  };
+  const excludeIds   = [currentUserId, ...myBlockedIds, ...blockedMeIds];
+  const userInterests = currentUser.questionnaire?.hangoutPreferences || [];
+
+  console.log(`[DB] getExcludeIds — userId=${currentUserId} | blocked=${myBlockedIds.length} | blockedBy=${blockedMeIds.length} | interests=${userInterests.length}`);
+
+  return { excludeIds, userInterests };
 }
 
-/**
- * Get spotlight companions
- * 
- * ✅ FIXED: Correct field mapping for Android app
- * - id (not _id)
- * - name (combined firstName + lastName)
- * - sharedHangouts (interests)
- * - overlapCount (calculated based on matching interests)
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/spotlight
+// ─────────────────────────────────────────────────────────────────────────────
 exports.getSpotlightCompanions = async (req, res) => {
+  const userId = req.userId;
+  console.log(`[REQUEST] GET /spotlight — userId=${userId} query=${JSON.stringify(req.query)}`);
+
   try {
-    const currentUserId = req.userId;
-    const { 
-      city, 
+    const {
+      city,
       state,
       interests,
       minRating,
       verifiedOnly,
       limit = 20,
-      page = 1 
+      page  = 1
     } = req.query;
 
-    // ✅ §12: get blocked/blocker IDs + current user interests in one helper call
-    // (replaces the previous single User.findById that only fetched questionnaire)
-    const { excludeIds, userInterests } = await getExcludeIds(currentUserId);
+    const { excludeIds, userInterests } = await getExcludeIds(userId);
 
-    // ✅ BASE FILTER: Only COMPANION users who are actively hosting
+    // ── Base filter ───────────────────────────────────────────────────────────
     const filter = {
-      _id: { $nin: excludeIds }, // ✅ §12: was $ne — now excludes blocked + blockers
-      userType: 'COMPANION',
-      status: 'ACTIVE',
-      hostActive: true,   // ✅ FIX: exclude hosts who paused their hosting
+      _id:          { $nin: excludeIds },
+      userType:     'COMPANION',
+      status:       'ACTIVE',
+      hostActive:   true,
       profilePhoto: { $ne: null }
     };
 
-    // Additional filters
-    if (city) {
-      filter['questionnaire.city'] = city;
-    }
-
-    if (state) {
-      filter['questionnaire.state'] = state;
-    }
-
+    // ── Optional filters ──────────────────────────────────────────────────────
+    if (city)         filter['questionnaire.city']  = city;
+    if (state)        filter['questionnaire.state'] = state;
     if (interests) {
-      const interestArray = interests.split(',').map(i => i.trim());
-      filter['questionnaire.interests'] = { $in: interestArray };
+      const arr = interests.split(',').map(i => i.trim());
+      filter['questionnaire.interests'] = { $in: arr };
     }
+    if (verifiedOnly === 'true') filter.photoVerificationStatus = 'approved';
+    if (minRating)    filter['ratingStats.averageRating'] = { $gte: parseFloat(minRating) };
 
-    if (verifiedOnly === 'true') {
-      filter.photoVerificationStatus = 'approved';
-    }
+    console.log(`[DB] Spotlight filter: ${JSON.stringify(filter)}`);
 
-    if (minRating) {
-      filter['ratingStats.averageRating'] = { $gte: parseFloat(minRating) };
-    }
-
-    // Pagination
+    // ── Query ─────────────────────────────────────────────────────────────────
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
-    // Query companions
-    const companions = await User.find(filter)
-      .select('firstName lastName profilePhoto questionnaire ratingStats verified isPremium userType photoVerificationStatus')
-      .sort({ 
-        isPremium: -1,
-        'ratingStats.averageRating': -1,
-        lastActive: -1
-      })
-      .limit(parseInt(limit))
-      .skip(skip);
+    const [companions, totalCompanions] = await Promise.all([
+      User.find(filter)
+        .select('firstName lastName profilePhoto questionnaire ratingStats verified isPremium userType photoVerificationStatus')
+        .sort({ isPremium: -1, 'ratingStats.averageRating': -1, lastActive: -1 })
+        .limit(parseInt(limit))
+        .skip(skip),
+      User.countDocuments(filter)
+    ]);
 
-    // Get total count
-    const totalCompanions = await User.countDocuments(filter);
-    const totalPages = Math.ceil(totalCompanions / parseInt(limit));
+    console.log(`[DB] Spotlight query → found=${companions.length} total=${totalCompanions}`);
 
-    // ✅ FIXED: Format response with correct field names for Android
+    if (companions.length === 0) {
+      console.warn(`[DB] ⚠️  Zero companions returned. Debug checklist:`);
+      console.warn(`        1. Any user with userType='COMPANION' AND status='ACTIVE' AND hostActive=true AND profilePhoto≠null?`);
+      console.warn(`        2. Run: db.users.countDocuments({userType:'COMPANION',status:'ACTIVE',hostActive:true}) in Mongo shell`);
+    }
+
+    // ── Format ────────────────────────────────────────────────────────────────
     const formattedCompanions = companions.map(companion => {
-      // Calculate overlap count
       const companionInterests = companion.questionnaire?.hangoutPreferences || [];
-      const overlapCount = userInterests.filter(interest => 
-        companionInterests.includes(interest)
-      ).length;
+      const overlapCount = userInterests.filter(i => companionInterests.includes(i)).length;
 
       return {
-        // ✅ FIX: Use 'id' not '_id'
-        id: companion._id.toString(),
-        
-        // ✅ FIX: Combine firstName + lastName into 'name'
-        name: `${companion.firstName} ${companion.lastName}`.trim(),
-        
-        profilePhoto: companion.profilePhoto,
-        verified: companion.verified,
-        isPremium: companion.isPremium,
-        userType: companion.userType,
-        photoVerificationStatus: companion.photoVerificationStatus,
-        
-        // ✅ FIX: Use 'sharedHangouts' for interests
-        sharedHangouts: companionInterests,
-        
-        // ✅ FIX: Calculate and include overlapCount
-        overlapCount: overlapCount,
-        
-        // Companion details from questionnaire
-        bio: companion.questionnaire?.bio || null,
-        tagline: companion.questionnaire?.tagline || null,
-        price: companion.questionnaire?.price || null,
-        availability: companion.questionnaire?.availability || null,
-        availableTimes: companion.questionnaire?.availableTimes || null,
-        city: companion.questionnaire?.city || null,
-        state: companion.questionnaire?.state || null,
-        languagePreference: companion.questionnaire?.languagePreference || null,
-        comfortZones: companion.questionnaire?.comfortZones || null,
-        vibeWords: companion.questionnaire?.vibeWords || null,
-        openFor: companion.questionnaire?.openFor || null,
-        
-        // Ratings
-        averageRating: companion.ratingStats?.averageRating || 0,
-        totalRatings: companion.ratingStats?.totalRatings || 0,
-        completedBookings: companion.ratingStats?.completedBookings || 0
+        id:                     companion._id.toString(),
+        name:                   `${companion.firstName || ''} ${companion.lastName || ''}`.trim(),
+        profilePhoto:           companion.profilePhoto || null,
+        verified:               companion.verified     || false,
+        isPremium:              companion.isPremium     || false,
+        userType:               companion.userType,
+        photoVerificationStatus: companion.photoVerificationStatus || null,
+        sharedHangouts:         companionInterests,
+        overlapCount,
+        bio:                    companion.questionnaire?.bio              || null,
+        tagline:                companion.questionnaire?.tagline          || null,
+        price:                  companion.questionnaire?.price            || null,
+        availability:           companion.questionnaire?.availability     || null,
+        availableTimes:         companion.questionnaire?.availableTimes   || null,
+        city:                   companion.questionnaire?.city             || null,
+        state:                  companion.questionnaire?.state            || null,
+        languagePreference:     companion.questionnaire?.languagePreference || null,
+        comfortZones:           companion.questionnaire?.comfortZones     || null,
+        vibeWords:              companion.questionnaire?.vibeWords        || null,
+        openFor:                companion.questionnaire?.openFor          || null,
+        averageRating:          companion.ratingStats?.averageRating      || 0,
+        totalRatings:           companion.ratingStats?.totalRatings       || 0,
+        completedBookings:      companion.ratingStats?.completedBookings  || 0
       };
     });
 
-    res.json({
-      success: true,
+    const totalPages = Math.ceil(totalCompanions / parseInt(limit));
+
+    console.log(`[RESPONSE] GET /spotlight → success=true companions=${formattedCompanions.length} totalPages=${totalPages}`);
+
+    return res.json({
+      success:    true,
       companions: formattedCompanions,
       pagination: {
         currentPage: parseInt(page),
@@ -163,192 +146,166 @@ exports.getSpotlightCompanions = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Get spotlight companions error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to fetch companions'
+    console.error(`[ERROR] GET /spotlight — userId=${userId} — ${error.message}`, error);
+    return res.status(500).json({
+      success:  false,
+      message:  'Failed to fetch companions',
+      companions: []   // always return the array key so Android never NPEs
     });
   }
 };
 
-/**
- * Get companion details by ID
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/spotlight/:companionId
+// ─────────────────────────────────────────────────────────────────────────────
 exports.getCompanionDetails = async (req, res) => {
-  try {
-    const currentUserId   = req.userId;
-    const { companionId } = req.params;
+  const userId       = req.userId;
+  const companionId  = req.params.companionId;
+  console.log(`[REQUEST] GET /spotlight/${companionId} — userId=${userId}`);
 
-    // ✅ §12: refuse if requester and companion have blocked each other
-    const { excludeIds, userInterests } = await getExcludeIds(currentUserId);
+  try {
+    const { excludeIds, userInterests } = await getExcludeIds(userId);
+
     if (excludeIds.map(id => id.toString()).includes(companionId)) {
-      return res.status(403).json({
-        success: false,
-        message: 'Profile not available'
-      });
+      console.warn(`[DB] Companion ${companionId} is blocked by/blocks user ${userId}`);
+      return res.status(403).json({ success: false, message: 'Profile not available' });
     }
 
     const companion = await User.findOne({
-      _id: companionId,
+      _id:      companionId,
       userType: 'COMPANION',
-      status: 'ACTIVE'
+      status:   'ACTIVE'
     }).select('-password -emailVerificationOTP -fcmTokens');
 
     if (!companion) {
-      return res.status(404).json({
-        success: false,
-        message: 'Companion not found'
-      });
+      console.warn(`[DB] Companion ${companionId} not found`);
+      return res.status(404).json({ success: false, message: 'Companion not found' });
     }
 
-    // ✅ FIXED: Format response correctly
     const companionInterests = companion.questionnaire?.hangoutPreferences || [];
-    const overlapCount = userInterests.filter(i =>  // ✅ was hardcoded 0
-      companionInterests.includes(i)
-    ).length;
+    const overlapCount = userInterests.filter(i => companionInterests.includes(i)).length;
 
     const formattedCompanion = {
-      id: companion._id.toString(),
-      name: `${companion.firstName} ${companion.lastName}`.trim(),
-      profilePhoto: companion.profilePhoto,
-      verified: companion.verified,
-      isPremium: companion.isPremium,
-      userType: companion.userType,
-      photoVerificationStatus: companion.photoVerificationStatus,
-      
-      sharedHangouts: companionInterests,
-      overlapCount,  // ✅ now correctly calculated
-      
-      bio: companion.questionnaire?.bio || null,
-      tagline: companion.questionnaire?.tagline || null,
-      price: companion.questionnaire?.price || null,
-      availability: companion.questionnaire?.availability || null,
-      availableTimes: companion.questionnaire?.availableTimes || null,
-      city: companion.questionnaire?.city || null,
-      state: companion.questionnaire?.state || null,
-      languagePreference: companion.questionnaire?.languagePreference || null,
-      comfortZones: companion.questionnaire?.comfortZones || null,
-      vibeWords: companion.questionnaire?.vibeWords || null,
-      openFor: companion.questionnaire?.openFor || null,
-      
-      averageRating: companion.ratingStats?.averageRating || 0,
-      totalRatings: companion.ratingStats?.totalRatings || 0,
-      completedBookings: companion.ratingStats?.completedBookings || 0
+      id:                     companion._id.toString(),
+      name:                   `${companion.firstName || ''} ${companion.lastName || ''}`.trim(),
+      profilePhoto:           companion.profilePhoto || null,
+      verified:               companion.verified     || false,
+      isPremium:              companion.isPremium     || false,
+      userType:               companion.userType,
+      photoVerificationStatus: companion.photoVerificationStatus || null,
+      sharedHangouts:         companionInterests,
+      overlapCount,
+      bio:                    companion.questionnaire?.bio              || null,
+      tagline:                companion.questionnaire?.tagline          || null,
+      price:                  companion.questionnaire?.price            || null,
+      availability:           companion.questionnaire?.availability     || null,
+      availableTimes:         companion.questionnaire?.availableTimes   || null,
+      city:                   companion.questionnaire?.city             || null,
+      state:                  companion.questionnaire?.state            || null,
+      languagePreference:     companion.questionnaire?.languagePreference || null,
+      comfortZones:           companion.questionnaire?.comfortZones     || null,
+      vibeWords:              companion.questionnaire?.vibeWords        || null,
+      openFor:                companion.questionnaire?.openFor          || null,
+      averageRating:          companion.ratingStats?.averageRating      || 0,
+      totalRatings:           companion.ratingStats?.totalRatings       || 0,
+      completedBookings:      companion.ratingStats?.completedBookings  || 0
     };
 
-    res.json({
-      success: true,
-      companion: formattedCompanion
-    });
+    console.log(`[RESPONSE] GET /spotlight/${companionId} → success=true`);
+    return res.json({ success: true, companion: formattedCompanion });
 
   } catch (error) {
-    console.error('Get companion details error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to fetch companion details'
-    });
+    console.error(`[ERROR] GET /spotlight/${companionId} — ${error.message}`, error);
+    return res.status(500).json({ success: false, message: 'Failed to fetch companion details' });
   }
 };
 
-/**
- * Search companions with filters
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/spotlight/search
+// ─────────────────────────────────────────────────────────────────────────────
 exports.searchCompanions = async (req, res) => {
+  const userId = req.userId;
+  console.log(`[REQUEST] GET /spotlight/search — userId=${userId} query=${JSON.stringify(req.query)}`);
+
   try {
-    const { 
-      query,
-      city,
-      state,
-      minPrice,
-      maxPrice,
-      availability,
-      interests,
-      minRating,
-      limit = 20 
+    const {
+      query, city, state, minPrice, maxPrice,
+      availability, interests, minRating,
+      limit = 20
     } = req.query;
 
-    // ✅ §12: get blocked/blocker IDs + current user interests in one helper call
-    const { excludeIds, userInterests } = await getExcludeIds(req.userId);
+    const { excludeIds, userInterests } = await getExcludeIds(userId);
 
     const filter = {
-      _id: { $nin: excludeIds }, // ✅ §12: was $ne — now excludes blocked + blockers
-      userType: 'COMPANION',
-      status: 'ACTIVE',
-      hostActive: true   // ✅ FIX: exclude paused hosts from search
+      _id:        { $nin: excludeIds },
+      userType:   'COMPANION',
+      status:     'ACTIVE',
+      hostActive: true
     };
 
-    // Text search
     if (query) {
       filter.$or = [
-        { firstName: { $regex: query, $options: 'i' } },
-        { lastName: { $regex: query, $options: 'i' } },
-        { 'questionnaire.tagline': { $regex: query, $options: 'i' } },
-        { 'questionnaire.bio': { $regex: query, $options: 'i' } }
+        { firstName:                   { $regex: query, $options: 'i' } },
+        { lastName:                    { $regex: query, $options: 'i' } },
+        { 'questionnaire.tagline':     { $regex: query, $options: 'i' } },
+        { 'questionnaire.bio':         { $regex: query, $options: 'i' } }
       ];
     }
-
-    // Location filters
-    if (city) filter['questionnaire.city'] = city;
-    if (state) filter['questionnaire.state'] = state;
-
-    // Availability
-    if (availability) {
-      filter['questionnaire.availability'] = availability;
-    }
-
-    // Interests
+    if (city)         filter['questionnaire.city']         = city;
+    if (state)        filter['questionnaire.state']        = state;
+    if (availability) filter['questionnaire.availability'] = availability;
     if (interests) {
-      const interestArray = interests.split(',');
-      filter['questionnaire.hangoutPreferences'] = { $in: interestArray };
+      filter['questionnaire.hangoutPreferences'] = {
+        $in: interests.split(',').map(i => i.trim())
+      };
     }
+    if (minRating) filter['ratingStats.averageRating'] = { $gte: parseFloat(minRating) };
 
-    // Rating
-    if (minRating) {
-      filter['ratingStats.averageRating'] = { $gte: parseFloat(minRating) };
-    }
+    console.log(`[DB] searchCompanions filter: ${JSON.stringify(filter)}`);
 
     const companions = await User.find(filter)
       .select('firstName lastName profilePhoto questionnaire ratingStats verified isPremium photoVerificationStatus')
       .sort({ 'ratingStats.averageRating': -1, lastActive: -1 })
       .limit(parseInt(limit));
 
-    // ✅ FIXED: Format response correctly
+    console.log(`[DB] searchCompanions → found=${companions.length}`);
+
     const formattedCompanions = companions.map(companion => {
       const companionInterests = companion.questionnaire?.hangoutPreferences || [];
-      const overlapCount = userInterests.filter(interest => 
-        companionInterests.includes(interest)
-      ).length;
-
+      const overlapCount = userInterests.filter(i => companionInterests.includes(i)).length;
       return {
-        id: companion._id.toString(),
-        name: `${companion.firstName} ${companion.lastName}`.trim(),
-        profilePhoto: companion.profilePhoto,
-        verified: companion.verified,
-        isPremium: companion.isPremium,
-        photoVerificationStatus: companion.photoVerificationStatus,
-        sharedHangouts: companionInterests,
-        overlapCount: overlapCount,
-        bio: companion.questionnaire?.bio || null,
-        tagline: companion.questionnaire?.tagline || null,
-        price: companion.questionnaire?.price || null,
-        city: companion.questionnaire?.city || null,
-        state: companion.questionnaire?.state || null,
-        averageRating: companion.ratingStats?.averageRating || 0,
-        totalRatings: companion.ratingStats?.totalRatings || 0
+        id:                     companion._id.toString(),
+        name:                   `${companion.firstName || ''} ${companion.lastName || ''}`.trim(),
+        profilePhoto:           companion.profilePhoto || null,
+        verified:               companion.verified     || false,
+        isPremium:              companion.isPremium     || false,
+        photoVerificationStatus: companion.photoVerificationStatus || null,
+        sharedHangouts:         companionInterests,
+        overlapCount,
+        bio:                    companion.questionnaire?.bio    || null,
+        tagline:                companion.questionnaire?.tagline || null,
+        price:                  companion.questionnaire?.price  || null,
+        city:                   companion.questionnaire?.city   || null,
+        state:                  companion.questionnaire?.state  || null,
+        averageRating:          companion.ratingStats?.averageRating || 0,
+        totalRatings:           companion.ratingStats?.totalRatings  || 0
       };
     });
 
-    res.json({
-      success: true,
+    console.log(`[RESPONSE] GET /spotlight/search → success=true count=${formattedCompanions.length}`);
+
+    return res.json({
+      success:    true,
       companions: formattedCompanions,
-      count: formattedCompanions.length
+      count:      formattedCompanions.length
     });
 
   } catch (error) {
-    console.error('Search companions error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Search failed'
+    console.error(`[ERROR] GET /spotlight/search — ${error.message}`, error);
+    return res.status(500).json({
+      success:    false,
+      message:    'Search failed',
+      companions: []
     });
   }
 };
