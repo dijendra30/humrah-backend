@@ -575,7 +575,6 @@ app.use('/api/settings', authenticate, enforceLegalAcceptance, settingsRoutes);
 app.use('/api/profile-assistant', profileAssistantRoutes);
 app.use(requestLogger);
 
-app.use('/api/settings', require('./routes/settings'));
 // ✅ ADMIN ROUTES (No legal enforcement needed for admins performing admin duties)
 app.use('/api/admin', authenticate, require('./routes/admin'));
 app.use('/api/moderation', authenticate, adminOnly, moderationRoutes);
