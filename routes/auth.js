@@ -358,7 +358,11 @@ router.post('/login', async (req, res) => {
       role: userRole,
       profilePhoto: user.profilePhoto,
       emailVerified: user.emailVerified,
-      verified: user.verified
+      verified: user.verified,
+      questionnaire: user.questionnaire,  // ADD THIS
+      isPremium: user.isPremium || false,  // ADD THIS
+      paymentInfo: user.paymentInfo || null, // ADD THIS
+      hostActive: user.hostActive !== false, // ADD THIS
     };
 
     // Add admin permissions if available
