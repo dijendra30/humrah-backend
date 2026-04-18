@@ -349,7 +349,7 @@ router.post('/login', async (req, res) => {
 
     console.log(`✅ Login successful: ${user.email} (${userRole})`);
 
-    // Prepare user response
+    // Prepare user response — FIXED: include all fields Android app expects
     const userResponse = {
       _id: user._id,
       firstName: user.firstName,
@@ -359,10 +359,17 @@ router.post('/login', async (req, res) => {
       profilePhoto: user.profilePhoto,
       emailVerified: user.emailVerified,
       verified: user.verified,
-      questionnaire: user.questionnaire,  // ADD THIS
-      isPremium: user.isPremium || false,  // ADD THIS
-      paymentInfo: user.paymentInfo || null, // ADD THIS
-      hostActive: user.hostActive !== false, // ADD THIS
+      // ✅ FIXED: Android User model needs these or UI breaks post-login
+      questionnaire: user.questionnaire || {},
+      isPremium: user.isPremium || false,
+      hostActive: user.hostActive !== false,
+      paymentInfo: user.paymentInfo || null,
+      photoVerificationStatus: user.photoVerificationStatus || 'not_submitted',
+      profileCompleteness: user.profileCompleteness || null,
+      acceptedCommunityVersion: user.acceptedCommunityVersion || null,
+      communityAcceptedAt: user.communityAcceptedAt || null,
+      lastActive: user.lastActive || null,
+      createdAt: user.createdAt || null
     };
 
     // Add admin permissions if available
@@ -415,6 +422,25 @@ router.post('/login', async (req, res) => {
       success: false,
       message: 'Server error during login'
     });
+  }
+});
+
+/**
+ * @route   POST /api/auth/check-email
+ * @desc    Check if email already exists (used before registration OTP step)
+ * @access  Public
+ */
+router.post('/check-email', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ success: false, message: 'Email is required' });
+    }
+    const existing = await User.findOne({ email: email.toLowerCase() }).select('_id');
+    return res.json({ success: true, exists: !!existing });
+  } catch (error) {
+    console.error('check-email error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
