@@ -8,6 +8,12 @@ const { authenticate, authorize, adminOnly, superAdminOnly, auditLog } = require
 const User = require('../models/User');
 const { upload, uploadBuffer, uploadBase64, deleteImage } = require('../config/cloudinary');
 const { moderateQuestionnaire, applyStrikesAndEnforce, buildModerationResponse, buildAutoCleanSuccessResponse, LEVEL } = require('../middleware/moderation');
+const userActivityCtrl = require('../controllers/userActivityController');
+
+// @route   GET /api/users/activity
+// @desc    Get lightweight activity dashboard (booking stats + refs)
+// @access  Private
+router.get('/activity', authenticate, userActivityCtrl.getUserActivity);
 
 // ==================== USER PROFILE ROUTES ====================
 
