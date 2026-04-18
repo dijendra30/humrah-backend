@@ -408,8 +408,25 @@ imageModerationLog: [
   
   lastActive: { type: Date, default: Date.now },
   createdAt: { type: Date, default: Date.now },
-  updatedAt: { type: Date, default: Date.now }
-  
+  updatedAt: { type: Date, default: Date.now },
+
+  // =============================================
+  // ✅ BOOKING REFERENCES (lightweight — NOT full booking data)
+  // bookings collection remains the single source of truth.
+  // These refs enable O(1) activity dashboard queries without joins.
+  // =============================================
+  bookingRefs: {
+    type: [{
+      bookingId:    { type: mongoose.Schema.Types.ObjectId, ref: 'Booking', required: true },
+      otherUserId:  { type: mongoose.Schema.Types.ObjectId, ref: 'User',    required: true },
+      otherUserEmail: { type: String, default: null },
+      status:       { type: String, enum: ['pending', 'confirmed', 'cancelled', 'completed'], default: 'pending' },
+      type:         { type: String, enum: ['FREE'], default: 'FREE' },
+      createdAt:    { type: Date, default: Date.now }
+    }],
+    default: []
+  }
+
 }, { timestamps: true });
 
 // Check if user is currently blocked from uploading images
@@ -426,6 +443,8 @@ userSchema.index({ last_known_lat: 1, last_known_lng: 1 });
 userSchema.index({ 'moderationFlags.isFlagged': 1 });
 userSchema.index({ 'moderationFlags.strikeCount': 1 });
 userSchema.index({ last_location_updated_at: 1 });
+userSchema.index({ 'bookingRefs.bookingId': 1 });
+userSchema.index({ 'bookingRefs.status': 1 });
 
 
 /**
