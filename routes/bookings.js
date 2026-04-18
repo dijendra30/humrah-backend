@@ -5,6 +5,36 @@ const { auth } = require('../middleware/auth');
 const Booking = require('../models/Booking');
 const User = require('../models/User');
 
+// ─── helper: push a lightweight booking ref into a user doc ───────────────────
+async function pushBookingRef(userId, { bookingId, otherUserId, otherUserEmail, status }) {
+  return User.findByIdAndUpdate(
+    userId,
+    {
+      $push: {
+        bookingRefs: {
+          bookingId,
+          otherUserId,
+          otherUserEmail: otherUserEmail || null,
+          status,
+          type: 'FREE',
+          createdAt: new Date()
+        }
+      }
+    },
+    { new: false }   // we don't need the doc back — fire-and-forget style
+  ).catch(err => console.error('[BookingRef] pushBookingRef error:', err.message));
+}
+
+// ─── helper: sync status in both users' bookingRefs ──────────────────────────
+async function syncBookingRefStatus(bookingId, newStatus) {
+  return User.updateMany(
+    { 'bookingRefs.bookingId': bookingId },
+    { $set: { 'bookingRefs.$[el].status': newStatus } },
+    { arrayFilters: [{ 'el.bookingId': bookingId }] }
+  ).catch(err => console.error('[BookingRef] syncBookingRefStatus error:', err.message));
+}
+
+
 // @route   POST /api/bookings
 // @desc    Create a new booking
 // @access  Private
@@ -26,11 +56,32 @@ router.post('/', auth, async (req, res) => {
       bookingDate: new Date(bookingDate),
       meetingLocation,
       notes,
-      status: 'pending'
+      status: 'pending',
+      totalAmount: 0   // FREE for now
     });
 
     await booking.save();
-    await booking.populate('userId companionId', 'firstName lastName profilePhoto');
+    await booking.populate('userId companionId', 'firstName lastName profilePhoto email');
+
+    // —— Push lightweight booking refs into BOTH users ——
+    // Intentionally NOT awaited so the HTTP response is not delayed.
+    // Both ops use $push which is atomic per-document.
+    const initiatorEmail  = booking.userId?.email  || null;
+    const receiverEmail   = booking.companionId?.email || null;
+
+    pushBookingRef(req.userId, {
+      bookingId:      booking._id,
+      otherUserId:    companionId,
+      otherUserEmail: receiverEmail,
+      status:         'pending'
+    });
+
+    pushBookingRef(companionId, {
+      bookingId:      booking._id,
+      otherUserId:    req.userId,
+      otherUserEmail: initiatorEmail,
+      status:         'pending'
+    });
 
     res.status(201).json({
       success: true,
@@ -107,6 +158,9 @@ router.put('/:id/status', auth, async (req, res) => {
     booking.status = status;
     await booking.save();
     await booking.populate('userId companionId', 'firstName lastName profilePhoto');
+
+    // Keep bookingRefs in sync — non-blocking
+    syncBookingRefStatus(booking._id, status);
 
     res.json({
       success: true,
