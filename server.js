@@ -548,7 +548,6 @@ const paymentRoutes = require('./routes/payment');
 const foodRoutes = require('./routes/foodRoutes');
 const settingsRoutes = require('./routes/settings');
 const profileAssistantRoutes = require('./routes/profileAssistant');
-const requestLogger = require('./middleware/requestLogger');
 // ✅ MOVIE HANGOUT ROUTES
 const movieSessionRoutes = require('./routes/movieSessionRoutes');
 // startMovieSessionExpiryJob is required above connectDB() — do not require again here
@@ -573,8 +572,7 @@ app.use('/api/random-booking', authenticate, enforceLegalAcceptance, require('./
 app.use('/api/verification', authenticate, enforceLegalAcceptance, require('./routes/verification'));
 app.use('/api/settings', authenticate, enforceLegalAcceptance, settingsRoutes);
 app.use('/api/profile-assistant', profileAssistantRoutes);
-app.use(requestLogger);
-
+// FIX: removed duplicate unauthenticated app.use('/api/settings', ...) that was here
 // ✅ ADMIN ROUTES (No legal enforcement needed for admins performing admin duties)
 app.use('/api/admin', authenticate, require('./routes/admin'));
 app.use('/api/moderation', authenticate, adminOnly, moderationRoutes);
