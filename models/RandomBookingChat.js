@@ -8,9 +8,9 @@ const randomBookingChatSchema = new mongoose.Schema({
     ref: 'RandomBooking',
     required: true,
     unique: true,
-    index: true
+    // ✅ FIX: removed index:true — unique:true already creates the index
   },
-  
+
   participants: [{
     userId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -23,66 +23,67 @@ const randomBookingChatSchema = new mongoose.Schema({
       required: true
     }
   }],
-  
+
   encryptionKeyId: {
     type: String,
     required: true,
     unique: true
   },
-  
+
   status: {
     type: String,
     enum: ['ACTIVE', 'COMPLETED', 'EXPIRED', 'UNDER_REVIEW'],
     default: 'ACTIVE',
     required: true,
-    index: true
+    // ✅ FIX: removed index:true — covered by compound index({ status, expiresAt }) below
   },
-  
+
   createdAt: {
     type: Date,
     default: Date.now,
     required: true
   },
-  
+
   completedAt: {
     type: Date,
     default: null
   },
-  
+
   expiresAt: {
     type: Date,
     required: true,
-    index: true
+    // ✅ FIX: removed index:true — this was the duplicate causing the warning.
+    // The compound index({ status: 1, expiresAt: 1 }) below already indexes expiresAt.
   },
-  
+
   hasReport: {
     type: Boolean,
     default: false,
-    index: true
+    // ✅ FIX: removed index:true — covered by compound index({ hasReport, status }) below
   },
-  
+
   reportId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'SafetyReport',
     default: null
   },
-  
+
   reportedAt: {
     type: Date,
     default: null
   },
-  
+
   isDeleted: {
     type: Boolean,
     default: false,
-    index: true
+    index: true   // standalone — not in any compound, keep it
   },
-  
+
   deletedAt: {
     type: Date,
     default: null
   },
-  
+
   lastMessageAt: {
     type: Date,
     default: Date.now
@@ -92,7 +93,7 @@ const randomBookingChatSchema = new mongoose.Schema({
 });
 
 // =============================================
-// INDEXES
+// INDEXES — single source of truth
 // =============================================
 randomBookingChatSchema.index({ 'participants.userId': 1 });
 randomBookingChatSchema.index({ status: 1, expiresAt: 1 });
@@ -105,20 +106,17 @@ randomBookingChatSchema.pre('save', function(next) {
   if (this.participants.length !== 2) {
     return next(new Error('Chat must have exactly 2 participants'));
   }
-  
   if (this.isNew && !this.encryptionKeyId) {
     this.encryptionKeyId = crypto.randomBytes(32).toString('hex');
   }
-  
   next();
 });
 
 // =============================================
 // INSTANCE METHODS
 // =============================================
-
 randomBookingChatSchema.methods.isParticipant = function(userId) {
-  return this.participants.some(p => 
+  return this.participants.some(p =>
     p.userId.toString() === userId.toString()
   );
 };
@@ -126,11 +124,9 @@ randomBookingChatSchema.methods.isParticipant = function(userId) {
 randomBookingChatSchema.methods.markCompleted = function() {
   this.status = 'COMPLETED';
   this.completedAt = new Date();
-  
   const endOfDay = new Date();
   endOfDay.setHours(23, 59, 59, 999);
   this.expiresAt = endOfDay;
-  
   return this.save();
 };
 
@@ -140,7 +136,6 @@ randomBookingChatSchema.methods.flagForReview = function(reportId) {
   this.reportId = reportId;
   this.reportedAt = new Date();
   this.expiresAt = new Date('2099-12-31');
-  
   return this.save();
 };
 
@@ -156,27 +151,19 @@ randomBookingChatSchema.methods.deleteChat = async function() {
   if (!this.canDelete()) {
     throw new Error('Cannot delete chat: either not expired or under review');
   }
-  
   this.isDeleted = true;
   this.deletedAt = new Date();
   await this.save();
-  
   const Message = mongoose.model('Message');
   await Message.deleteMany({ chatId: this._id });
-  
   const EncryptionKey = mongoose.model('EncryptionKey');
   await EncryptionKey.deleteOne({ keyId: this.encryptionKeyId });
-  
   return true;
 };
 
 // =============================================
 // STATIC METHODS
 // =============================================
-
-/**
- * ✅ FIXED: Create chat with proper system message
- */
 randomBookingChatSchema.statics.createForBooking = async function(booking) {
   const existing = await this.findOne({ bookingId: booking._id });
   if (existing) return existing;
@@ -185,7 +172,6 @@ randomBookingChatSchema.statics.createForBooking = async function(booking) {
   const keyId = crypto.randomBytes(32).toString('hex');
   const encryptionKey = crypto.randomBytes(32).toString('base64');
 
-  // ✅ FIXED: use startTime instead of booking.date
   const chatExpiresAt = new Date(booking.startTime.getTime() + 24 * 60 * 60 * 1000);
 
   await EncryptionKey.create({
@@ -199,10 +185,10 @@ randomBookingChatSchema.statics.createForBooking = async function(booking) {
     bookingId: booking._id,
     participants: [
       { userId: booking.initiatorId, role: 'INITIATOR' },
-      { userId: booking.acceptorId, role: 'ACCEPTER' }  // ✅ FIXED: acceptorId not acceptedUserId
+      { userId: booking.acceptorId,  role: 'ACCEPTER' }
     ],
     encryptionKeyId: keyId,
-    expiresAt: chatExpiresAt  // ✅ FIXED: use startTime-based expiry
+    expiresAt: chatExpiresAt
   });
 
   const Message = mongoose.model('Message');
@@ -217,6 +203,7 @@ randomBookingChatSchema.statics.createForBooking = async function(booking) {
 
   return chat;
 };
+
 randomBookingChatSchema.statics.findForUser = function(userId) {
   return this.find({
     'participants.userId': userId,
@@ -228,16 +215,14 @@ randomBookingChatSchema.statics.findForUser = function(userId) {
 
 randomBookingChatSchema.statics.cleanupExpired = async function() {
   const now = new Date();
-  
   const expiredChats = await this.find({
     status: { $in: ['COMPLETED', 'ACTIVE'] },
     expiresAt: { $lt: now },
     hasReport: false,
     isDeleted: false
   });
-  
+
   let deleted = 0;
-  
   for (const chat of expiredChats) {
     try {
       await chat.deleteChat();
@@ -246,7 +231,7 @@ randomBookingChatSchema.statics.cleanupExpired = async function() {
       console.error(`Failed to delete chat ${chat._id}:`, error.message);
     }
   }
-  
+
   return { deleted, total: expiredChats.length };
 };
 
