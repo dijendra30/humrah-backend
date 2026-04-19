@@ -1,5 +1,4 @@
 // models/RandomBooking.js - GPS-BASED MODEL
-
 const mongoose = require('mongoose');
 
 const randomBookingSchema = new mongoose.Schema({
@@ -8,7 +7,7 @@ const randomBookingSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     required: true,
-    index: true
+    index: true   // standalone — not in any compound, keep it
   },
 
   // Acceptor (set when matched)
@@ -16,14 +15,14 @@ const randomBookingSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     default: null,
-    index: true
+    index: true   // standalone — not in any compound, keep it
   },
 
   // Location (GPS-based)
   city: {
     type: String,
     required: true,
-    index: true
+    // ✅ FIX: index:true removed — covered by compound index({ city, status, expiresAt }) below
   },
 
   lat: {
@@ -31,7 +30,7 @@ const randomBookingSchema = new mongoose.Schema({
     required: true,
     min: -90,
     max: 90,
-    index: true
+    // ✅ FIX: index:true removed — covered by compound index({ lat, lng }) below
   },
 
   lng: {
@@ -39,7 +38,7 @@ const randomBookingSchema = new mongoose.Schema({
     required: true,
     min: -180,
     max: 180,
-    index: true
+    // ✅ FIX: index:true removed — covered by compound index({ lat, lng }) below
   },
 
   locationCategory: {
@@ -59,7 +58,7 @@ const randomBookingSchema = new mongoose.Schema({
   startTime: {
     type: Date,
     required: true,
-    index: true
+    // ✅ FIX: index:true removed — covered by compound index({ status, startTime }) below
   },
 
   endTime: {
@@ -73,7 +72,7 @@ const randomBookingSchema = new mongoose.Schema({
     enum: ['PENDING', 'MATCHED', 'CANCELLED', 'COMPLETED', 'EXPIRED'],
     default: 'PENDING',
     required: true,
-    index: true
+    // ✅ FIX: index:true removed — covered by compound indexes below
   },
 
   // Timestamps
@@ -81,38 +80,19 @@ const randomBookingSchema = new mongoose.Schema({
     type: Date,
     default: Date.now,
     required: true,
-    index: true
+    index: true   // standalone createdAt index — keep (not duplicated in any compound)
   },
 
-  matchedAt: {
-    type: Date,
-    default: null
-  },
-
-  cancelledAt: {
-    type: Date,
-    default: null
-  },
-
-  cancellationReason: {
-    type: String,
-    default: null
-  },
-
-  completedAt: {
-    type: Date,
-    default: null
-  },
-
-  expiredAt: {
-    type: Date,
-    default: null
-  },
+  matchedAt:          { type: Date, default: null },
+  cancelledAt:        { type: Date, default: null },
+  cancellationReason: { type: String, default: null },
+  completedAt:        { type: Date, default: null },
+  expiredAt:          { type: Date, default: null },
 
   expiresAt: {
     type: Date,
     required: true,
-    index: true
+    // ✅ FIX: index:true removed — covered by compound index({ city, status, expiresAt }) below
   },
 
   // Chat reference
@@ -126,7 +106,7 @@ const randomBookingSchema = new mongoose.Schema({
 });
 
 // =============================================
-// INDEXES (for GPS-based queries)
+// ✅ INDEXES — single source of truth
 // =============================================
 randomBookingSchema.index({ lat: 1, lng: 1 });
 randomBookingSchema.index({ city: 1, status: 1, expiresAt: 1 });
@@ -135,7 +115,6 @@ randomBookingSchema.index({ status: 1, startTime: 1 });
 // =============================================
 // INSTANCE METHODS
 // =============================================
-
 randomBookingSchema.methods.isExpired = function() {
   return this.expiresAt < new Date() || this.status === 'EXPIRED';
 };
@@ -156,13 +135,9 @@ randomBookingSchema.methods.complete = function() {
 // =============================================
 // STATIC METHODS
 // =============================================
-
 randomBookingSchema.statics.findNearby = async function(lat, lng, maxDistance = 15) {
-  // This is a simplified version
-  // In production, use MongoDB's $geoNear or geospatial queries
-  
   const { calculateDistance } = require('../utils/progressiveMatching');
-  
+
   const allBookings = await this.find({
     status: 'PENDING',
     expiresAt: { $gt: new Date() },
@@ -171,30 +146,20 @@ randomBookingSchema.statics.findNearby = async function(lat, lng, maxDistance = 
   .populate('initiatorId', 'firstName lastName profilePhoto isVerified')
   .lean();
 
-  const nearbyBookings = allBookings
+  return allBookings
     .map(booking => {
       const distance = calculateDistance(lat, lng, booking.lat, booking.lng);
       return { ...booking, distance };
     })
     .filter(booking => booking.distance <= maxDistance)
     .sort((a, b) => a.distance - b.distance);
-
-  return nearbyBookings;
 };
 
 randomBookingSchema.statics.cleanupExpired = async function() {
-  const result = await this.updateMany(
-    {
-      status: 'PENDING',
-      expiresAt: { $lt: new Date() }
-    },
-    {
-      status: 'EXPIRED',
-      expiredAt: new Date()
-    }
+  return this.updateMany(
+    { status: 'PENDING', expiresAt: { $lt: new Date() } },
+    { status: 'EXPIRED', expiredAt: new Date() }
   );
-
-  return result;
 };
 
 module.exports = mongoose.model('RandomBooking', randomBookingSchema);
