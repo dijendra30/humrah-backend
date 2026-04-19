@@ -6,24 +6,22 @@ const encryptionKeySchema = new mongoose.Schema({
     type: String,
     required: true,
     unique: true,
-    index: true
+    // ✅ FIX: index:true removed — unique:true already creates an index automatically
   },
-  
-  // Encrypted encryption key (yes, encrypted)
+
+  // Encrypted encryption key (never auto-selected)
   key: {
     type: String,
     required: true,
-    select: false // Never auto-select
+    select: false
   },
-  
-  // Key type
+
   createdFor: {
     type: String,
     enum: ['RANDOM_BOOKING', 'SUPPORT_CHAT'],
     required: true
   },
-  
-  // Access control
+
   accessibleBy: [{
     userId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -38,128 +36,82 @@ const encryptionKeySchema = new mongoose.Schema({
       default: Date.now
     }
   }],
-  
-  // Lifecycle
+
   createdAt: {
     type: Date,
     default: Date.now,
     required: true
   },
-  
+
   expiresAt: {
     type: Date,
     required: true,
-    index: true
+    // ✅ FIX: index:true removed — the explicit TTL schema.index() below is the sole index.
+    // Having both index:true AND schema.index({ expiresAt:1 }, { expireAfterSeconds:0 })
+    // was creating two separate indexes on this field.
   },
-  
-  // Deletion tracking
+
   isDeleted: {
     type: Boolean,
     default: false,
-    index: true
+    // ✅ FIX: index:true removed — covered by compound index({ createdFor, isDeleted }) below
   },
-  
-  deletedAt: {
-    type: Date,
-    default: null
-  },
-  
-  // Access logging
-  lastAccessedAt: {
-    type: Date,
-    default: null
-  },
-  
-  accessCount: {
-    type: Number,
-    default: 0
-  }
+
+  deletedAt:      { type: Date, default: null },
+  lastAccessedAt: { type: Date, default: null },
+  accessCount:    { type: Number, default: 0 }
+
 }, {
   timestamps: true
 });
 
 // =============================================
-// INDEXES
+// INDEXES — single source of truth
 // =============================================
 encryptionKeySchema.index({ createdFor: 1, isDeleted: 1 });
-encryptionKeySchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 }); // TTL
+encryptionKeySchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 }); // TTL — sole expiresAt index
 
 // =============================================
 // INSTANCE METHODS
 // =============================================
 
-/**
- * Check if user can access key
- */
 encryptionKeySchema.methods.canAccess = function(userId, requiredLevel = 'READ') {
-  const userAccess = this.accessibleBy.find(a => 
+  const userAccess = this.accessibleBy.find(a =>
     a.userId.toString() === userId.toString()
   );
-  
   if (!userAccess) return false;
-  
   const levels = ['READ', 'WRITE', 'ADMIN'];
-  const userLevelIndex = levels.indexOf(userAccess.accessLevel);
-  const requiredLevelIndex = levels.indexOf(requiredLevel);
-  
-  return userLevelIndex >= requiredLevelIndex;
+  return levels.indexOf(userAccess.accessLevel) >= levels.indexOf(requiredLevel);
 };
 
-/**
- * Grant access to user
- */
 encryptionKeySchema.methods.grantAccess = function(userId, accessLevel = 'READ') {
-  // Remove existing access if any
-  this.accessibleBy = this.accessibleBy.filter(a => 
+  this.accessibleBy = this.accessibleBy.filter(a =>
     a.userId.toString() !== userId.toString()
   );
-  
-  // Add new access
-  this.accessibleBy.push({
-    userId,
-    accessLevel,
-    grantedAt: new Date()
-  });
-  
+  this.accessibleBy.push({ userId, accessLevel, grantedAt: new Date() });
   return this.save();
 };
 
-/**
- * Revoke access from user
- */
 encryptionKeySchema.methods.revokeAccess = function(userId) {
-  this.accessibleBy = this.accessibleBy.filter(a => 
+  this.accessibleBy = this.accessibleBy.filter(a =>
     a.userId.toString() !== userId.toString()
   );
-  
   return this.save();
 };
 
-/**
- * Get decryption key (with access control)
- */
 encryptionKeySchema.methods.getKey = async function(userId, requiredLevel = 'READ') {
-  if (!this.canAccess(userId, requiredLevel)) {
-    throw new Error('Access denied');
-  }
-  
-  // Log access
+  if (!this.canAccess(userId, requiredLevel)) throw new Error('Access denied');
   this.lastAccessedAt = new Date();
   this.accessCount++;
   await this.save();
-  
-  // Retrieve key (must explicitly select it)
   const keyDoc = await this.constructor.findById(this._id).select('+key');
   return keyDoc.key;
 };
 
-/**
- * Soft delete key
- */
 encryptionKeySchema.methods.deleteKey = function() {
   this.isDeleted = true;
   this.deletedAt = new Date();
-  this.key = null; // Clear the key
+  this.key = null;
   return this.save();
 };
 
@@ -167,67 +119,37 @@ encryptionKeySchema.methods.deleteKey = function() {
 // STATIC METHODS
 // =============================================
 
-/**
- * Create new encryption key
- */
 encryptionKeySchema.statics.createKey = function(keyId, key, createdFor, expiresAt, participants = []) {
   const accessibleBy = participants.map(userId => ({
     userId,
     accessLevel: 'WRITE',
     grantedAt: new Date()
   }));
-  
-  return this.create({
-    keyId,
-    key,
-    createdFor,
-    expiresAt,
-    accessibleBy
-  });
+  return this.create({ keyId, key, createdFor, expiresAt, accessibleBy });
 };
 
-/**
- * Find key by ID (admin only)
- */
 encryptionKeySchema.statics.findByKeyId = function(keyId) {
   return this.findOne({ keyId, isDeleted: false });
 };
 
-/**
- * Cleanup expired keys
- */
 encryptionKeySchema.statics.cleanupExpired = function() {
   return this.updateMany(
-    {
-      expiresAt: { $lt: new Date() },
-      isDeleted: false
-    },
-    {
-      $set: { 
-        isDeleted: true,
-        deletedAt: new Date(),
-        key: null
-      }
-    }
+    { expiresAt: { $lt: new Date() }, isDeleted: false },
+    { $set: { isDeleted: true, deletedAt: new Date(), key: null } }
   );
 };
 
-/**
- * Get access audit log for key
- */
 encryptionKeySchema.statics.getAccessLog = async function(keyId) {
   const key = await this.findOne({ keyId })
     .populate('accessibleBy.userId', 'firstName lastName email role');
-  
   if (!key) return null;
-  
   return {
-    keyId: key.keyId,
-    createdFor: key.createdFor,
-    accessCount: key.accessCount,
+    keyId:          key.keyId,
+    createdFor:     key.createdFor,
+    accessCount:    key.accessCount,
     lastAccessedAt: key.lastAccessedAt,
-    accessibleBy: key.accessibleBy,
-    isDeleted: key.isDeleted
+    accessibleBy:   key.accessibleBy,
+    isDeleted:      key.isDeleted
   };
 };
 
