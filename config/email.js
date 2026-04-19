@@ -418,7 +418,9 @@ async function sendWarningEmail(email, firstName) {
     throw error;
   }
 }
-
+async function sendPasswordResetEmail(email, firstName, resetUrl) {
+  // ... (the full function is in the backend route file comments above)
+}
 // --------------------
 // EXPORTS (UNCHANGED + CORRECT)
 // --------------------
