@@ -3,6 +3,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const http = require('http');
+const path = require('path');
 const socketIo = require('socket.io');
 const jwt = require('jsonwebtoken');
 const dotenv = require('dotenv');
@@ -55,6 +56,22 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Make io available to routes
 app.set('io', io);
+
+// =============================================
+// ✅ SERVE STATIC PUBLIC FILES
+// Must come BEFORE any route registration
+// This serves: GET /reset-password.html, /logo.png etc. from ./public/
+// =============================================
+app.use(express.static(path.join(__dirname, 'public')));
+
+// =============================================
+// ✅ CLEAN URL: GET /reset-password?token=XYZ
+// Serves the HTML page at humrah.in/reset-password
+// Must come BEFORE the API routes
+// =============================================
+app.get('/reset-password', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'reset-password.html'));
+});
 
 // =============================================
 // IN-MEMORY PRESENCE & USER INFO TRACKING
@@ -330,13 +347,11 @@ io.on('connection', (socket) => {
       
       console.log(`📞 Call initiated: ${userName} (${callerId}) → ${calleeId} (audio: ${isAudioOnly})`);
       
-      // ✅ Get caller info
       const callerInfo = userInfo.get(callerId) || {
         name: userName,
         photo: socket.userPhoto
       };
       
-      // ✅ Send call to the other user with FULL caller info
       socket.to(chatId).emit('incoming-call', {
         chatId,
         callerId,
@@ -348,7 +363,6 @@ io.on('connection', (socket) => {
       
       console.log(`📞 Call sent to chat ${chatId} with caller: ${callerInfo.name}`);
       
-      // ✅ Check if user is offline → send FCM notification
       const calleePresence = userPresence.get(calleeId);
       if (!calleePresence || calleePresence.status === 'OFFLINE') {
         console.log(`📱 User offline - would send push notification`);
@@ -360,15 +374,8 @@ io.on('connection', (socket) => {
 
   socket.on('accept-call', (data) => {
     const { chatId, calleeId } = data;
-    
     console.log(`✅ Call accepted by: ${userName} (${calleeId})`);
-    
-    // ✅ Get callee info
-    const calleeInfo = userInfo.get(calleeId) || {
-      name: userName,
-      photo: socket.userPhoto
-    };
-    
+    const calleeInfo = userInfo.get(calleeId) || { name: userName, photo: socket.userPhoto };
     socket.to(chatId).emit('call-accepted', {
       calleeId,
       calleeName: calleeInfo.name,
@@ -379,9 +386,7 @@ io.on('connection', (socket) => {
 
   socket.on('reject-call', (data) => {
     const { chatId, calleeId } = data;
-    
     console.log(`❌ Call rejected by: ${userName} (${calleeId})`);
-    
     socket.to(chatId).emit('call-rejected', {
       calleeId,
       timestamp: new Date().toISOString()
@@ -390,71 +395,37 @@ io.on('connection', (socket) => {
 
   socket.on('end-call', (data) => {
     const { chatId } = data;
-    
     console.log(`📵 Call ended in chat: ${chatId} by ${userName}`);
-    
     socket.to(chatId).emit('call-ended', {
       endedBy: userId,
       timestamp: new Date().toISOString()
     });
   });
 
-  // ==================== ✅ WEBRTC SIGNALING (for peer-to-peer) ====================
+  // ==================== ✅ WEBRTC SIGNALING ====================
   socket.on('webrtc-offer', (data) => {
     const { chatId, offer } = data;
-    console.log(`📡 WebRTC offer from ${userName}`);
-    socket.to(chatId).emit('webrtc-offer', {
-      from: userId,
-      offer
-    });
+    socket.to(chatId).emit('webrtc-offer', { from: userId, offer });
   });
-
   socket.on('webrtc-answer', (data) => {
     const { chatId, answer } = data;
-    console.log(`📡 WebRTC answer from ${userName}`);
-    socket.to(chatId).emit('webrtc-answer', {
-      from: userId,
-      answer
-    });
+    socket.to(chatId).emit('webrtc-answer', { from: userId, answer });
   });
-
   socket.on('webrtc-ice-candidate', (data) => {
     const { chatId, candidate } = data;
-    socket.to(chatId).emit('webrtc-ice-candidate', {
-      from: userId,
-      candidate
-    });
+    socket.to(chatId).emit('webrtc-ice-candidate', { from: userId, candidate });
   });
   
   // ==================== DISCONNECT ====================
   socket.on('disconnect', () => {
     console.log(`❌ User disconnected: ${userName} (${socket.id})`);
-    
-    // ✅ Mark user as OFFLINE
     const user = userPresence.get(userId);
-    if (user) {
-      user.status = 'OFFLINE';
-      user.lastSeen = new Date();
-    }
-    
-    // Broadcast user offline status
-    io.emit('user-offline', {
-      userId,
-      userName,
-      lastSeen: user?.lastSeen.toISOString()
-    });
-    
-    // Remove from chat rooms
+    if (user) { user.status = 'OFFLINE'; user.lastSeen = new Date(); }
+    io.emit('user-offline', { userId, userName, lastSeen: user?.lastSeen.toISOString() });
     if (socket.chatId && chatUsers.has(socket.chatId)) {
       chatUsers.get(socket.chatId).delete(socket.id);
-      if (chatUsers.get(socket.chatId).size === 0) {
-        chatUsers.delete(socket.chatId);
-      }
-      
-      socket.to(socket.chatId).emit('user-left', {
-        userId,
-        userName
-      });
+      if (chatUsers.get(socket.chatId).size === 0) chatUsers.delete(socket.chatId);
+      socket.to(socket.chatId).emit('user-left', { userId, userName });
     }
   });
 });
@@ -466,16 +437,13 @@ function isUserOnline(userId) {
   const presence = userPresence.get(userId);
   return presence?.status === 'ONLINE';
 }
-
 function getUserLastSeen(userId) {
   const presence = userPresence.get(userId);
   return presence?.lastSeen || null;
 }
-
 function getUserInfo(userId) {
   return userInfo.get(userId) || null;
 }
-
 global.isUserOnline = isUserOnline;
 global.getUserLastSeen = getUserLastSeen;
 global.getUserInfo = getUserInfo;
@@ -487,109 +455,88 @@ const connectDB = async () => {
   try {
     await mongoose.connect(process.env.MONGODB_URI);
     console.log('✅ MongoDB Connected');
-
-    // ── Gaming session expiry cron (every 60s) ──
     startExpiryJob(io);
-
-    // ── Movie session expiry cron (every 60s) ──
     startMovieSessionExpiryJob();
-
-    // ── Auto-moderation: clean existing dirty profiles on every deploy ──
-    await runStartupCleanup();   // scans all users 5s after DB connect
-    scheduleDailyCleanup();      // daily cron at 3:00 AM IST
-
+    await runStartupCleanup();
+    scheduleDailyCleanup();
   } catch (err) {
     console.error('❌ MongoDB Connection Error:', err);
     process.exit(1);
   }
 };
 
-// ✅ Must be required BEFORE connectDB() so startMovieSessionExpiryJob is defined
 const { startMovieSessionExpiryJob } = require('./jobs/movieSessionExpiryJob');
-
 connectDB();
 
 // =============================================
-// ✅ IMPORT MIDDLEWARE
+// ✅ IMPORT MIDDLEWARE & ROUTES
 // =============================================
 const { authenticate, adminOnly } = require('./middleware/auth');
 const { enforceLegalAcceptance } = require('./middleware/enforceLegalAcceptance');
 const { runStartupCleanup, scheduleDailyCleanup } = require('./utils/autoModerationCleanup');
 const moderationRoutes = require('./routes/moderation');
 
-// =============================================
-// ✅ GAMING SESSION — IMPORTS
-// =============================================
 const gamingRoutes          = require('./routes/gamingRoutes');
 const { initSessionSocket } = require('./sockets/sessionSocket');
 const { startExpiryJob }    = require('./jobs/sessionExpiryJob');
-
-// Initialise the /gaming Socket.IO namespace for real-time session events
-// (must come BEFORE route registration, AFTER io is created)
 initSessionSocket(io);
 
-// =============================================
-// ✅ ROUTES WITH LEGAL ENFORCEMENT
-// =============================================
-const authRoutes = require('./routes/auth');
-const userRoutes = require('./routes/users');
-const legalRoutes = require('./routes/legal');
-const eventRoutes = require('./routes/events');
-const companionRoutes = require('./routes/companions');
-const bookingRoutes = require('./routes/bookings');
-const messageRoutes = require('./routes/messages');
-const postRoutes = require('./routes/posts');
-const spotlightRoutes = require('./routes/spotlight.route');
-const safetyReportRoutes = require('./routes/safetyReports');
-const profileRoutes = require('./routes/profile');
-const activityRoutes = require('./routes/activityRoutes');
-const reviewRoutes = require('./routes/reviews');
-const paymentRoutes = require('./routes/payment');
-const foodRoutes = require('./routes/foodRoutes');
-const settingsRoutes = require('./routes/settings');
+const authRoutes            = require('./routes/auth');
+const userRoutes            = require('./routes/users');
+const legalRoutes           = require('./routes/legal');
+const eventRoutes           = require('./routes/events');
+const companionRoutes       = require('./routes/companions');
+const bookingRoutes         = require('./routes/bookings');
+const messageRoutes         = require('./routes/messages');
+const postRoutes            = require('./routes/posts');
+const spotlightRoutes       = require('./routes/spotlight.route');
+const safetyReportRoutes    = require('./routes/safetyReports');
+const profileRoutes         = require('./routes/profile');
+const activityRoutes        = require('./routes/activityRoutes');
+const reviewRoutes          = require('./routes/reviews');
+const paymentRoutes         = require('./routes/payment');
+const foodRoutes            = require('./routes/foodRoutes');
+const settingsRoutes        = require('./routes/settings');
 const profileAssistantRoutes = require('./routes/profileAssistant');
+const movieSessionRoutes    = require('./routes/movieSessionRoutes');
+
+// ✅ PASSWORD RESET — public, no auth needed
 const passwordResetRoutes = require('./routes/passwordReset');
-// ✅ MOVIE HANGOUT ROUTES
-const movieSessionRoutes = require('./routes/movieSessionRoutes');
-// startMovieSessionExpiryJob is required above connectDB() — do not require again here
-// ✅ PUBLIC ROUTES (No legal enforcement)
+
+// =============================================
+// ✅ PUBLIC ROUTES (no auth, no legal check)
+// =============================================
 app.use('/api/auth', authRoutes);
+app.use('/api/auth', passwordResetRoutes);   // POST /api/auth/forgot-password + reset-password
 app.use('/api/legal', legalRoutes);
 
-// ✅ PROTECTED ROUTES (With legal enforcement)
-// Note: enforceLegalAcceptance is applied AFTER authenticate middleware
-app.use('/api/users', authenticate, enforceLegalAcceptance, userRoutes);
-app.use('/api/events', authenticate, enforceLegalAcceptance, eventRoutes);
-app.use('/api/companions', authenticate, enforceLegalAcceptance, companionRoutes);
-app.use('/api/bookings', authenticate, enforceLegalAcceptance, bookingRoutes);
-app.use('/api/messages', authenticate, enforceLegalAcceptance, messageRoutes);
-app.use('/api/posts', authenticate, enforceLegalAcceptance, postRoutes);
-app.use('/api/spotlight', authenticate, enforceLegalAcceptance, spotlightRoutes);
-app.use('/api/safety', authenticate, enforceLegalAcceptance, safetyReportRoutes);
-app.use('/api/profile', authenticate, enforceLegalAcceptance, profileRoutes);
-app.use('/api/reviews', authenticate, enforceLegalAcceptance, reviewRoutes);
-app.use('/api/payment', authenticate, enforceLegalAcceptance, paymentRoutes);
+// =============================================
+// ✅ PROTECTED ROUTES
+// =============================================
+app.use('/api/users',          authenticate, enforceLegalAcceptance, userRoutes);
+app.use('/api/events',         authenticate, enforceLegalAcceptance, eventRoutes);
+app.use('/api/companions',     authenticate, enforceLegalAcceptance, companionRoutes);
+app.use('/api/bookings',       authenticate, enforceLegalAcceptance, bookingRoutes);
+app.use('/api/messages',       authenticate, enforceLegalAcceptance, messageRoutes);
+app.use('/api/posts',          authenticate, enforceLegalAcceptance, postRoutes);
+app.use('/api/spotlight',      authenticate, enforceLegalAcceptance, spotlightRoutes);
+app.use('/api/safety',         authenticate, enforceLegalAcceptance, safetyReportRoutes);
+app.use('/api/profile',        authenticate, enforceLegalAcceptance, profileRoutes);
+app.use('/api/reviews',        authenticate, enforceLegalAcceptance, reviewRoutes);
+app.use('/api/payment',        authenticate, enforceLegalAcceptance, paymentRoutes);
 app.use('/api/random-booking', authenticate, enforceLegalAcceptance, require('./routes/randomBooking'));
-app.use('/api/verification', authenticate, enforceLegalAcceptance, require('./routes/verification'));
-app.use('/api/settings', authenticate, enforceLegalAcceptance, settingsRoutes);
+app.use('/api/verification',   authenticate, enforceLegalAcceptance, require('./routes/verification'));
+app.use('/api/settings',       authenticate, enforceLegalAcceptance, settingsRoutes);
 app.use('/api/profile-assistant', profileAssistantRoutes);
-app.use('/api/auth', passwordResetRoutes);
-app.use('/', passwordResetRoutes); // for GET /reset-password web page
-app.use('/api', express.static('public')); // serve public dir
-// FIX: removed duplicate unauthenticated app.use('/api/settings', ...) that was here
-// ✅ ADMIN ROUTES (No legal enforcement needed for admins performing admin duties)
-app.use('/api/admin', authenticate, require('./routes/admin'));
-app.use('/api/moderation', authenticate, adminOnly, moderationRoutes);
-// ✅ CALL ROUTES (Legal enforcement applied)
-app.use('/api/agora', authenticate, enforceLegalAcceptance, require('./routes/agora'));
-app.use('/api/voice-call', authenticate, enforceLegalAcceptance, require('./routes/voice-call'));
-app.use('/api/activity', authenticate, enforceLegalAcceptance, activityRoutes);
-// ✅ GAMING SESSION ROUTES (auth + legal enforcement)
-app.use('/api/session', authenticate, enforceLegalAcceptance, gamingRoutes);
-app.use('/api/food', authenticate, enforceLegalAcceptance, foodRoutes);
-// ✅ MOVIE HANGOUT — /api/movies, /api/theatres, /api/movie-session/*
-app.use('/api', authenticate, enforceLegalAcceptance, movieSessionRoutes);
-// Cron jobs
+app.use('/api/admin',          authenticate, require('./routes/admin'));
+app.use('/api/moderation',     authenticate, adminOnly, moderationRoutes);
+app.use('/api/agora',          authenticate, enforceLegalAcceptance, require('./routes/agora'));
+app.use('/api/voice-call',     authenticate, enforceLegalAcceptance, require('./routes/voice-call'));
+app.use('/api/activity',       authenticate, enforceLegalAcceptance, activityRoutes);
+app.use('/api/session',        authenticate, enforceLegalAcceptance, gamingRoutes);
+app.use('/api/food',           authenticate, enforceLegalAcceptance, foodRoutes);
+app.use('/api',                authenticate, enforceLegalAcceptance, movieSessionRoutes);
+
 require('./cronJobs');
 
 // Health Check
@@ -618,24 +565,16 @@ const PORT = process.env.PORT || 3000;
 
 server.listen(PORT, () => {
   console.log(`🚀 Humrah Server running on port ${PORT}`);
-  console.log(`✅ Socket.IO enabled with:`);
-  console.log(`   - Voice/Video calls with user info`);
-  console.log(`   - Delivery receipts (SENT → DELIVERED → READ)`);
-  console.log(`   - Typing indicators`);
-  console.log(`   - Presence tracking (online/offline)`);
-  console.log(`   - JWT authentication`);
+  console.log(`✅ Socket.IO enabled`);
   console.log(`✅ Legal compliance enforcement active`);
-  console.log(`✅ Auto-moderation system active (startup scan + 3AM IST daily cron)`);
-  console.log(`✅ Gaming Sessions active (Socket.IO /gaming namespace + 60s expiry job)`);
+  console.log(`✅ Auto-moderation system active`);
+  console.log(`✅ Gaming Sessions active`);
+  console.log(`✅ Password reset: GET /reset-password | POST /api/auth/forgot-password`);
 });
 
-// Graceful shutdown
 const gracefulShutdown = async (signal) => {
   console.log(`\n${signal} signal received: closing HTTP server`);
-  
   server.close(async () => {
-    console.log('HTTP server closed');
-    
     try {
       await mongoose.connection.close();
       console.log('MongoDB connection closed');
@@ -645,24 +584,12 @@ const gracefulShutdown = async (signal) => {
       process.exit(1);
     }
   });
-  
-  setTimeout(() => {
-    console.error('Could not close connections in time, forcefully shutting down');
-    process.exit(1);
-  }, 10000);
+  setTimeout(() => { process.exit(1); }, 10000);
 };
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-
-process.on('uncaughtException', (err) => {
-  console.error('Uncaught Exception:', err);
-  gracefulShutdown('UNCAUGHT_EXCEPTION');
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  gracefulShutdown('UNHANDLED_REJECTION');
-});
+process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
+process.on('uncaughtException',  (err) => { console.error('Uncaught Exception:', err); gracefulShutdown('UNCAUGHT_EXCEPTION'); });
+process.on('unhandledRejection', (reason) => { console.error('Unhandled Rejection:', reason); gracefulShutdown('UNHANDLED_REJECTION'); });
 
 module.exports = { app, server, io };
