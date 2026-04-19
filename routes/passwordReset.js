@@ -73,7 +73,7 @@ router.post('/forgot-password', async (req, res) => {
     });
 
     // Build reset URL (web page served by the backend)
-    const resetUrl = `${process.env.APP_BASE_URL || 'https://humrah.in'}/reset-password?token=${resetToken}`;
+    const resetUrl = `${process.env.APP_BASE_URL || 'https://humrah.in'}/public/reset-password?token=${resetToken}`;
 
     // Send email
     await sendPasswordResetEmail(normalizedEmail, user.firstName, resetUrl);
