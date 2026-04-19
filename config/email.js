@@ -418,14 +418,145 @@ async function sendWarningEmail(email, firstName) {
     throw error;
   }
 }
-async function sendPasswordResetEmail(email, firstName, resetUrl) {
-  // ... (the full function is in the backend route file comments above)
-}
+
 // --------------------
-// EXPORTS (UNCHANGED + CORRECT)
+// SEND PASSWORD RESET EMAIL
+// Called by routes/passwordReset.js
+// --------------------
+async function sendPasswordResetEmail(email, firstName, resetUrl) {
+  try {
+    console.log("📨 Sending password reset email to:", email);
+
+    const htmlContent = `
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: #0f0c29;
+      padding: 20px;
+      margin: 0;
+    }
+    .container {
+      max-width: 580px;
+      margin: 0 auto;
+      background: #1a1a2e;
+      padding: 44px 40px;
+      border-radius: 24px;
+      border: 1px solid rgba(102,126,234,.25);
+    }
+    .logo {
+      font-size: 22px;
+      font-weight: 800;
+      color: #fff;
+      margin-bottom: 32px;
+    }
+    .logo span { color: #667eea; }
+    h1 {
+      font-size: 26px;
+      font-weight: 800;
+      color: #fff;
+      margin: 0 0 10px;
+      line-height: 1.2;
+    }
+    .sub {
+      color: rgba(255,255,255,.55);
+      font-size: 15px;
+      line-height: 1.6;
+      margin-bottom: 32px;
+    }
+    .btn-wrap { text-align: center; margin: 32px 0; }
+    .btn {
+      display: inline-block;
+      background: linear-gradient(135deg, #667eea, #764ba2);
+      color: #fff;
+      padding: 16px 40px;
+      border-radius: 14px;
+      text-decoration: none;
+      font-weight: 700;
+      font-size: 16px;
+      letter-spacing: .01em;
+      box-shadow: 0 8px 32px rgba(102,126,234,.45);
+    }
+    .url-box {
+      background: rgba(255,255,255,.05);
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 10px;
+      padding: 14px 16px;
+      word-break: break-all;
+      font-size: 12px;
+      color: rgba(255,255,255,.45);
+      margin: 20px 0;
+    }
+    .notice {
+      background: rgba(255,193,7,.08);
+      border-left: 3px solid #ffc107;
+      padding: 14px 18px;
+      border-radius: 0 10px 10px 0;
+      font-size: 13px;
+      color: rgba(255,255,255,.6);
+      margin: 24px 0;
+      line-height: 1.6;
+    }
+    .footer {
+      border-top: 1px solid rgba(255,255,255,.08);
+      padding-top: 24px;
+      margin-top: 32px;
+      text-align: center;
+      color: rgba(255,255,255,.3);
+      font-size: 12px;
+      line-height: 1.8;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="logo">Hum<span>rah</span> 🌟</div>
+    <h1>Reset your password</h1>
+    <p class="sub">Hey ${firstName || 'there'} 👋 — we received a request to reset your Humrah password. Click the button below to create a new one.</p>
+    <div class="btn-wrap">
+      <a href="${resetUrl}" class="btn">Reset my password →</a>
+    </div>
+    <p style="color:rgba(255,255,255,.4);font-size:13px;text-align:center">Or copy and paste this link in your browser:</p>
+    <div class="url-box">${resetUrl}</div>
+    <div class="notice">
+      ⏰ <strong>This link expires in 15 minutes.</strong><br>
+      If you didn't request a password reset, you can safely ignore this email — your account remains secure.
+    </div>
+    <div class="footer">
+      <p>© ${new Date().getFullYear()} Humrah. All rights reserved.</p>
+      <p>This is an automated message — please do not reply.</p>
+    </div>
+  </div>
+</body>
+</html>`;
+
+    const sendSmtpEmail = {
+      sender: {
+        email: process.env.BREVO_SENDER_EMAIL,
+        name: process.env.BREVO_SENDER_NAME || "Humrah",
+      },
+      to: [{ email }],
+      subject: "Reset your Humrah password 🔑",
+      htmlContent,
+    };
+
+    const result = await apiInstance.sendTransacEmail(sendSmtpEmail);
+    console.log("✅ Password reset email sent. messageId:", result.messageId);
+    return { success: true, messageId: result.messageId };
+  } catch (error) {
+    console.error("❌ Failed to send password reset email:", error?.response?.body || error);
+    throw error;
+  }
+}
+
+// --------------------
+// EXPORTS
 // --------------------
 module.exports = {
   sendOTPEmail,
   sendWelcomeEmail,
-  sendWarningEmail,   // ✅ new — used by moderation_controller.js
+  sendWarningEmail,
+  sendPasswordResetEmail,   // ✅ used by routes/passwordReset.js
 };
