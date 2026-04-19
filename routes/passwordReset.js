@@ -66,7 +66,7 @@ router.post('/forgot-password', async (req, res) => {
 
     // ✅ CORRECT URL — clean path, no /public/ prefix
     const baseUrl  = (process.env.APP_BASE_URL || 'https://humrah.in').replace(/\/$/, '');
-    const resetUrl = `${baseUrl}/public/reset-password?token=${resetToken}`;
+    const resetUrl = `${baseUrl}/reset-password?token=${resetToken}`;
 
     await sendPasswordResetEmail(normalizedEmail, user.firstName, resetUrl);
     console.log(`✅ Password reset email sent to: ${normalizedEmail}`);
