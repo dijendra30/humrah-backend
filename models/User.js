@@ -82,6 +82,25 @@ const userSchema = new mongoose.Schema({
     minlength: [6, 'Password must be at least 6 characters']
   },
 
+  // =============================================
+  // ✅ PASSWORD RESET SECURITY FIELDS
+  // =============================================
+  lastPasswordResetAt: {
+    type: Date,
+    default: null,
+    select: false
+  },
+  resetPasswordCount: {
+    type: Number,
+    default: 0,
+    select: false
+  },
+  previousPasswords: {
+    type: [String],
+    default: [],
+    select: false
+  },
+
   acceptedTermsVersion: {
     type: String,
     default: null
