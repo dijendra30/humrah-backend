@@ -6,6 +6,7 @@
 const express  = require('express');
 const router   = express.Router();
 const crypto   = require('crypto');
+const bcrypt   = require('bcryptjs');
 const User     = require('../models/User');
 const { sendPasswordResetEmail } = require('../config/email');
 
@@ -86,7 +87,6 @@ router.post('/forgot-password', async (req, res) => {
 // =============================================
 router.post('/reset-password', async (req, res) => {
   // Explicit CORS headers for this endpoint
-  // (belt-and-suspenders in case the global cors() middleware misses OPTIONS preflight)
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Content-Type, Accept');
@@ -100,9 +100,9 @@ router.post('/reset-password', async (req, res) => {
 
     console.log(`🔑 Reset attempt — token prefix: ${token.substring(0, 8)}…`);
 
+    // ── 1. Validate token ────────────────────────────────────────────────────
     const tokenData = resetTokenStore.get(token);
     console.log(`🔑 Token found in store: ${!!tokenData}`);
-    console.log(`🔑 Store size: ${resetTokenStore.size}`);
 
     if (!tokenData) {
       return res.status(400).json({
@@ -121,7 +121,7 @@ router.post('/reset-password', async (req, res) => {
       });
     }
 
-    // Password strength validation
+    // ── 2. Password strength validation ─────────────────────────────────────
     try {
       const { isStrongPassword } = require('../utils/passwordValidator');
       const check = isStrongPassword(newPassword);
@@ -134,17 +134,61 @@ router.post('/reset-password', async (req, res) => {
       }
     }
 
-    const user = await User.findById(tokenData.userId).select('+password');
+    // ── 3. Load user (include sensitive reset fields) ────────────────────────
+    const user = await User.findById(tokenData.userId)
+      .select('+password +lastPasswordResetAt +resetPasswordCount +previousPasswords');
+
     if (!user) {
       resetTokenStore.delete(token);
       return res.status(404).json({ success: false, message: 'Account not found.' });
     }
 
-    user.password = newPassword;
+    // ── 4. Enforce 30-day reset limit ────────────────────────────────────────
+    if (user.lastPasswordResetAt) {
+      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      if (user.lastPasswordResetAt > thirtyDaysAgo) {
+        resetTokenStore.delete(token);
+        console.log(`⛔ Password reset limit exceeded for: ${user.email}`);
+        return res.status(429).json({
+          success: false,
+          message: 'You can only reset your password once every 30 days. If you need urgent help, contact support@humrah.in',
+          code: 'RESET_LIMIT_EXCEEDED'
+        });
+      }
+    }
+
+    // ── 5. Check password reuse (last 5 passwords) ───────────────────────────
+    if (user.previousPasswords && user.previousPasswords.length > 0) {
+      for (const oldHash of user.previousPasswords) {
+        const isReused = await bcrypt.compare(newPassword, oldHash);
+        if (isReused) {
+          resetTokenStore.delete(token);
+          console.log(`⛔ Password reuse attempt for: ${user.email}`);
+          return res.status(400).json({
+            success: false,
+            message: 'This password was used recently. Please choose a different one.',
+            code: 'PASSWORD_REUSED'
+          });
+        }
+      }
+    }
+
+    // ── 6. Save old password hash to history (keep last 5) ──────────────────
+    if (user.password) {
+      user.previousPasswords = [user.password, ...(user.previousPasswords || [])].slice(0, 5);
+    }
+
+    // ── 7. Set new password + update tracking fields ─────────────────────────
+    // NOTE: user.save() triggers the bcrypt pre-save hook automatically
+    user.password            = newPassword;
+    user.lastPasswordResetAt = new Date();
+    user.resetPasswordCount  = (user.resetPasswordCount || 0) + 1;
+
     await user.save();
 
+    // ── 8. Invalidate token ──────────────────────────────────────────────────
     resetTokenStore.delete(token);
-    console.log(`✅ Password reset successful for: ${user.email}`);
+    console.log(`✅ Password reset successful for: ${user.email} (reset #${user.resetPasswordCount})`);
 
     res.json({
       success: true,
