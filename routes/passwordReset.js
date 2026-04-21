@@ -1,8 +1,17 @@
 // routes/passwordReset.js
-// POST /api/auth/forgot-password  — send reset email
-// POST /api/auth/reset-password   — set new password with full security checks
-// Web page: GET /reset-password   → served by server.js via express.static
-
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/auth/forgot-password   — generate & email a one-time reset token
+// POST /api/auth/reset-password    — consume token, enforce limits, update pw
+// GET  /api/auth/reset-password-health — liveness check (remove in prod)
+//
+// Security model
+//   • Tokens: 32-byte crypto.randomBytes hex, stored in-memory Map, TTL = 15 min
+//   • Token is ONE-TIME-USE (deleted on every exit path, success or failure)
+//   • 30-day reset limit per user (checked against lastPasswordResetAt)
+//   • Last-5-password reuse prevention (bcrypt.compare against previousPasswords)
+//   • Never returns HTML; never leaks internal error details
+//   • CORS headers belt-and-suspenders (global cors() already covers most cases)
+// ─────────────────────────────────────────────────────────────────────────────
 'use strict';
 
 const express = require('express');
@@ -14,38 +23,33 @@ const { sendPasswordResetEmail } = require('../config/email');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // IN-MEMORY TOKEN STORE
-// Structure: token → { userId, email, issuedAt, expiresAt }
-// Tokens expire after TOKEN_TTL_MS (15 minutes by default).
+// token (hex string) → { userId, email, issuedAt, expiresAt }
+// NOTE: On Render.com free-tier, every deploy wipes this map.
+//       Users must request a FRESH link after each deploy.
 // ─────────────────────────────────────────────────────────────────────────────
 const resetTokenStore = new Map();
 const TOKEN_TTL_MS    = 15 * 60 * 1000; // 15 minutes
 
-// Prune expired tokens every 30 minutes to keep memory clean
+// Prune stale tokens every 30 minutes (keeps memory clean on long-running servers)
 setInterval(() => {
   const now = Date.now();
   for (const [tok, data] of resetTokenStore) {
     if (data.expiresAt < now) resetTokenStore.delete(tok);
   }
-}, 30 * 60 * 1000);
+}, 30 * 60 * 1000).unref();
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Always respond with JSON — never expose raw HTML errors.
- * All error responses follow: { success: false, message, code? }
- */
-function jsonError(res, status, message, code) {
-  const body = { success: false, message };
-  if (code) body.code = code;
-  return res.status(status).json(body);
+/** Always return JSON — never let Express send an HTML error page */
+function jsonErr(res, status, message, extra = {}) {
+  return res.status(status).json({ success: false, message, ...extra });
 }
 
-/**
- * CORS headers applied to every response on this router
- * (belt-and-suspenders alongside the global cors() middleware).
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// CORS — belt-and-suspenders for Render's reverse proxy
+// ─────────────────────────────────────────────────────────────────────────────
 router.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin',  '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -53,17 +57,21 @@ router.use((req, res, next) => {
   next();
 });
 
-// Handle OPTIONS preflight for the reset-password endpoint
-router.options('/reset-password', (_req, res) => res.sendStatus(204));
+router.options('/reset-password',        (_req, res) => res.sendStatus(204));
+router.options('/forgot-password',       (_req, res) => res.sendStatus(204));
+router.options('/reset-password-health', (_req, res) => res.sendStatus(204));
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DEBUG HEALTH CHECK (remove or protect after confirming deployment works)
+// HEALTH CHECK
+// GET /api/auth/reset-password-health
+// Visit this in the browser to confirm routes are live on Render.
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/reset-password-health', (_req, res) => {
   res.json({
-    success:    true,
-    message:    'Password reset routes are reachable ✅',
+    success:      true,
+    message:      'Password reset routes are reachable ✅',
     activeTokens: resetTokenStore.size,
+    timestamp:    new Date().toISOString(),
   });
 });
 
@@ -76,53 +84,60 @@ router.post('/forgot-password', async (req, res) => {
     const { email } = req.body;
 
     if (!email || typeof email !== 'string') {
-      return jsonError(res, 400, 'Email is required.');
+      return jsonErr(res, 400, 'Email is required.');
     }
 
     const normalizedEmail = email.toLowerCase().trim();
 
-    // ── Rate-limit: one request per email per 2 minutes ──────────────────────
+    // Rate-limit: one token issued per email per 2 minutes
     for (const [, data] of resetTokenStore) {
       if (
         data.email === normalizedEmail &&
         data.issuedAt > Date.now() - 2 * 60 * 1000
       ) {
-        return jsonError(
+        return jsonErr(
           res, 429,
           'A reset link was recently sent. Please wait a couple of minutes before trying again.'
         );
       }
     }
 
-    const user = await User.findOne({ email: normalizedEmail }).select('_id firstName email');
+    // Lookup — same response either way (prevents email enumeration)
+    const user = await User.findOne({ email: normalizedEmail })
+      .select('_id firstName email');
 
-    // Always return the same message — prevents email enumeration attacks
     if (!user) {
-      await new Promise(r => setTimeout(r, 400));
-      return res.json({ success: true, message: 'If an account exists, a reset link has been sent.' });
+      await new Promise(r => setTimeout(r, 400)); // timing-safe delay
+      return res.json({
+        success: true,
+        message: 'If an account exists for that email, a reset link has been sent.',
+      });
     }
 
+    // Generate token
     const resetToken = crypto.randomBytes(32).toString('hex');
-    const expiresAt  = Date.now() + TOKEN_TTL_MS;
-
     resetTokenStore.set(resetToken, {
-      userId:   user._id.toString(),
-      email:    normalizedEmail,
-      issuedAt: Date.now(),
-      expiresAt,
+      userId:    user._id.toString(),
+      email:     normalizedEmail,
+      issuedAt:  Date.now(),
+      expiresAt: Date.now() + TOKEN_TTL_MS,
     });
 
+    // Build clean URL → humrah.in/reset-password?token=XYZ
     const baseUrl  = (process.env.APP_BASE_URL || 'https://humrah.in').replace(/\/$/, '');
     const resetUrl = `${baseUrl}/reset-password?token=${resetToken}`;
 
     await sendPasswordResetEmail(normalizedEmail, user.firstName, resetUrl);
-    console.log(`✅ Password reset email sent → ${normalizedEmail}`);
+    console.log(`✅ Password reset email dispatched → ${normalizedEmail}`);
 
-    return res.json({ success: true, message: 'If an account exists, a reset link has been sent.' });
+    return res.json({
+      success: true,
+      message: 'If an account exists for that email, a reset link has been sent.',
+    });
 
   } catch (err) {
     console.error('❌ forgot-password error:', err);
-    return jsonError(res, 500, 'Server error. Please try again later.');
+    return jsonErr(res, 500, 'Server error. Please try again later.');
   }
 });
 
@@ -130,94 +145,117 @@ router.post('/forgot-password', async (req, res) => {
 // POST /api/auth/reset-password
 // Body: { token: string, newPassword: string }
 //
-// Security checks (in order):
-//   1. Presence validation — 400 if token or newPassword missing
-//   2. Token lookup        — 400 INVALID_TOKEN if not in store
-//   3. Token expiry        — 400 TOKEN_EXPIRED  if past 15 min
-//   4. Password strength   — 400 if weak
-//   5. Load user (with sensitive fields)
-//   6. 30-day reset limit  — 429 RESET_LIMIT_EXCEEDED
-//   7. Password reuse      — 400 PASSWORD_REUSED (checks last 5 hashes)
-//   8. Persist: rotate previousPasswords, hash & save new password
-//   9. Invalidate token
+// Full security pipeline:
+//   1.  Presence check (400 if missing)
+//   2.  Token lookup in resetTokenStore (400 INVALID_TOKEN if not found)
+//   3.  Token expiry check (400 TOKEN_EXPIRED)
+//   4.  Password strength validation (400)
+//   5.  Load user with sensitive fields (+password, +lastPasswordResetAt, etc.)
+//   6.  30-day reset cooldown (429 RESET_LIMIT_EXCEEDED)
+//   7.  Password reuse check against last 5 hashes (400 PASSWORD_REUSED)
+//   8.  Rotate previousPasswords, assign new plaintext, save (pre-save hook bcrypts)
+//   9.  Update lastPasswordResetAt + resetPasswordCount
+//  10.  Delete token (one-time use)
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/reset-password', async (req, res) => {
+  let tokenConsumed = false;
+
   try {
     const { token, newPassword } = req.body;
 
-    // ── 1. Presence validation ────────────────────────────────────────────────
+    // ── 1. Presence ────────────────────────────────────────────────────────
     if (!token || !newPassword) {
-      return jsonError(res, 400, 'Token and new password are required.');
+      return jsonErr(res, 400, 'Token and new password are required.');
     }
 
-    console.log(`🔑 Reset attempt — token prefix: ${String(token).substring(0, 8)}…`);
+    console.log(`🔑 Reset attempt — token[0..8]: ${String(token).substring(0, 8)}…`);
 
-    // ── 2. Token lookup ───────────────────────────────────────────────────────
+    // ── 2. Token lookup ────────────────────────────────────────────────────
     const tokenData = resetTokenStore.get(token);
     if (!tokenData) {
-      return jsonError(
-        res, 400,
+      return jsonErr(res, 400,
         'Invalid or expired reset link. Please request a new one from the Humrah app.',
-        'INVALID_TOKEN'
+        { code: 'INVALID_TOKEN' }
       );
     }
 
-    // ── 3. Token expiry ───────────────────────────────────────────────────────
+    // ── 3. Token expiry ────────────────────────────────────────────────────
     if (Date.now() > tokenData.expiresAt) {
       resetTokenStore.delete(token);
-      return jsonError(
-        res, 400,
+      tokenConsumed = true;
+      return jsonErr(res, 400,
         'This reset link has expired. Please request a new one from the Humrah app.',
-        'TOKEN_EXPIRED'
+        { code: 'TOKEN_EXPIRED' }
       );
     }
 
-    // ── 4. Password strength validation ──────────────────────────────────────
+    // ── 4. Password strength ───────────────────────────────────────────────
+    if (typeof newPassword !== 'string' || newPassword.length < 8) {
+      return jsonErr(res, 400, 'Password must be at least 8 characters.');
+    }
+    // Try the project-level validator if it exists; fall back gracefully
     try {
       const { isStrongPassword } = require('../utils/passwordValidator');
       const check = isStrongPassword(newPassword);
       if (!check.valid) {
-        return jsonError(res, 400, check.message);
+        return jsonErr(res, 400, check.message);
       }
-    } catch (_importErr) {
-      // Fallback if validator module is unavailable
-      if (typeof newPassword !== 'string' || newPassword.length < 8) {
-        return jsonError(res, 400, 'Password must be at least 8 characters.');
-      }
+    } catch (_) {
+      // passwordValidator module not available — basic check already done above
     }
 
-    // ── 5. Load user — include all security-sensitive fields ──────────────────
+    // ── 5. Load user (need sensitive fields) ──────────────────────────────
     const user = await User.findById(tokenData.userId)
       .select('+password +lastPasswordResetAt +resetPasswordCount +previousPasswords');
 
     if (!user) {
       resetTokenStore.delete(token);
-      return jsonError(res, 404, 'Account not found. Please contact support@humrah.in');
+      tokenConsumed = true;
+      return jsonErr(res, 404,
+        'Account not found. Please contact support@humrah.in'
+      );
     }
 
-    // ── 6. Enforce 30-day reset limit ─────────────────────────────────────────
+    // ── 6. 30-day reset cooldown ───────────────────────────────────────────
     if (user.lastPasswordResetAt) {
-      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-      if (user.lastPasswordResetAt > thirtyDaysAgo) {
+      const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+      const daysSinceLast  = Date.now() - new Date(user.lastPasswordResetAt).getTime();
+
+      if (daysSinceLast < THIRTY_DAYS_MS) {
         resetTokenStore.delete(token);
-        console.warn(`⛔ Reset limit hit for: ${user.email}`);
+        tokenConsumed = true;
+
+        const nextAllowed = new Date(
+          new Date(user.lastPasswordResetAt).getTime() + THIRTY_DAYS_MS
+        ).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' });
+
+        console.warn(`⛔ Reset cooldown hit: ${user.email} (next allowed: ${nextAllowed})`);
+
         return res.status(429).json({
-          success: false,
-          message:  'Password can only be reset once every 30 days.',
+          success:  false,
+          message:  'Password can only be reset once every 30 days',
+          nextAllowedDate: nextAllowed,
           support:  'support@humrah.in',
           code:     'RESET_LIMIT_EXCEEDED',
         });
       }
     }
 
-    // ── 7. Prevent password reuse (check against last 5 hashes) ──────────────
+    // ── 7. Password reuse check (last 5 hashes) ────────────────────────────
     const prevHashes = Array.isArray(user.previousPasswords) ? user.previousPasswords : [];
+
     for (const oldHash of prevHashes) {
-      let isReused = false;
-      try { isReused = await bcrypt.compare(newPassword, oldHash); } catch (_) { /* skip malformed hash */ }
-      if (isReused) {
+      let reused = false;
+      try {
+        reused = await bcrypt.compare(newPassword, oldHash);
+      } catch (_) {
+        // Malformed hash in DB — skip without crashing
+      }
+      if (reused) {
         resetTokenStore.delete(token);
-        console.warn(`⛔ Password reuse attempt for: ${user.email}`);
+        tokenConsumed = true;
+
+        console.warn(`⛔ Password reuse attempt: ${user.email}`);
         return res.status(400).json({
           success: false,
           message: 'You have already used this password. Try a new one.',
@@ -226,23 +264,24 @@ router.post('/reset-password', async (req, res) => {
       }
     }
 
-    // ── 8. Rotate previousPasswords & save ────────────────────────────────────
-    // Push the CURRENT (old) hashed password into history first,
-    // then cap the array at 5 entries so we only keep the last 5.
+    // ── 8. Rotate previousPasswords ────────────────────────────────────────
+    // Save the CURRENT (old) hashed password into history, keep last 5
     if (user.password) {
       user.previousPasswords = [user.password, ...prevHashes].slice(0, 5);
     }
 
-    // Assign plain text — the bcrypt pre-save hook hashes it automatically.
+    // Assign plaintext — bcrypt pre-save hook in User.js hashes it automatically
     user.password            = newPassword;
     user.lastPasswordResetAt = new Date();
     user.resetPasswordCount  = (user.resetPasswordCount || 0) + 1;
 
     await user.save();
 
-    // ── 9. Invalidate the token (one-time use) ────────────────────────────────
+    // ── 9. Invalidate token (strict one-time use) ──────────────────────────
     resetTokenStore.delete(token);
-    console.log(`✅ Password reset success for: ${user.email} (reset #${user.resetPasswordCount})`);
+    tokenConsumed = true;
+
+    console.log(`✅ Password reset success: ${user.email} (reset #${user.resetPasswordCount})`);
 
     return res.json({
       success: true,
@@ -250,9 +289,12 @@ router.post('/reset-password', async (req, res) => {
     });
 
   } catch (err) {
+    // Ensure token is always consumed on unexpected errors too
+    if (!tokenConsumed && req.body?.token) {
+      resetTokenStore.delete(req.body.token);
+    }
     console.error('❌ reset-password error:', err);
-    // Never leak internal error details to the client
-    return jsonError(res, 500, 'Server error. Please try again later.');
+    return jsonErr(res, 500, 'Server error. Please try again later.');
   }
 });
 
