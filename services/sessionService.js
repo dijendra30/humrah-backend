@@ -3,30 +3,33 @@
  * ─────────────────────────────────────────────────────────────
  * All business logic for Gaming Sessions lives here.
  * Controllers call these functions; they never touch req/res.
+ *
+ * FIX: All snake_case field references (creator_id, game_name,
+ * max_players, players_joined, players_list, start_time,
+ * expires_at, created_at, dismissed_by) updated to camelCase
+ * to match the GamingSession model (creatorId, gameType,
+ * playersNeeded, playersJoined, startTime, cardExpiresAt,
+ * createdAt, dismissedBy).
  */
 
 const GamingSession = require("../models/GamingSession");
 const {
   isWithinThreeHours,
-  calculateExpiryTime,
-  isExpired,
   isWithinSpamWindow,
   nextAllowedCreateTime,
 } = require("../utils/timeUtils");
+
+const THREE_HOURS_MS = 3 * 60 * 60 * 1000;
+const TWO_HOURS_MS   = 2 * 60 * 60 * 1000;
 
 // ─────────────────────────────────────────────────────────────
 //  VALIDATION HELPERS
 // ─────────────────────────────────────────────────────────────
 
-/**
- * Throws if start_time is not within the allowed 3-hour window.
- */
 function validateSessionTime(startTime) {
-  if (!startTime) throw Object.assign(new Error("start_time is required"), { status: 400 });
-
+  if (!startTime) throw Object.assign(new Error("startTime is required"), { status: 400 });
   const parsed = new Date(startTime);
-  if (isNaN(parsed.getTime())) throw Object.assign(new Error("start_time is not a valid date"), { status: 400 });
-
+  if (isNaN(parsed.getTime())) throw Object.assign(new Error("startTime is not a valid date"), { status: 400 });
   if (!isWithinThreeHours(parsed)) {
     throw Object.assign(
       new Error("Session must start in the future and within the next 3 hours"),
@@ -36,13 +39,12 @@ function validateSessionTime(startTime) {
   return parsed;
 }
 
-/**
- * Throws if the user already has a non-expired, non-cancelled session.
- */
 async function checkUserActiveSession(userId) {
+  // ✅ FIX: Use camelCase field `creatorId` (was `creator_id`)
+  // ✅ FIX: Use `cardStatus` field (was legacy `status`)
   const existing = await GamingSession.findOne({
-    creator_id: userId,
-    status:     { $in: ["active", "started"] },
+    creatorId:  userId,
+    cardStatus: { $in: ["waiting", "full", "started"] },
   });
   if (existing) {
     throw Object.assign(
@@ -52,19 +54,15 @@ async function checkUserActiveSession(userId) {
   }
 }
 
-/**
- * Throws if the user has created a session within the last 2 hours (anti-spam).
- * Returns { canCreate, nextAllowedAt } so callers can surface it in UI.
- */
 async function checkAntiSpam(userId) {
-  const recent = await GamingSession.findOne({
-    creator_id: userId,
-  })
-    .sort({ created_at: -1 })
-    .select("created_at");
+  // ✅ FIX: Use camelCase field `creatorId` (was `creator_id`)
+  // ✅ FIX: Use camelCase field `createdAt` (was `created_at`)
+  const recent = await GamingSession.findOne({ creatorId: userId })
+    .sort({ createdAt: -1 })
+    .select("createdAt");
 
-  if (recent && isWithinSpamWindow(recent.created_at)) {
-    const nextAt = nextAllowedCreateTime(recent.created_at);
+  if (recent && isWithinSpamWindow(recent.createdAt)) {
+    const nextAt = nextAllowedCreateTime(recent.createdAt);
     throw Object.assign(
       new Error(`You can create another session after ${nextAt.toISOString()}`),
       { status: 429, nextAllowedAt: nextAt.toISOString() }
@@ -76,196 +74,162 @@ async function checkAntiSpam(userId) {
 //  CORE SESSION OPERATIONS
 // ─────────────────────────────────────────────────────────────
 
-/**
- * Creates a new gaming session after all validations pass.
- * @param {Object} params
- * @param {string} params.userId
- * @param {string} params.username
- * @param {string} params.city
- * @param {string} params.game_name
- * @param {number} params.max_players
- * @param {string|Date} params.start_time
- * @param {string?} params.optional_message
- * @returns {GamingSession}
- */
-async function createSession({ userId, city, game_name, max_players, start_time, optional_message }) {
-  // 1. Validate start time
-  const parsedStart = validateSessionTime(start_time);
-
-  // 2. Enforce one-active-session rule
+async function createSession({ userId, username, city, gameType, playersNeeded, startTime, optionalMessage }) {
+  const parsedStart = validateSessionTime(startTime);
   await checkUserActiveSession(userId);
-
-  // 3. Anti-spam cooldown
   await checkAntiSpam(userId);
 
-  // 4. Create the session
+  // ✅ FIX: All camelCase field names matching GamingSession model
+  const cardExpiresAt = new Date(parsedStart.getTime());
+  const chatExpiresAt = new Date(parsedStart.getTime() + THREE_HOURS_MS);
+
   const session = await GamingSession.create({
-    creator_id:       userId,
-    game_name:        game_name.trim(),
-    max_players:      Number(max_players),
-    players_joined:   1,
-    players_list:     [],          // creator is NOT in players_list, tracked separately
-    city:             city.trim(),
-    start_time:       parsedStart,
-    expires_at:       calculateExpiryTime(parsedStart),
-    status:           "active",
-    optional_message: optional_message?.trim() || null,
+    creatorId:       userId,
+    creatorUsername: username || "User",
+    city:            city.trim(),
+    gameType:        (gameType || "OTHER").trim(),
+    playersNeeded:   Number(playersNeeded),
+    playersJoined:   [],
+    startTime:       parsedStart,
+    cardExpiresAt,
+    chatExpiresAt,
+    cardStatus:      "waiting",
+    chatStatus:      "open",
+    status:          "waiting_for_players",
+    optionalMessage: optionalMessage?.trim() || null,
   });
 
   return session;
 }
 
-/**
- * Atomically adds a player to a session.
- * Uses findOneAndUpdate with a $lt guard to prevent exceeding max_players
- * even when two users join simultaneously (race condition safe).
- *
- * @param {string} sessionId
- * @param {string} userId
- * @returns {{ session, alreadyFull: boolean, alreadyJoined: boolean }}
- */
 async function addPlayerToSession(sessionId, userId) {
-  const objectUserId = require("mongoose").Types.ObjectId.createFromHexString
-    ? require("mongoose").Types.ObjectId.createFromHexString(userId)
-    : new (require("mongoose").Types.ObjectId)(userId);
+  const mongoose = require("mongoose");
+  const objectUserId = new mongoose.Types.ObjectId(userId);
 
-  // ── Step 1: pre-checks (read-only, cheap) ─────────────────
+  // ✅ FIX: All camelCase field names (was players_joined, max_players, creator_id, players_list)
   const existing = await GamingSession.findById(sessionId).select(
-    "status max_players players_joined players_list creator_id"
+    "cardStatus playersNeeded playersJoined creatorId kickedPlayers"
   );
 
   if (!existing) throw Object.assign(new Error("Session not found"), { status: 404 });
 
-  if (existing.status === "expired" || existing.status === "cancelled")
+  if (!["waiting", "full", "started"].includes(existing.cardStatus))
     throw Object.assign(new Error("Session is no longer available"), { status: 410 });
 
-  if (existing.creator_id.toString() === userId)
+  if (existing.creatorId.toString() === userId)
     throw Object.assign(new Error("You created this session"), { status: 400 });
 
-  if (existing.players_list.map(String).includes(userId))
+  if ((existing.kickedPlayers || []).map(String).includes(userId))
+    throw Object.assign(new Error("You were removed from this session"), { status: 403 });
+
+  if (existing.playersJoined.map(String).includes(userId))
     throw Object.assign(new Error("You have already joined this session"), { status: 400 });
 
-  // ── Step 2: atomic join (race-condition safe) ──────────────
-  // The query only succeeds if players_joined is STILL below max_players.
-  // If two users try simultaneously, only one will match this query.
+  // ✅ FIX: Atomic update using camelCase fields
   const updated = await GamingSession.findOneAndUpdate(
     {
-      _id:            sessionId,
-      status:         { $in: ["active", "started"] },
-      players_joined: { $lt: existing.max_players }, // ← the race condition guard
+      _id:          sessionId,
+      cardStatus:   { $in: ["waiting", "full", "started"] },
+      $expr:        { $lt: [{ $size: "$playersJoined" }, "$playersNeeded"] },
     },
-    {
-      $inc:      { players_joined: 1 },
-      $addToSet: { players_list: objectUserId },
-    },
+    { $addToSet: { playersJoined: objectUserId } },
     { new: true }
   );
 
-  if (!updated) {
-    // The atomic update failed — session is now full
-    throw Object.assign(new Error("Session is full"), { status: 409 });
+  if (!updated) throw Object.assign(new Error("Session is full"), { status: 409 });
+
+  // Update cardStatus to full if needed
+  if (updated.playersJoined.length >= updated.playersNeeded && updated.cardStatus === "waiting") {
+    updated.cardStatus = "full";
+    updated.status     = "full";
+    await updated.save();
   }
 
   return updated;
 }
 
-/**
- * Removes a player from a session (leave).
- */
 async function removePlayerFromSession(sessionId, userId) {
+  // ✅ FIX: All camelCase field names
   const session = await GamingSession.findById(sessionId);
   if (!session) throw Object.assign(new Error("Session not found"), { status: 404 });
 
-  if (session.creator_id.toString() === userId) {
-    throw Object.assign(
-      new Error("Creators cannot leave — use cancel instead"),
-      { status: 400 }
-    );
+  if (session.creatorId.toString() === userId) {
+    throw Object.assign(new Error("Creators cannot leave — use cancel instead"), { status: 400 });
   }
 
-  if (!session.players_list.map(String).includes(userId)) {
+  if (!session.playersJoined.map(String).includes(userId)) {
     throw Object.assign(new Error("You are not in this session"), { status: 400 });
   }
 
   const updated = await GamingSession.findByIdAndUpdate(
     sessionId,
-    {
-      $inc:  { players_joined: -1 },
-      $pull: { players_list: userId },
-    },
+    { $pull: { playersJoined: userId } },
     { new: true }
   );
+
+  // Revert cardStatus if was full
+  if (updated.cardStatus === "full") {
+    updated.cardStatus = "waiting";
+    updated.status     = "waiting_for_players";
+    await updated.save();
+  }
 
   return updated;
 }
 
-/**
- * Cancels a session — only the creator can do this.
- */
 async function cancelSession(sessionId, userId) {
+  // ✅ FIX: All camelCase field names
   const session = await GamingSession.findById(sessionId);
   if (!session) throw Object.assign(new Error("Session not found"), { status: 404 });
 
-  if (session.creator_id.toString() !== userId) {
+  if (session.creatorId.toString() !== userId) {
     throw Object.assign(new Error("Only the creator can cancel this session"), { status: 403 });
   }
 
-  if (["expired", "cancelled"].includes(session.status)) {
+  if (["expired", "cancelled"].includes(session.cardStatus)) {
     throw Object.assign(new Error("Session is already ended"), { status: 400 });
   }
 
-  session.status = "cancelled";
+  session.cardStatus = "cancelled";
+  session.chatStatus = "closed";
+  session.status     = "cancelled";
   await session.save();
   return session;
 }
 
-/**
- * Returns all active (non-expired, non-cancelled) sessions for a city,
- * sorted by nearest start time.
- * Lazy-expires any stale sessions found during this query.
- *
- * @param {string} city
- * @param {string} excludeUserId  — filters out sessions this user dismissed
- */
 async function getActiveSessions(city, excludeUserId) {
-  const cutoff = new Date(); // now — sessions whose start is past + 5min are expired
+  const now = new Date();
 
-  // Lazily expire sessions that the cron job may have missed
+  // ✅ FIX: Use camelCase fields (was expires_at, dismissed_by)
   await GamingSession.updateMany(
     {
       city,
-      status:    { $in: ["active", "started"] },
-      expires_at: { $lte: cutoff },
+      cardStatus:    { $in: ["waiting", "full"] },
+      cardExpiresAt: { $lte: now },
     },
-    { $set: { status: "expired" } }
+    { $set: { cardStatus: "expired" } }
   );
 
-  const query = {
+  return GamingSession.find({
     city,
-    status:       { $in: ["active", "started"] },
-    expires_at:   { $gt: cutoff },
-    dismissed_by: { $ne: excludeUserId },
-  };
-
-  return GamingSession.find(query)
-    .sort({ start_time: 1 })
-    .populate("creator_id", "username avatar")
-    .populate("players_list", "username avatar")
+    cardStatus:         { $in: ["waiting", "full", "started"] },
+    cardExpiresAt:      { $gt: now },
+    notInterestedUsers: { $ne: excludeUserId },
+    dismissedBy:        { $ne: excludeUserId },
+  })
+    .sort({ startTime: 1 })
+    .populate("creatorId", "firstName lastName profilePhoto")
+    .populate("playersJoined", "firstName lastName profilePhoto")
     .limit(30);
 }
 
-/**
- * Marks all expired sessions and returns them for socket broadcasting.
- * Called by the cron job every minute.
- * @returns {GamingSession[]} sessions that were just expired
- */
 async function expireSessionsBatch() {
   const now = new Date();
 
-  // Find them first so we can emit socket events with their IDs
+  // ✅ FIX: Use camelCase fields
   const toExpire = await GamingSession.find({
-    status:     { $in: ["active", "started"] },
-    expires_at: { $lte: now },
+    cardStatus:    { $in: ["waiting", "full"] },
+    cardExpiresAt: { $lte: now },
   }).select("_id city");
 
   if (toExpire.length === 0) return [];
@@ -273,7 +237,7 @@ async function expireSessionsBatch() {
   const ids = toExpire.map((s) => s._id);
   await GamingSession.updateMany(
     { _id: { $in: ids } },
-    { $set: { status: "expired" } }
+    { $set: { cardStatus: "expired" } }
   );
 
   return toExpire;
