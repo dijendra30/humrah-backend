@@ -1,4 +1,4 @@
-// routes/auth.js - UPDATED WITH LEGAL ACCEPTANCE + PASSWORD VALIDATION
+// routes/auth.js - UPDATED WITH LEGAL ACCEPTANCE + PASSWORD VALIDATION + GOOGLE AUTH
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
@@ -424,6 +424,213 @@ router.post('/login', async (req, res) => {
     });
   }
 });
+
+// =============================================
+// GOOGLE AUTH ENDPOINT
+// =============================================
+
+/**
+ * @route   POST /api/auth/google-auth
+ * @desc    Unified Google Sign-In for Login and Register flows
+ *
+ * LOGIN  (isRegister = false):
+ *   - User MUST already exist  → return token → 200
+ *   - User does NOT exist      → 404 "No account found. Please register first."
+ *
+ * REGISTER (isRegister = true):
+ *   - User does NOT exist → create account → isNewUser: true → 201
+ *   - User already exists → return token  → isNewUser: false → 200
+ *
+ * @access  Public
+ */
+router.post('/google-auth', async (req, res) => {
+  try {
+    const { email, name, googleId, isRegister } = req.body;
+
+    // ── Input validation ─────────────────────────────────────────────────────
+    if (!email || !name || !googleId) {
+      return res.status(400).json({
+        success: false,
+        message: 'email, name, and googleId are required'
+      });
+    }
+
+    if (typeof isRegister !== 'boolean') {
+      return res.status(400).json({
+        success: false,
+        message: 'isRegister (boolean) is required'
+      });
+    }
+
+    const normalizedEmail = email.toLowerCase().trim();
+
+    // ── Look up user by email ─────────────────────────────────────────────────
+    let user = await User.findOne({ email: normalizedEmail });
+
+    // ════════════════════════════════════════════════════════════════════════
+    //  LOGIN FLOW  (isRegister = false)
+    // ════════════════════════════════════════════════════════════════════════
+    if (!isRegister) {
+      if (!user) {
+        console.log(`🔍 Google login: no account for ${normalizedEmail}`);
+        return res.status(404).json({
+          success: false,
+          message: 'No account found. Please register first.'
+        });
+      }
+
+      // ── Account status checks ─────────────────────────────────────────────
+      if (user.status && user.status !== 'ACTIVE') {
+        if (user.status === 'SUSPENDED') {
+          const until = user.suspensionInfo?.suspendedUntil;
+          // Auto-lift if period expired
+          if (until && new Date() >= new Date(until)) {
+            user.status = 'ACTIVE';
+            user.suspensionInfo.isSuspended = false;
+            user.suspensionInfo.suspendedUntil = null;
+            await user.save();
+            // fall through to success
+          } else {
+            return res.status(403).json({
+              success: false,
+              message: 'Your account has been temporarily restricted.',
+              suspensionInfo: {
+                reason: user.suspensionInfo?.suspensionReason || 'Community guideline violation',
+                suspendedUntil: until ? until.toISOString() : null
+              }
+            });
+          }
+        } else if (user.status === 'BANNED') {
+          return res.status(403).json({
+            success: false,
+            message: 'This account has been permanently banned.'
+          });
+        } else {
+          return res.status(403).json({
+            success: false,
+            message: `Account is ${user.status.toLowerCase()}`
+          });
+        }
+      }
+
+      // Update googleId and lastActive
+      if (!user.googleId) user.googleId = googleId;
+      user.lastActive = new Date();
+      await user.save();
+
+      const token = generateToken(user._id, user.role || 'USER');
+
+      console.log(`✅ Google login success: ${user.email}`);
+
+      return res.status(200).json({
+        success: true,
+        message: 'Login successful',
+        token,
+        user: buildUserResponse(user)
+      });
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    //  REGISTER FLOW  (isRegister = true)
+    // ════════════════════════════════════════════════════════════════════════
+
+    if (user) {
+      // User already exists → log them in, indicate NOT a new user
+      if (!user.googleId) user.googleId = googleId;
+      user.lastActive = new Date();
+      await user.save();
+
+      const token = generateToken(user._id, user.role || 'USER');
+
+      console.log(`ℹ️ Google register: existing account ${user.email} → returning isNewUser=false`);
+
+      return res.status(200).json({
+        success: true,
+        message: 'Account already exists. Logging you in.',
+        token,
+        user: buildUserResponse(user),
+        isNewUser: false
+      });
+    }
+
+    // ── Create new user ───────────────────────────────────────────────────────
+    const nameParts  = name.trim().split(' ');
+    const firstName  = nameParts[0] || 'User';
+    const lastName   = nameParts.slice(1).join(' ') || '';
+
+    // Get current legal versions for auto-acceptance
+    let termsVersion   = '1.0.0';
+    let privacyVersion = '1.0.0';
+    try {
+      const [termsDoc, privacyDoc] = await Promise.all([
+        LegalVersion.findOne({ documentType: 'TERMS' }),
+        LegalVersion.findOne({ documentType: 'PRIVACY' })
+      ]);
+      if (termsDoc)   termsVersion   = termsDoc.currentVersion;
+      if (privacyDoc) privacyVersion = privacyDoc.currentVersion;
+    } catch (err) {
+      console.warn('⚠️ Could not fetch legal versions for Google user creation:', err.message);
+    }
+
+    const newUser = new User({
+      firstName,
+      lastName,
+      email:         normalizedEmail,
+      googleId,
+      role:          'USER',
+      emailVerified: true,                // Google emails are pre-verified
+      acceptedTermsVersion:   termsVersion,
+      acceptedPrivacyVersion: privacyVersion,
+      lastLegalAcceptanceDate: new Date()
+    });
+
+    await newUser.save();
+
+    const token = generateToken(newUser._id, 'USER');
+
+    console.log(`✅ Google register: new user created ${newUser.email}`);
+
+    return res.status(201).json({
+      success: true,
+      message: 'Account created successfully',
+      token,
+      user: buildUserResponse(newUser),
+      isNewUser: true
+    });
+
+  } catch (error) {
+    console.error('💥 Google auth error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during Google authentication'
+    });
+  }
+});
+
+// ── Helper: build safe user object ────────────────────────────────────────────
+function buildUserResponse(user) {
+  return {
+    _id:                     user._id,
+    firstName:               user.firstName,
+    lastName:                user.lastName,
+    email:                   user.email,
+    role:                    user.role || 'USER',
+    profilePhoto:            user.profilePhoto || null,
+    emailVerified:           user.emailVerified || true,
+    verified:                user.verified || false,
+    questionnaire:           user.questionnaire || {},
+    isPremium:               user.isPremium || false,
+    hostActive:              user.hostActive !== false,
+    paymentInfo:             user.paymentInfo || null,
+    photoVerificationStatus: user.photoVerificationStatus || 'not_submitted',
+    profileCompleteness:     user.profileCompleteness || null,
+    acceptedCommunityVersion:user.acceptedCommunityVersion || null,
+    communityAcceptedAt:     user.communityAcceptedAt || null,
+    lastActive:              user.lastActive || null,
+    createdAt:               user.createdAt || null,
+    status:                  user.status || 'ACTIVE'
+  };
+}
 
 /**
  * @route   POST /api/auth/check-email
