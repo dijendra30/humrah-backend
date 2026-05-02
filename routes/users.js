@@ -330,15 +330,24 @@ router.post('/upload-profile-photo', authenticate, upload.single('photo'), async
     // Upload buffer to Cloudinary
     const uploadResult = await uploadBuffer(req.file.buffer, 'humrah/profiles');
 
-    // Update user with new photo
+    // Update user with new photo + reset verification
     user.profilePhoto = uploadResult.url;
     user.profilePhotoPublicId = uploadResult.publicId;
+    user.profileEditStats.lastPhotoUpdate = new Date(); // ← cooldown anchor
+    user.verified = false;                              // ← revoke verified badge
+    user.photoVerificationStatus = 'not_submitted';    // ← reset status
+    user.verificationPhotoSubmittedAt = null;
+    user.photoVerifiedAt = null;
+    user.photoVerifiedBy = null;
+    user.photoRejectionReason = null;
     await user.save();
 
     res.json({
       success: true,
       message: 'Profile photo uploaded successfully',
-      profilePhoto: user.profilePhoto
+      profilePhoto: user.profilePhoto,
+      photoVerificationStatus: user.photoVerificationStatus,
+      lastPhotoUpdate: user.profileEditStats.lastPhotoUpdate,
     });
 
   } catch (error) {
@@ -380,15 +389,24 @@ router.post('/upload-profile-photo-base64', authenticate, async (req, res) => {
     // Upload to Cloudinary
     const uploadResult = await uploadBase64(photoBase64, 'humrah/profiles');
 
-    // Update user
+    // Update user + reset verification
     user.profilePhoto = uploadResult.url;
     user.profilePhotoPublicId = uploadResult.publicId;
+    user.profileEditStats.lastPhotoUpdate = new Date();
+    user.verified = false;
+    user.photoVerificationStatus = 'not_submitted';
+    user.verificationPhotoSubmittedAt = null;
+    user.photoVerifiedAt = null;
+    user.photoVerifiedBy = null;
+    user.photoRejectionReason = null;
     await user.save();
 
     res.json({
       success: true,
       message: 'Profile photo uploaded successfully',
-      profilePhoto: user.profilePhoto
+      profilePhoto: user.profilePhoto,
+      photoVerificationStatus: user.photoVerificationStatus,
+      lastPhotoUpdate: user.profileEditStats.lastPhotoUpdate,
     });
 
   } catch (error) {
