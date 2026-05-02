@@ -902,4 +902,214 @@ router.post('/create-admin', authenticate, async (req, res) => {
   }
 });
 
+// =============================================
+// FACEBOOK AUTH ENDPOINT
+// =============================================
+
+/**
+ * @route   POST /api/auth/facebook-auth
+ * @desc    Unified Facebook Sign-In for Login and Register flows
+ *
+ * LOGIN  (isRegister = false):
+ *   - User MUST already exist  → return token → 200
+ *   - User does NOT exist      → 404
+ *
+ * REGISTER (isRegister = true):
+ *   - User does NOT exist → create account → isNewUser: true → 201
+ *   - User already exists → return token  → isNewUser: false → 200
+ *
+ * Security: accessToken is verified against Facebook Graph API before
+ * any account lookup or creation.
+ *
+ * @access  Public
+ */
+router.post('/facebook-auth', async (req, res) => {
+  try {
+    const { email, name, facebookId, accessToken, isRegister } = req.body;
+
+    // ── Input validation ──────────────────────────────────────────────────
+    if (!email || !name || !facebookId || !accessToken) {
+      return res.status(400).json({
+        success: false,
+        message: 'email, name, facebookId, and accessToken are required'
+      });
+    }
+
+    if (typeof isRegister !== 'boolean') {
+      return res.status(400).json({
+        success: false,
+        message: 'isRegister (boolean) is required'
+      });
+    }
+
+    // ── Verify Facebook accessToken via Graph API ─────────────────────────
+    // This is the critical security step — never skip it.
+    const fetch = require('node-fetch');
+    const graphUrl = `https://graph.facebook.com/me?fields=id,name,email&access_token=${accessToken}`;
+    let graphData;
+    try {
+      const graphRes  = await fetch(graphUrl);
+      graphData = await graphRes.json();
+    } catch (fetchErr) {
+      console.error('Facebook Graph API fetch error:', fetchErr);
+      return res.status(502).json({
+        success: false,
+        message: 'Could not verify Facebook token. Please try again.'
+      });
+    }
+
+    if (graphData.error) {
+      console.warn('Facebook token invalid:', graphData.error.message);
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid or expired Facebook session. Please sign in again.'
+      });
+    }
+
+    // facebookId sent by client must match the token's actual owner
+    if (graphData.id !== facebookId) {
+      console.warn(`Facebook ID mismatch: client=${facebookId} graph=${graphData.id}`);
+      return res.status(401).json({
+        success: false,
+        message: 'Facebook authentication mismatch. Please try again.'
+      });
+    }
+
+    const normalizedEmail = email.toLowerCase().trim();
+
+    // ── Look up user ──────────────────────────────────────────────────────
+    let user = await User.findOne({ email: normalizedEmail });
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  LOGIN FLOW  (isRegister = false)
+    // ══════════════════════════════════════════════════════════════════════
+    if (!isRegister) {
+      if (!user) {
+        console.log(`Facebook login: no account for ${normalizedEmail}`);
+        return res.status(404).json({
+          success: false,
+          message: 'No account found. Please register first.'
+        });
+      }
+
+      // Account status checks (mirrors google-auth)
+      if (user.status && user.status !== 'ACTIVE') {
+        if (user.status === 'SUSPENDED') {
+          const until = user.suspensionInfo?.suspendedUntil;
+          if (until && new Date() >= new Date(until)) {
+            user.status = 'ACTIVE';
+            user.suspensionInfo.isSuspended = false;
+            user.suspensionInfo.suspendedUntil = null;
+            await user.save();
+          } else {
+            return res.status(403).json({
+              success: false,
+              message: 'Your account has been temporarily restricted.',
+              suspensionInfo: {
+                reason: user.suspensionInfo?.suspensionReason || 'Community guideline violation',
+                suspendedUntil: until ? until.toISOString() : null
+              }
+            });
+          }
+        } else if (user.status === 'BANNED') {
+          return res.status(403).json({
+            success: false,
+            message: 'This account has been permanently banned.'
+          });
+        } else {
+          return res.status(403).json({
+            success: false,
+            message: `Account is ${user.status.toLowerCase()}`
+          });
+        }
+      }
+
+      if (!user.facebookId) user.facebookId = facebookId;
+      user.lastActive = new Date();
+      await user.save();
+
+      const token = generateToken(user._id, user.role || 'USER');
+      console.log(`✅ Facebook login success: ${user.email}`);
+
+      return res.status(200).json({
+        success: true,
+        message: 'Login successful',
+        token,
+        user: buildUserResponse(user)
+      });
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  REGISTER FLOW  (isRegister = true)
+    // ══════════════════════════════════════════════════════════════════════
+    if (user) {
+      if (!user.facebookId) user.facebookId = facebookId;
+      user.lastActive = new Date();
+      await user.save();
+
+      const token = generateToken(user._id, user.role || 'USER');
+      console.log(`ℹ️ Facebook register: existing account ${user.email} → isNewUser=false`);
+
+      return res.status(200).json({
+        success: true,
+        message: 'Account already exists. Logging you in.',
+        token,
+        user: buildUserResponse(user),
+        isNewUser: false
+      });
+    }
+
+    // Create new user
+    const nameParts  = name.trim().split(' ');
+    const firstName  = nameParts[0] || 'User';
+    const lastName   = nameParts.slice(1).join(' ') || '';
+
+    let termsVersion   = '1.0.0';
+    let privacyVersion = '1.0.0';
+    try {
+      const [termsDoc, privacyDoc] = await Promise.all([
+        LegalVersion.findOne({ documentType: 'TERMS' }),
+        LegalVersion.findOne({ documentType: 'PRIVACY' })
+      ]);
+      if (termsDoc)   termsVersion   = termsDoc.currentVersion;
+      if (privacyDoc) privacyVersion = privacyDoc.currentVersion;
+    } catch (err) {
+      console.warn('Could not fetch legal versions for Facebook user creation:', err.message);
+    }
+
+    const newUser = new User({
+      firstName,
+      lastName,
+      email:         normalizedEmail,
+      facebookId,
+      authProvider:  'facebook',
+      role:          'USER',
+      emailVerified: true,
+      acceptedTermsVersion:    termsVersion,
+      acceptedPrivacyVersion:  privacyVersion,
+      lastLegalAcceptanceDate: new Date()
+    });
+
+    await newUser.save();
+
+    const token = generateToken(newUser._id, 'USER');
+    console.log(`✅ Facebook register: new user created ${newUser.email}`);
+
+    return res.status(201).json({
+      success: true,
+      message: 'Account created successfully',
+      token,
+      user: buildUserResponse(newUser),
+      isNewUser: true
+    });
+
+  } catch (error) {
+    console.error('💥 Facebook auth error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during Facebook authentication'
+    });
+  }
+});
+
 module.exports = router;
