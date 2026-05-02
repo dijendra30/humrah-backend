@@ -294,11 +294,11 @@ async function processVerificationInBackground(sessionId, userId, io) {
       // ✅ Emit real-time socket event to user's private room
       if (io) {
         io.to(user._id.toString()).emit('verification_status_updated', {
-          status: 'APPROVED',
+          status: 'approved',
           reviewDeadline: null,
           rejectionReason: null
         });
-        console.log(`🔔 [Socket] Emitted APPROVED to user ${user._id}`);
+        console.log(`🔔 [Socket] Emitted approved to user ${user._id}`);
       }
     }
     
@@ -316,11 +316,11 @@ async function processVerificationInBackground(sessionId, userId, io) {
       // ✅ Emit real-time socket event to user's private room
       if (io) {
         io.to(user._id.toString()).emit('verification_status_updated', {
-          status: 'REJECTED',
+          status: 'rejected',
           reviewDeadline: null,
           rejectionReason: result.rejectionReason || 'Verification rejected'
         });
-        console.log(`🔔 [Socket] Emitted REJECTED to user ${user._id}`);
+        console.log(`🔔 [Socket] Emitted rejected to user ${user._id}`);
       }
     }
     
@@ -335,6 +335,11 @@ async function processVerificationInBackground(sessionId, userId, io) {
       const reviewDeadline = new Date(now.getTime() + 24 * 60 * 60 * 1000); // +24 hours
       session.manualReviewStartedAt = now;
       session.reviewDeadline = reviewDeadline;
+
+      // ✅ FIX: Update user.photoVerificationStatus so REST API reflects correct state
+      user.photoVerificationStatus = 'pending';
+      user.verificationPhotoSubmittedAt = now;
+      await user.save();
       
       console.log(`⚠️ [Verification] User ${user._id} needs MANUAL REVIEW (deadline: ${reviewDeadline.toISOString()})`);
       
@@ -344,11 +349,11 @@ async function processVerificationInBackground(sessionId, userId, io) {
       // ✅ Emit real-time socket event to user's private room
       if (io) {
         io.to(user._id.toString()).emit('verification_status_updated', {
-          status: 'MANUAL_REVIEW',
+          status: 'pending',
           reviewDeadline: reviewDeadline.toISOString(),
           rejectionReason: null
         });
-        console.log(`🔔 [Socket] Emitted MANUAL_REVIEW to user ${user._id} (deadline: ${reviewDeadline.toISOString()})`);
+        console.log(`🔔 [Socket] Emitted pending (manual review) to user ${user._id} (deadline: ${reviewDeadline.toISOString()})`);
       }
     }
     
@@ -504,11 +509,11 @@ router.post('/admin/approve/:sessionId', auth, async (req, res) => {
     const io = req.app.get('io');
     if (io) {
       io.to(user._id.toString()).emit('verification_status_updated', {
-        status: 'APPROVED',
+        status: 'approved',
         reviewDeadline: null,
         rejectionReason: null
       });
-      console.log(`🔔 [Socket] Admin APPROVED emitted to user ${user._id}`);
+      console.log(`🔔 [Socket] Admin approved emitted to user ${user._id}`);
     }
     
     res.json({
@@ -560,11 +565,11 @@ router.post('/admin/reject/:sessionId', auth, async (req, res) => {
       const io = req.app.get('io');
       if (io) {
         io.to(user._id.toString()).emit('verification_status_updated', {
-          status: 'REJECTED',
+          status: 'rejected',
           reviewDeadline: null,
           rejectionReason: session.rejectionReason
         });
-        console.log(`🔔 [Socket] Admin REJECTED emitted to user ${user._id}`);
+        console.log(`🔔 [Socket] Admin rejected emitted to user ${user._id}`);
       }
     }
     
