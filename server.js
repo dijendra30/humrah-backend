@@ -408,6 +408,11 @@ app.use('/api',                authenticate, enforceLegalAcceptance, movieSessio
 // Placed after all other /api/auth routes to avoid conflicts
 app.use('/api/auth', authenticate, fcmTokenRoutes);
 
+// ✅ Feature click tracking (Coming Soon events)
+// POST /api/events/orphanage-click  — logs orphanage card taps for analytics
+// GET  /api/events/orphanage-clicks — admin view of logged events
+app.use('/api/events', authenticate, require('./routes/featureClicks'));
+
 require('./cronJobs');
 
 // =============================================
