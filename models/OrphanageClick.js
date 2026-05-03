@@ -1,7 +1,9 @@
 // models/OrphanageClick.js
-// Persists every tap on the "Visit Orphanage" coming-soon card.
-// Fields saved: userId (ref to User), name, email (pulled server-side from User),
-//               source, action, deviceTs (client ISO timestamp), timestamps.
+//
+// ONE document per user — guaranteed by the unique index on userId.
+// tapCount tracks how many times that user has tapped the card.
+// The route uses findOneAndUpdate + upsert so the first tap creates
+// the record and every subsequent tap just increments tapCount.
 
 const mongoose = require('mongoose');
 
@@ -11,18 +13,17 @@ const orphanageClickSchema = new mongoose.Schema(
       type:     mongoose.Schema.Types.ObjectId,
       ref:      'User',
       required: true,
-      index:    true
+      unique:   true   // ← enforces one doc per user at the DB level
     },
-    name:     { type: String, default: '' },  // display name at time of click
-    email:    { type: String, default: '' },  // email at time of click
+    name:     { type: String, default: '' },  // display name at time of FIRST tap
+    email:    { type: String, default: '' },  // email at time of FIRST tap
     action:   { type: String, default: 'orphanage_click' },
     source:   { type: String, default: 'home_screen' },
-    deviceTs: { type: String, default: '' }   // ISO-8601 sent by Android client
+    tapCount: { type: Number, default: 1, min: 1 }, // total taps by this user
+    firstTapAt: { type: Date, default: Date.now },   // when they first tapped
+    lastTapAt:  { type: Date, default: Date.now }    // most recent tap
   },
   { timestamps: true }
 );
-
-// Auto-purge records older than 1 year (optional — remove index to keep forever)
-orphanageClickSchema.index({ createdAt: 1 }, { expireAfterSeconds: 31_536_000 });
 
 module.exports = mongoose.model('OrphanageClick', orphanageClickSchema);
