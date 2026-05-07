@@ -7,6 +7,10 @@ const path = require('path');
 const socketIo = require('socket.io');
 const jwt = require('jsonwebtoken');
 const dotenv = require('dotenv');
+const helmet = require('helmet');
+const mongoSanitize = require('express-mongo-sanitize');
+const hpp = require('hpp');
+const { globalLimiter } = require('./middleware/rateLimitMiddleware');
 
 dotenv.config();
 
@@ -41,7 +45,9 @@ const server = http.createServer(app);
 // ✅ Socket.IO with authentication
 const io = socketIo(server, {
   cors: {
-    origin: "*",
+    origin: process.env.NODE_ENV === 'production'
+      ? ['https://api.humrah.in', 'https://humrah.in']
+      : '*',
     methods: ["GET", "POST", "PUT", "DELETE"]
   },
   transports: ['websocket', 'polling'],
@@ -49,8 +55,25 @@ const io = socketIo(server, {
   pingInterval: 25000
 });
 
-// Middleware
-app.use(cors());
+// Security middleware — applied BEFORE all routes
+// helmet: sets secure HTTP headers (XSS, clickjacking, MIME sniff, etc.)
+app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
+// mongoSanitize: strips MongoDB operators ($gt, $where) from req.body/query/params
+// prevents NoSQL injection attacks like { email: { "$gt": "" } }
+app.use(mongoSanitize());
+// hpp: prevent HTTP Parameter Pollution (duplicate params)
+app.use(hpp());
+// globalLimiter: 100 req / 15 min per IP across all endpoints
+app.use(globalLimiter);
+
+// CORS — restrict to known origins in production
+app.use(cors({
+  origin: process.env.NODE_ENV === 'production'
+    ? ['https://api.humrah.in', 'https://humrah.in']
+    : '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
