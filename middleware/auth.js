@@ -112,9 +112,8 @@ const authenticate = async (req, res, next) => {
       });
     }
 
-    // Update last active
-    user.lastActive = new Date();
-    await user.save();
+    // Update last active — use updateOne (not save) to avoid full document write on every request
+    await User.updateOne({ _id: user._id }, { lastActive: new Date() });
 
     // Attach user to request
     req.user = user;

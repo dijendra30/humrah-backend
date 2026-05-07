@@ -60,8 +60,63 @@ async function sessionCreationCooldown(req, res, next) {
   }
 }
 
+// ── 4. OTP send: 3 requests per 5 minutes per IP ─────────────
+const sendOtpLimiter = rateLimit({
+  windowMs:        5 * 60 * 1000,
+  max:             3,
+  standardHeaders: true,
+  legacyHeaders:   false,
+  message:         { success: false, error: "Too many OTP requests. Wait 5 minutes." },
+  keyGenerator:    (req) => req.ip,
+});
+
+// ── 5. OTP verify: 10 requests per 15 minutes per IP ─────────
+const verifyOtpLimiter = rateLimit({
+  windowMs:        15 * 60 * 1000,
+  max:             10,
+  standardHeaders: true,
+  legacyHeaders:   false,
+  message:         { success: false, error: "Too many verification attempts. Wait 15 minutes." },
+  keyGenerator:    (req) => req.ip,
+});
+
+// ── 6. Login: 10 per 15 minutes per IP ───────────────────────
+const loginLimiter = rateLimit({
+  windowMs:        15 * 60 * 1000,
+  max:             10,
+  standardHeaders: true,
+  legacyHeaders:   false,
+  message:         { success: false, error: "Too many login attempts. Try again later." },
+  keyGenerator:    (req) => req.ip,
+});
+
+// ── 7. Register: 5 per hour per IP ───────────────────────────
+const registerLimiter = rateLimit({
+  windowMs:        60 * 60 * 1000,
+  max:             5,
+  standardHeaders: true,
+  legacyHeaders:   false,
+  message:         { success: false, error: "Too many registrations from this IP." },
+  keyGenerator:    (req) => req.ip,
+});
+
+// ── 8. Password reset: 5 per hour per IP ─────────────────────
+const passwordResetLimiter = rateLimit({
+  windowMs:        60 * 60 * 1000,
+  max:             5,
+  standardHeaders: true,
+  legacyHeaders:   false,
+  message:         { success: false, error: "Too many password reset requests." },
+  keyGenerator:    (req) => req.ip,
+});
+
 module.exports = {
   globalLimiter,
   createSessionIpLimiter,
   sessionCreationCooldown,
+  sendOtpLimiter,
+  verifyOtpLimiter,
+  loginLimiter,
+  registerLimiter,
+  passwordResetLimiter,
 };
