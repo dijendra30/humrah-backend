@@ -7,6 +7,20 @@ const LegalAcceptance = require('../models/LegalAcceptance');
 const LegalVersion = require('../models/LegalVersion');
 const { sendOTPEmail, sendWelcomeEmail } = require('../config/email');
 const { isStrongPassword } = require('../utils/passwordValidator');
+const Otp = require('../models/Otp');
+const crypto = require('crypto');
+const {
+  sendOtpLimiter,
+  verifyOtpLimiter,
+  loginLimiter,
+  registerLimiter,
+} = require('../middleware/rateLimitMiddleware');
+
+// OTP constants
+const OTP_RESEND_COOLDOWN_MS = 60 * 1000;       // 60 seconds between resends
+const OTP_EXPIRY_MS          = 10 * 60 * 1000;  // OTP valid 10 minutes
+const MAX_OTP_ATTEMPTS       = 5;               // wrong guesses before lockout
+const OTP_LOCKOUT_MS         = 15 * 60 * 1000;  // lockout duration 15 minutes
 
 // Import auth middleware (use 'auth' for backward compatibility)
 let authenticate, superAdminOnly, auditLog;
@@ -68,7 +82,7 @@ const generateToken = (userId, role) => {
  * @desc    Register new user with legal acceptance (USER role only)
  * @access  Public
  */
-router.post('/register', async (req, res) => {
+router.post('/register', registerLimiter, async (req, res) => {
   try {
     const {
       firstName,
@@ -222,7 +236,7 @@ router.post('/register', async (req, res) => {
  * @desc    Login user and check legal acceptance (all roles use same endpoint)
  * @access  Public
  */
-router.post('/login', async (req, res) => {
+router.post('/login', loginLimiter, async (req, res) => {
   try {
     const { email, password } = req.body;
 
@@ -230,7 +244,6 @@ router.post('/login', async (req, res) => {
 
     // Validation
     if (!email || !password) {
-      console.log('❌ Missing email or password');
       return res.status(400).json({
         success: false,
         message: 'Email and password are required'
@@ -239,17 +252,12 @@ router.post('/login', async (req, res) => {
 
     // Find user (include password for comparison)
     const user = await User.findOne({ email: email.toLowerCase() }).select('+password');
-    
-    console.log('👤 User found:', !!user);
-    if (user) {
-      console.log('📧 User email:', user.email);
-      console.log('🔑 User role:', user.role);
-      console.log('🔐 Password hash exists:', !!user.password);
-      console.log('📊 User status:', user.status);
+
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('👤 Login attempt:', email, '| found:', !!user);
     }
-    
+
     if (!user) {
-      console.log('❌ User not found in database');
       return res.status(401).json({
         success: false,
         message: 'Invalid credentials'
@@ -260,7 +268,6 @@ router.post('/login', async (req, res) => {
     let isMatch = false;
     try {
       isMatch = await user.comparePassword(password);
-      console.log('🔓 Password match result:', isMatch);
     } catch (compareError) {
       console.error('❌ Password comparison error:', compareError);
       return res.status(500).json({
@@ -270,7 +277,6 @@ router.post('/login', async (req, res) => {
     }
     
     if (!isMatch) {
-      console.log('❌ Password does not match');
       return res.status(401).json({
         success: false,
         message: 'Invalid credentials'
@@ -655,53 +661,68 @@ router.post('/check-email', async (req, res) => {
  * @route   POST /api/auth/send-otp-registration
  * @desc    Send OTP for email verification during registration
  * @access  Public
+ * SECURITY: Rate limited (3/5min), cryptographic OTP, hashed in MongoDB, resend cooldown
  */
-router.post('/send-otp-registration', async (req, res) => {
+router.post('/send-otp-registration', sendOtpLimiter, async (req, res) => {
   try {
     const { email } = req.body;
+    if (!email) return res.status(400).json({ success: false, message: 'Email is required' });
 
-    if (!email) {
-      return res.status(400).json({
-        success: false,
-        message: 'Email is required'
-      });
-    }
+    const normalizedEmail = email.toLowerCase().trim();
 
-    // Check if email already exists
-    const existingUser = await User.findOne({ email: email.toLowerCase() });
+    // ── User enumeration protection ──────────────────────────────────────────
+    // Silently return success even if email exists — attacker learns nothing
+    const existingUser = await User.findOne({ email: normalizedEmail }).select('_id');
     if (existingUser) {
-      return res.status(400).json({
+      return res.json({ success: true, message: 'If this email is valid, an OTP has been sent.' });
+    }
+
+    // ── Resend cooldown: 60 seconds between requests ─────────────────────────
+    const recentOtp = await Otp.findOne({
+      email: normalizedEmail,
+      purpose: 'registration',
+      createdAt: { $gt: new Date(Date.now() - OTP_RESEND_COOLDOWN_MS) }
+    }).sort({ createdAt: -1 });
+
+    if (recentOtp) {
+      const waitSeconds = Math.ceil(
+        (OTP_RESEND_COOLDOWN_MS - (Date.now() - recentOtp.createdAt.getTime())) / 1000
+      );
+      return res.status(429).json({
         success: false,
-        message: 'Email already registered'
+        message: `Please wait ${waitSeconds} seconds before requesting a new OTP.`,
+        retryAfterSeconds: waitSeconds
       });
     }
 
-    // Generate 6-digit OTP
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const expires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+    // ── Invalidate all previous OTPs for this email+purpose ──────────────────
+    await Otp.deleteMany({ email: normalizedEmail, purpose: 'registration' });
 
-    // Store OTP temporarily
-    global.otpStore = global.otpStore || {};
-    global.otpStore[email.toLowerCase()] = {
-      otp,
-      expires
-    };
+    // ── Generate cryptographically secure OTP (CSPRNG, not Math.random) ──────
+    const rawOtp    = Otp.generateSecureOtp();
+    const hashedOtp = Otp.hashOtp(rawOtp);
 
-    // Send OTP email
-    await sendOTPEmail(email, otp);
-
-    res.json({
-      success: true,
-      message: 'OTP sent successfully',
-      emailSent: true
+    await Otp.create({
+      email:     normalizedEmail,
+      hashedOtp,
+      purpose:   'registration',
+      expiresAt: new Date(Date.now() + OTP_EXPIRY_MS),
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent')
     });
+
+    await sendOTPEmail(normalizedEmail, rawOtp);
+
+    // Log without exposing OTP — only metadata
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(`[OTP] Registration OTP sent to ${normalizedEmail} from IP ${req.ip}`);
+    }
+
+    res.json({ success: true, message: 'If this email is valid, an OTP has been sent.' });
 
   } catch (error) {
-    console.error('Send OTP error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to send OTP'
-    });
+    console.error('[OTP] send-otp-registration error:', error);
+    res.status(500).json({ success: false, message: 'Failed to send OTP' });
   }
 });
 
@@ -709,58 +730,84 @@ router.post('/send-otp-registration', async (req, res) => {
  * @route   POST /api/auth/verify-otp-registration
  * @desc    Verify OTP during registration
  * @access  Public
+ * SECURITY: Rate limited (10/15min), attempt counter, lockout, timing-safe compare, replay prevention
  */
-router.post('/verify-otp-registration', async (req, res) => {
+router.post('/verify-otp-registration', verifyOtpLimiter, async (req, res) => {
   try {
     const { email, otp } = req.body;
-
     if (!email || !otp) {
-      return res.status(400).json({
-        success: false,
-        message: 'Email and OTP are required'
-      });
+      return res.status(400).json({ success: false, message: 'Email and OTP are required' });
     }
 
-    // Check OTP
-    const storedOTP = global.otpStore?.[email.toLowerCase()];
-    
-    if (!storedOTP) {
-      return res.status(400).json({
-        success: false,
-        message: 'OTP not found or expired'
-      });
-    }
+    const normalizedEmail = email.toLowerCase().trim();
 
-    if (new Date() > storedOTP.expires) {
-      delete global.otpStore[email.toLowerCase()];
-      return res.status(400).json({
-        success: false,
-        message: 'OTP expired'
-      });
-    }
-
-    if (storedOTP.otp !== otp) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid OTP'
-      });
-    }
-
-    // Clear OTP
-    delete global.otpStore[email.toLowerCase()];
-
-    res.json({
-      success: true,
-      message: 'Email verified successfully',
-      verified: true
+    // Generic failure — attacker cannot distinguish between "not found", "expired", "wrong"
+    const genericFail = () => res.status(400).json({
+      success: false,
+      message: 'Invalid or expired OTP. Please request a new one.'
     });
+
+    // ── Find valid, unexpired, unused OTP record ──────────────────────────────
+    const otpDoc = await Otp.findOne({
+      email:     normalizedEmail,
+      purpose:   'registration',
+      expiresAt: { $gt: new Date() },
+      usedAt:    null
+    }).sort({ createdAt: -1 });
+
+    if (!otpDoc) return genericFail();
+
+    // ── Check lockout ────────────────────────────────────────────────────────
+    if (otpDoc.lockedUntil && new Date() < otpDoc.lockedUntil) {
+      const waitSeconds = Math.ceil((otpDoc.lockedUntil - Date.now()) / 1000);
+      return res.status(429).json({
+        success: false,
+        message: `Too many failed attempts. Try again in ${waitSeconds} seconds.`,
+        retryAfterSeconds: waitSeconds
+      });
+    }
+
+    // ── Timing-safe OTP comparison (prevents timing attacks) ─────────────────
+    const inputHash = Otp.hashOtp(otp.trim());
+    let isValid = false;
+    try {
+      isValid = crypto.timingSafeEqual(
+        Buffer.from(inputHash, 'hex'),
+        Buffer.from(otpDoc.hashedOtp, 'hex')
+      );
+    } catch {
+      // Buffer length mismatch = invalid OTP
+      isValid = false;
+    }
+
+    if (!isValid) {
+      otpDoc.attempts += 1;
+      if (otpDoc.attempts >= MAX_OTP_ATTEMPTS) {
+        otpDoc.lockedUntil = new Date(Date.now() + OTP_LOCKOUT_MS);
+        await otpDoc.save();
+        console.warn(`[OTP] Lockout: ${normalizedEmail} from IP ${req.ip}`);
+        return res.status(429).json({
+          success: false,
+          message: 'Too many failed attempts. Please request a new OTP after 15 minutes.'
+        });
+      }
+      await otpDoc.save();
+      return genericFail();
+    }
+
+    // ── Mark as used — prevents replay attack ────────────────────────────────
+    otpDoc.usedAt = new Date();
+    await otpDoc.save();
+
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(`[OTP] Verified successfully for ${normalizedEmail}`);
+    }
+
+    res.json({ success: true, message: 'Email verified successfully', verified: true });
 
   } catch (error) {
-    console.error('Verify OTP error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to verify OTP'
-    });
+    console.error('[OTP] verify-otp-registration error:', error);
+    res.status(500).json({ success: false, message: 'Failed to verify OTP' });
   }
 });
 
