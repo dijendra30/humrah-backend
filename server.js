@@ -22,12 +22,14 @@ const REQUIRED_ENV_VARS = [
   'MONGODB_URI',
   'AGORA_APP_ID',
   'AGORA_APP_CERTIFICATE',
+  'OTP_PEPPER',   // ← ADDED: without this every OTP call throws and auth is fully down
 ];
 const missingVars = REQUIRED_ENV_VARS.filter(v => !process.env[v]);
 if (missingVars.length > 0) {
   console.error('\n❌ SERVER STARTUP FAILED — missing required environment variables:');
   missingVars.forEach(v => console.error(`   • ${v}`));
   console.error('\nAdd these to your .env file and restart.\n');
+  console.error('Generate OTP_PEPPER: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"');
   process.exit(1);
 }
 
@@ -328,13 +330,11 @@ global.getUserLastSeen = getUserLastSeen;
 global.getUserInfo    = getUserInfo;
 
 // =============================================
-// IMPORT JOBS & MIDDLEWARE (must come before connectDB so they can be called inside)
+// IMPORT JOBS & MIDDLEWARE
 // =============================================
 const { startExpiryJob }           = require('./jobs/sessionExpiryJob');
 const { startMovieSessionExpiryJob } = require('./jobs/movieSessionExpiryJob');
 const { runStartupCleanup, scheduleDailyCleanup } = require('./utils/autoModerationCleanup');
-
-// ✅ FIX: Import payout cron so jobs actually start
 const { startPayoutCronJobs } = require('./cronJobs/payoutCron');
 
 // =============================================
@@ -345,10 +345,9 @@ const connectDB = async () => {
     await mongoose.connect(process.env.MONGODB_URI);
     console.log('✅ MongoDB Connected');
 
-    // Start all background jobs AFTER DB is ready
     startExpiryJob(io);
     startMovieSessionExpiryJob();
-    startPayoutCronJobs();          // ✅ FIX: Was never called — now started
+    startPayoutCronJobs();
     await runStartupCleanup();
     scheduleDailyCleanup();
   } catch (err) {
@@ -389,52 +388,43 @@ const settingsRoutes         = require('./routes/settings');
 const profileAssistantRoutes = require('./routes/profileAssistant');
 const movieSessionRoutes     = require('./routes/movieSessionRoutes');
 const passwordResetRoutes    = require('./routes/passwordReset');
-
-// ✅ FIX: fcmToken route was imported but NEVER registered — now registered
-const fcmTokenRoutes = require('./routes/fcmToken');
+const fcmTokenRoutes         = require('./routes/fcmToken');
 
 // =============================================
-// PUBLIC ROUTES (no auth, no legal check)
+// PUBLIC ROUTES
 // =============================================
 app.use('/api/auth',  authRoutes);
-app.use('/api/auth',  passwordResetRoutes);   // POST /api/auth/forgot-password + reset-password
+app.use('/api/auth',  passwordResetRoutes);
 app.use('/api/legal', legalRoutes);
 
 // =============================================
 // PROTECTED ROUTES
 // =============================================
-app.use('/api/users',          authenticate, enforceLegalAcceptance, userRoutes);
-app.use('/api/events',         authenticate, enforceLegalAcceptance, eventRoutes);
-app.use('/api/companions',     authenticate, enforceLegalAcceptance, companionRoutes);
-app.use('/api/bookings',       authenticate, enforceLegalAcceptance, bookingRoutes);
-app.use('/api/messages',       authenticate, enforceLegalAcceptance, messageRoutes);
-app.use('/api/posts',          authenticate, enforceLegalAcceptance, postRoutes);
-app.use('/api/spotlight',      authenticate, enforceLegalAcceptance, spotlightRoutes);
-app.use('/api/safety',         authenticate, enforceLegalAcceptance, safetyReportRoutes);
-app.use('/api/profile',        authenticate, enforceLegalAcceptance, profileRoutes);
-app.use('/api/reviews',        authenticate, enforceLegalAcceptance, reviewRoutes);
-app.use('/api/payment',        authenticate, enforceLegalAcceptance, paymentRoutes);
-app.use('/api/random-booking', authenticate, enforceLegalAcceptance, require('./routes/randomBooking'));
-app.use('/api/verification',   authenticate, enforceLegalAcceptance, require('./routes/verification'));
-app.use('/api/settings',       authenticate, enforceLegalAcceptance, settingsRoutes);
+app.use('/api/users',             authenticate, enforceLegalAcceptance, userRoutes);
+app.use('/api/events',            authenticate, enforceLegalAcceptance, eventRoutes);
+app.use('/api/companions',        authenticate, enforceLegalAcceptance, companionRoutes);
+app.use('/api/bookings',          authenticate, enforceLegalAcceptance, bookingRoutes);
+app.use('/api/messages',          authenticate, enforceLegalAcceptance, messageRoutes);
+app.use('/api/posts',             authenticate, enforceLegalAcceptance, postRoutes);
+app.use('/api/spotlight',         authenticate, enforceLegalAcceptance, spotlightRoutes);
+app.use('/api/safety',            authenticate, enforceLegalAcceptance, safetyReportRoutes);
+app.use('/api/profile',           authenticate, enforceLegalAcceptance, profileRoutes);
+app.use('/api/reviews',           authenticate, enforceLegalAcceptance, reviewRoutes);
+app.use('/api/payment',           authenticate, enforceLegalAcceptance, paymentRoutes);
+app.use('/api/random-booking',    authenticate, enforceLegalAcceptance, require('./routes/randomBooking'));
+app.use('/api/verification',      authenticate, enforceLegalAcceptance, require('./routes/verification'));
+app.use('/api/settings',          authenticate, enforceLegalAcceptance, settingsRoutes);
 app.use('/api/profile-assistant', profileAssistantRoutes);
-app.use('/api/admin',          authenticate, require('./routes/admin'));
-app.use('/api/moderation',     authenticate, adminOnly, moderationRoutes);
-app.use('/api/agora',          authenticate, enforceLegalAcceptance, require('./routes/agora'));
-app.use('/api/voice-call',     authenticate, enforceLegalAcceptance, require('./routes/voice-call'));
-app.use('/api/activity',       authenticate, enforceLegalAcceptance, activityRoutes);
-app.use('/api/session',        authenticate, enforceLegalAcceptance, gamingRoutes);
-app.use('/api/food',           authenticate, enforceLegalAcceptance, foodRoutes);
-app.use('/api',                authenticate, enforceLegalAcceptance, movieSessionRoutes);
-
-// ✅ FIX: Register fcmToken route — POST /api/auth/fcm-token
-// Placed after all other /api/auth routes to avoid conflicts
-app.use('/api/auth', authenticate, fcmTokenRoutes);
-
-// ✅ Feature click tracking (Coming Soon events)
-// POST /api/events/orphanage-click  — logs orphanage card taps for analytics
-// GET  /api/events/orphanage-clicks — admin view of logged events
-app.use('/api/events', authenticate, require('./routes/featureClicks'));
+app.use('/api/admin',             authenticate, require('./routes/admin'));
+app.use('/api/moderation',        authenticate, adminOnly, moderationRoutes);
+app.use('/api/agora',             authenticate, enforceLegalAcceptance, require('./routes/agora'));
+app.use('/api/voice-call',        authenticate, enforceLegalAcceptance, require('./routes/voice-call'));
+app.use('/api/activity',          authenticate, enforceLegalAcceptance, activityRoutes);
+app.use('/api/session',           authenticate, enforceLegalAcceptance, gamingRoutes);
+app.use('/api/food',              authenticate, enforceLegalAcceptance, foodRoutes);
+app.use('/api',                   authenticate, enforceLegalAcceptance, movieSessionRoutes);
+app.use('/api/auth',              authenticate, fcmTokenRoutes);
+app.use('/api/events',            authenticate, require('./routes/featureClicks'));
 
 require('./cronJobs');
 
@@ -445,10 +435,10 @@ app.get('/api/health', (req, res) => {
   res.json({
     status:   'OK',
     message:  'Humrah API is running',
-    socketConnections:       io.engine.clientsCount,
-    activeChats:             chatUsers.size,
-    onlineUsers:             Array.from(userPresence.values()).filter(u => u.status === 'ONLINE').length,
-    gamingNamespaceClients:  io.of('/gaming').sockets.size
+    socketConnections:      io.engine.clientsCount,
+    activeChats:            chatUsers.size,
+    onlineUsers:            Array.from(userPresence.values()).filter(u => u.status === 'ONLINE').length,
+    gamingNamespaceClients: io.of('/gaming').sockets.size
   });
 });
 
@@ -473,11 +463,9 @@ server.listen(PORT, () => {
   console.log(`🚀 Humrah Server running on port ${PORT}`);
   console.log(`✅ Socket.IO enabled`);
   console.log(`✅ Legal compliance enforcement active`);
-  console.log(`✅ Auto-moderation system active`);
-  console.log(`✅ Gaming Sessions active`);
+  console.log(`✅ OTP system: MongoDB-backed, bcrypt+pepper, multi-instance safe`);
   console.log(`✅ FCM Token route: POST /api/auth/fcm-token`);
-  console.log(`✅ Password reset: GET /reset-password | POST /api/auth/forgot-password`);
-  console.log(`✅ Payout cron jobs: weekly + monthly + retry`);
+  console.log(`✅ Password reset: POST /api/auth/forgot-password + /api/auth/reset-password`);
 });
 
 // =============================================
