@@ -1,14 +1,13 @@
-// routes/auth.js - UPDATED WITH LEGAL ACCEPTANCE + PASSWORD VALIDATION + GOOGLE AUTH
+// routes/auth.js - UPDATED WITH LEGAL ACCEPTANCE + PASSWORD VALIDATION + GOOGLE AUTH + SECURE OTP
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const LegalAcceptance = require('../models/LegalAcceptance');
 const LegalVersion = require('../models/LegalVersion');
-const { sendOTPEmail, sendWelcomeEmail } = require('../config/email');
+const { sendWelcomeEmail } = require('../config/email');
 const { isStrongPassword } = require('../utils/passwordValidator');
-const Otp = require('../models/Otp');
-const crypto = require('crypto');
+const { sendOtp, verifyOtp } = require('../services/otpService');
 const {
   sendOtpLimiter,
   verifyOtpLimiter,
@@ -16,11 +15,7 @@ const {
   registerLimiter,
 } = require('../middleware/rateLimitMiddleware');
 
-// OTP constants
-const OTP_RESEND_COOLDOWN_MS = 60 * 1000;       // 60 seconds between resends
-const OTP_EXPIRY_MS          = 10 * 60 * 1000;  // OTP valid 10 minutes
-const MAX_OTP_ATTEMPTS       = 5;               // wrong guesses before lockout
-const OTP_LOCKOUT_MS         = 15 * 60 * 1000;  // lockout duration 15 minutes
+// OTP constants live in services/otpService.js — single source of truth.
 
 // Import auth middleware (use 'auth' for backward compatibility)
 let authenticate, superAdminOnly, auditLog;
@@ -661,7 +656,7 @@ router.post('/check-email', async (req, res) => {
  * @route   POST /api/auth/send-otp-registration
  * @desc    Send OTP for email verification during registration
  * @access  Public
- * SECURITY: Rate limited (3/5min), cryptographic OTP, hashed in MongoDB, resend cooldown
+ * SECURITY: Rate limited, CSPRNG OTP, bcrypt+pepper hash, DB-backed cooldown
  */
 router.post('/send-otp-registration', sendOtpLimiter, async (req, res) => {
   try {
@@ -671,51 +666,26 @@ router.post('/send-otp-registration', sendOtpLimiter, async (req, res) => {
     const normalizedEmail = email.toLowerCase().trim();
 
     // ── User enumeration protection ──────────────────────────────────────────
-    // Silently return success even if email exists — attacker learns nothing
+    // Always return generic success — attacker learns nothing from the response.
     const existingUser = await User.findOne({ email: normalizedEmail }).select('_id');
     if (existingUser) {
       return res.json({ success: true, message: 'If this email is valid, an OTP has been sent.' });
     }
 
-    // ── Resend cooldown: 60 seconds between requests ─────────────────────────
-    const recentOtp = await Otp.findOne({
-      email: normalizedEmail,
-      purpose: 'registration',
-      createdAt: { $gt: new Date(Date.now() - OTP_RESEND_COOLDOWN_MS) }
-    }).sort({ createdAt: -1 });
-
-    if (recentOtp) {
-      const waitSeconds = Math.ceil(
-        (OTP_RESEND_COOLDOWN_MS - (Date.now() - recentOtp.createdAt.getTime())) / 1000
-      );
-      return res.status(429).json({
-        success: false,
-        message: `Please wait ${waitSeconds} seconds before requesting a new OTP.`,
-        retryAfterSeconds: waitSeconds
-      });
-    }
-
-    // ── Invalidate all previous OTPs for this email+purpose ──────────────────
-    await Otp.deleteMany({ email: normalizedEmail, purpose: 'registration' });
-
-    // ── Generate cryptographically secure OTP (CSPRNG, not Math.random) ──────
-    const rawOtp    = Otp.generateSecureOtp();
-    const hashedOtp = Otp.hashOtp(rawOtp);
-
-    await Otp.create({
+    // ── Delegate all OTP logic to otpService (handles cooldown, hash, email) ─
+    const result = await sendOtp({
       email:     normalizedEmail,
-      hashedOtp,
       purpose:   'registration',
-      expiresAt: new Date(Date.now() + OTP_EXPIRY_MS),
       ipAddress: req.ip,
-      userAgent: req.get('user-agent')
+      userAgent: req.get('user-agent'),
     });
 
-    await sendOTPEmail(normalizedEmail, rawOtp);
-
-    // Log without exposing OTP — only metadata
-    if (process.env.NODE_ENV !== 'production') {
-      console.log(`[OTP] Registration OTP sent to ${normalizedEmail} from IP ${req.ip}`);
+    if (!result.ok) {
+      return res.status(result.status).json({
+        success:           false,
+        message:           result.message,
+        retryAfterSeconds: result.retryAfterSeconds,
+      });
     }
 
     res.json({ success: true, message: 'If this email is valid, an OTP has been sent.' });
@@ -730,7 +700,7 @@ router.post('/send-otp-registration', sendOtpLimiter, async (req, res) => {
  * @route   POST /api/auth/verify-otp-registration
  * @desc    Verify OTP during registration
  * @access  Public
- * SECURITY: Rate limited (10/15min), attempt counter, lockout, timing-safe compare, replay prevention
+ * SECURITY: Rate limited, bcrypt.compare (timing-safe), attempt lockout, replay prevention
  */
 router.post('/verify-otp-registration', verifyOtpLimiter, async (req, res) => {
   try {
@@ -739,68 +709,18 @@ router.post('/verify-otp-registration', verifyOtpLimiter, async (req, res) => {
       return res.status(400).json({ success: false, message: 'Email and OTP are required' });
     }
 
-    const normalizedEmail = email.toLowerCase().trim();
-
-    // Generic failure — attacker cannot distinguish between "not found", "expired", "wrong"
-    const genericFail = () => res.status(400).json({
-      success: false,
-      message: 'Invalid or expired OTP. Please request a new one.'
+    const result = await verifyOtp({
+      email:   email.toLowerCase().trim(),
+      otp:     otp.toString().trim(),
+      purpose: 'registration',
     });
 
-    // ── Find valid, unexpired, unused OTP record ──────────────────────────────
-    const otpDoc = await Otp.findOne({
-      email:     normalizedEmail,
-      purpose:   'registration',
-      expiresAt: { $gt: new Date() },
-      usedAt:    null
-    }).sort({ createdAt: -1 });
-
-    if (!otpDoc) return genericFail();
-
-    // ── Check lockout ────────────────────────────────────────────────────────
-    if (otpDoc.lockedUntil && new Date() < otpDoc.lockedUntil) {
-      const waitSeconds = Math.ceil((otpDoc.lockedUntil - Date.now()) / 1000);
-      return res.status(429).json({
-        success: false,
-        message: `Too many failed attempts. Try again in ${waitSeconds} seconds.`,
-        retryAfterSeconds: waitSeconds
+    if (!result.ok) {
+      return res.status(result.status).json({
+        success:           false,
+        message:           result.message,
+        retryAfterSeconds: result.retryAfterSeconds,
       });
-    }
-
-    // ── Timing-safe OTP comparison (prevents timing attacks) ─────────────────
-    const inputHash = Otp.hashOtp(otp.trim());
-    let isValid = false;
-    try {
-      isValid = crypto.timingSafeEqual(
-        Buffer.from(inputHash, 'hex'),
-        Buffer.from(otpDoc.hashedOtp, 'hex')
-      );
-    } catch {
-      // Buffer length mismatch = invalid OTP
-      isValid = false;
-    }
-
-    if (!isValid) {
-      otpDoc.attempts += 1;
-      if (otpDoc.attempts >= MAX_OTP_ATTEMPTS) {
-        otpDoc.lockedUntil = new Date(Date.now() + OTP_LOCKOUT_MS);
-        await otpDoc.save();
-        console.warn(`[OTP] Lockout: ${normalizedEmail} from IP ${req.ip}`);
-        return res.status(429).json({
-          success: false,
-          message: 'Too many failed attempts. Please request a new OTP after 15 minutes.'
-        });
-      }
-      await otpDoc.save();
-      return genericFail();
-    }
-
-    // ── Mark as used — prevents replay attack ────────────────────────────────
-    otpDoc.usedAt = new Date();
-    await otpDoc.save();
-
-    if (process.env.NODE_ENV !== 'production') {
-      console.log(`[OTP] Verified successfully for ${normalizedEmail}`);
     }
 
     res.json({ success: true, message: 'Email verified successfully', verified: true });
