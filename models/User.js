@@ -131,6 +131,23 @@ const userSchema = new mongoose.Schema({
   // ── Blocked users ─────────────────────────────────────────────────────────────
   blockedUsers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
 
+  // ── Muted users (silent — they don't know) ───────────────────────────────────
+  mutedUsers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+
+  // ── Hidden posts (never show again) ─────────────────────────────────────────
+  hiddenPosts: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Post' }],
+
+  // ── Saved / Bookmarked posts ─────────────────────────────────────
+  savedPosts: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Post' }],
+
+  // ── Not Interested — score per user (show less from them) ───────────────────
+  notInterestedUsers: [
+    {
+      userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+      score:  { type: Number, default: 1 }
+    }
+  ],
+
   // ── Pending email change (OTP flow) ───────────────────────────────────────────
   pendingEmail:           { type: String,  default: null, select: false },
   pendingEmailOTP:        { type: String,  default: null, select: false },
