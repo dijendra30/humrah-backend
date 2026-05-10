@@ -24,10 +24,21 @@ if (!admin.apps.length) {
     let privateKey = process.env.FIREBASE_PRIVATE_KEY;
     
     // Remove any quotes that might be wrapping the key
-    privateKey = privateKey.replace(/^["']|["']$/g, '');
+    privateKey = privateKey.replace(/^"|"$/g, '');
+    privateKey = privateKey.replace(/^'|'$/g, '');
     
-    // Replace literal \n with actual newlines
+    // Replace literal \n with actual newlines (handles all escape variations)
     privateKey = privateKey.replace(/\\n/g, '\n');
+    
+    // Also handle case where Coolify splits \n as backslash + newline
+    privateKey = privateKey.replace(/\\\n/g, '\n');
+    
+    // Ensure proper PEM format - add newlines after header/before footer if missing
+    if (!privateKey.includes('\n')) {
+      privateKey = privateKey
+        .replace('-----BEGIN PRIVATE KEY-----', '-----BEGIN PRIVATE KEY-----\n')
+        .replace('-----END PRIVATE KEY-----', '\n-----END PRIVATE KEY-----\n');
+    }
     
     // Debug log (first and last 50 chars only)
     console.log('🔐 Firebase Private Key Check:');
