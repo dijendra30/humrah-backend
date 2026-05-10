@@ -12,6 +12,7 @@ const Comment                     = require('../models/Comment');
 const CommentLike                 = require('../models/CommentLike');
 const User                        = require('../models/User');
 const { cloudinary, uploadBase64, deleteImage } = require('../config/cloudinary');
+const PostReport = require('../models/PostReport');
 
 // ─────────────────────────────────────────────────────────────
 //  RATE LIMITERS
@@ -133,13 +134,34 @@ router.post('/', auth, enforceImageModeration, async (req, res) => {
 router.get('/feed', auth, async (req, res) => {
   try {
     const limit      = Math.min(parseInt(req.query.limit) || 15, 30);
-    const cursor     = req.query.cursor; // ISO 8601 or undefined
+    const cursor     = req.query.cursor || req.query.before; // support both param names
 
     const query = { isActive: true };
 
     // Cursor filter: only posts OLDER than the cursor timestamp
     if (cursor) {
       query.createdAt = { $lt: new Date(cursor) };
+    }
+
+    // Fetch current user to get blocked/muted/hidden/notInterested lists
+    const currentUser = await User.findById(req.userId).select(
+      'blockedUsers mutedUsers hiddenPosts notInterestedUsers'
+    );
+
+    const blockedIds    = (currentUser?.blockedUsers        || []).map(id => id.toString());
+    const mutedIds      = (currentUser?.mutedUsers          || []).map(id => id.toString());
+    const hiddenPostIds = (currentUser?.hiddenPosts         || []).map(id => id.toString());
+    const notInterestedMap = {};
+    (currentUser?.notInterestedUsers || []).forEach(entry => {
+      notInterestedMap[entry.userId.toString()] = entry.score;
+    });
+
+    // Exclude posts from blocked + muted users, and hidden posts
+    if (blockedIds.length || mutedIds.length) {
+      query.userId = { $nin: [...blockedIds, ...mutedIds] };
+    }
+    if (hiddenPostIds.length) {
+      query._id = { $nin: hiddenPostIds };
     }
 
     const posts = await Post.find(query)
@@ -154,6 +176,15 @@ router.get('/feed', auth, async (req, res) => {
     const visible = result.filter(p => {
       if (p.disappearMode !== 'PERMANENT' && p.expiresAt) {
         if (new Date() > p.expiresAt) return false;
+      }
+      // Not-interested score filter: score >= 3 → ~30% chance to show
+      const authorId = p.userId?._id?.toString();
+      if (authorId && notInterestedMap[authorId]) {
+        const score = notInterestedMap[authorId];
+        if (score >= 3) {
+          // Only show 1 in every (score) posts from this user
+          return Math.random() < (1 / score);
+        }
       }
       return true;
     });
@@ -465,6 +496,346 @@ router.post('/:postId/vote', auth, async (req, res) => {
 
   } catch (error) {
     console.error('Poll vote error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  REPORT POST
+//  POST /api/posts/:id/report
+// ─────────────────────────────────────────────────────────────
+
+router.post('/:id/report', auth, async (req, res) => {
+  try {
+    const { reason } = req.body;
+    const validReasons = ['Spam', 'Harassment', 'Fake Profile', 'Sexual Content', 'Scam', 'Violence', 'Other'];
+    if (!reason || !validReasons.includes(reason)) {
+      return res.status(400).json({ success: false, message: 'Valid reason is required' });
+    }
+
+    const post = await Post.findById(req.params.id).select('userId imageUrl');
+    if (!post) return res.status(404).json({ success: false, message: 'Post not found' });
+    if (post.userId.toString() === req.userId) {
+      return res.status(400).json({ success: false, message: 'Cannot report your own post' });
+    }
+
+    // Save to PostReport (unique per reporter+post)
+    try {
+      await PostReport.create({
+        reportedBy:   req.userId,
+        reportedUser: post.userId,
+        postId:       post._id,
+        reason,
+        status:       'manual_review'
+      });
+    } catch (err) {
+      if (err.code === 11000) {
+        return res.status(409).json({ success: false, message: 'You have already reported this post' });
+      }
+      throw err;
+    }
+
+    // Hide this post from the reporter's feed
+    await User.findByIdAndUpdate(req.userId, {
+      $addToSet: { hiddenPosts: post._id }
+    });
+
+    // ── STRIKE SYSTEM (unique reporters only) ──────────────────────────────
+    const uniqueReportCount = await PostReport.countDocuments({
+      reportedUser: post.userId,
+      reportedBy:   { $ne: post.userId } // safety: exclude self
+    });
+
+    const reportedUser = await User.findById(post.userId);
+    if (reportedUser) {
+      const io = req.app.get('io');
+
+      if (uniqueReportCount === 4) {
+        // ⚠️ Warning
+        if (io) {
+          io.to(post.userId.toString()).emit('MODERATION_WARNING', {
+            type:    'WARNING',
+            message: '⚠️ Your content has received multiple reports. Please review our community guidelines to keep Humrah safe for everyone.'
+          });
+        }
+      } else if (uniqueReportCount === 6) {
+        // ⚠️ Warning + 3-day temp ban
+        const suspendedUntil = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
+        reportedUser.suspensionInfo = {
+          isSuspended:      true,
+          suspensionReason: 'Multiple community reports',
+          suspendedAt:      new Date(),
+          suspendedUntil,
+          autoLiftAt:       suspendedUntil,
+          suspendedBy:      'system'
+        };
+        reportedUser.status = 'SUSPENDED';
+        await reportedUser.save();
+
+        if (io) {
+          io.to(post.userId.toString()).emit('MODERATION_WARNING', {
+            type:    'TEMP_BAN',
+            message: '⚠️ Your account has been temporarily suspended for 3 days due to multiple violations. This decision can be reviewed by our admin team.'
+          });
+        }
+      } else if (uniqueReportCount > 6) {
+        // 🚫 Permanent ban (admin can audit)
+        reportedUser.suspensionInfo = {
+          isSuspended:      true,
+          suspensionReason: 'Repeated community violations',
+          suspendedAt:      new Date(),
+          suspendedBy:      'system'
+        };
+        reportedUser.status = 'BANNED';
+        await reportedUser.save();
+
+        if (io) {
+          io.to(post.userId.toString()).emit('MODERATION_WARNING', {
+            type:    'PERM_BAN',
+            message: '🚫 Your account has been permanently suspended due to repeated violations. If you believe this is a mistake, please contact our support team.'
+          });
+        }
+      }
+    }
+
+    res.json({ success: true, message: 'Post reported. Thank you for keeping Humrah safe. 🛡️' });
+  } catch (error) {
+    console.error('Report post error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  EDIT POST  (owner only — no image change)
+//  PATCH /api/posts/:id
+// ─────────────────────────────────────────────────────────────
+
+router.patch('/:id', auth, async (req, res) => {
+  try {
+    const post = await Post.findById(req.params.id);
+    if (!post) return res.status(404).json({ success: false, message: 'Post not found' });
+    if (post.userId.toString() !== req.userId) {
+      return res.status(403).json({ success: false, message: 'Not authorized' });
+    }
+
+    const {
+      caption, location, vibeMode,
+      allowComments, allowLikes, onlyFollowers
+    } = req.body;
+
+    if (caption      !== undefined) post.caption      = caption;
+    if (location     !== undefined) post.location     = location || null;
+    if (vibeMode     !== undefined) post.vibeMode     = vibeMode;
+    if (allowComments !== undefined) post.allowComments = allowComments === 'true' || allowComments === true;
+    if (allowLikes   !== undefined) post.allowLikes   = allowLikes   === 'true' || allowLikes   === true;
+    if (onlyFollowers !== undefined) post.onlyFollowers = onlyFollowers === 'true' || onlyFollowers === true;
+
+    await post.save();
+    await post.populate('userId', 'firstName lastName profilePhoto');
+
+    // Socket: notify anyone viewing this post
+    const io = req.app.get('io');
+    if (io) {
+      io.to(`post:${post._id}`).emit('POST_UPDATED', { post });
+    }
+
+    res.json({ success: true, message: 'Post updated! ✨', post });
+  } catch (error) {
+    console.error('Edit post error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  TOGGLE COMMENTS ON/OFF  (owner only)
+//  PATCH /api/posts/:id/toggle-comments
+// ─────────────────────────────────────────────────────────────
+
+router.patch('/:id/toggle-comments', auth, async (req, res) => {
+  try {
+    const post = await Post.findById(req.params.id);
+    if (!post) return res.status(404).json({ success: false, message: 'Post not found' });
+    if (post.userId.toString() !== req.userId) {
+      return res.status(403).json({ success: false, message: 'Not authorized' });
+    }
+
+    post.allowComments = !post.allowComments;
+    await post.save();
+
+    res.json({
+      success:       true,
+      allowComments: post.allowComments,
+      message:       post.allowComments ? 'Comments enabled' : 'Comments disabled'
+    });
+  } catch (error) {
+    console.error('Toggle comments error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  SAVE / BOOKMARK POST
+//  POST /api/posts/:id/save
+// ─────────────────────────────────────────────────────────────
+
+router.post('/:id/save', auth, async (req, res) => {
+  try {
+    const post = await Post.findById(req.params.id);
+    if (!post) return res.status(404).json({ success: false, message: 'Post not found' });
+
+    const user = await User.findById(req.userId);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    const savedPosts = user.savedPosts || [];
+    const alreadySaved = savedPosts.some(id => id.toString() === post._id.toString());
+
+    if (alreadySaved) {
+      user.savedPosts = savedPosts.filter(id => id.toString() !== post._id.toString());
+    } else {
+      user.savedPosts = [...savedPosts, post._id];
+    }
+
+    await user.save();
+    res.json({ success: true, saved: !alreadySaved });
+  } catch (error) {
+    console.error('Save post error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  GET SAVED POST IDS
+//  GET /api/posts/saved
+// ─────────────────────────────────────────────────────────────
+
+router.get('/saved', auth, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId).select('savedPosts');
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    const posts = await Post.find({ _id: { $in: user.savedPosts || [] }, isActive: true })
+      .populate('userId', 'firstName lastName profilePhoto')
+      .sort({ createdAt: -1 });
+
+    res.json({ success: true, posts });
+  } catch (error) {
+    console.error('Get saved posts error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  BLOCK USER (from post context)
+//  POST /api/posts/:id/block-author
+// ─────────────────────────────────────────────────────────────
+
+router.post('/:id/block-author', auth, async (req, res) => {
+  try {
+    const post = await Post.findById(req.params.id).select('userId');
+    if (!post) return res.status(404).json({ success: false, message: 'Post not found' });
+
+    const targetUserId = post.userId.toString();
+    if (targetUserId === req.userId) {
+      return res.status(400).json({ success: false, message: 'Cannot block yourself' });
+    }
+
+    // Add to blocker's blockedUsers list
+    await User.findByIdAndUpdate(req.userId, {
+      $addToSet: { blockedUsers: targetUserId }
+    });
+    // Remove blocked user's posts from feed automatically via blockedUsers filter
+
+    res.json({ success: true, message: 'User blocked', blockedUserId: targetUserId });
+  } catch (error) {
+    console.error('Block user error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  MUTE USER (from post context)
+//  POST /api/posts/:id/mute-author
+// ─────────────────────────────────────────────────────────────
+
+router.post('/:id/mute-author', auth, async (req, res) => {
+  try {
+    const post = await Post.findById(req.params.id).select('userId');
+    if (!post) return res.status(404).json({ success: false, message: 'Post not found' });
+
+    const targetUserId = post.userId.toString();
+    if (targetUserId === req.userId) {
+      return res.status(400).json({ success: false, message: 'Cannot mute yourself' });
+    }
+
+    await User.findByIdAndUpdate(req.userId, {
+      $addToSet: { mutedUsers: targetUserId }
+    });
+
+    res.json({ success: true, message: 'User muted', mutedUserId: targetUserId });
+  } catch (error) {
+    console.error('Mute user error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  HIDE POST (from feed — per-user preference)
+//  POST /api/posts/:id/hide
+// ─────────────────────────────────────────────────────────────
+
+router.post('/:id/hide', auth, async (req, res) => {
+  try {
+    const post = await Post.findById(req.params.id).select('_id');
+    if (!post) return res.status(404).json({ success: false, message: 'Post not found' });
+
+    await User.findByIdAndUpdate(req.userId, {
+      $addToSet: { hiddenPosts: post._id }
+    });
+
+    res.json({ success: true, message: 'Post hidden from your feed' });
+  } catch (error) {
+    console.error('Hide post error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  NOT INTERESTED
+//  POST /api/posts/:id/not-interested
+// ─────────────────────────────────────────────────────────────
+
+router.post('/:id/not-interested', auth, async (req, res) => {
+  try {
+    const post = await Post.findById(req.params.id).select('userId');
+    if (!post) return res.status(404).json({ success: false, message: 'Post not found' });
+
+    const targetUserId = post.userId.toString();
+
+    // Hide this specific post
+    await User.findByIdAndUpdate(req.userId, {
+      $addToSet: { hiddenPosts: post._id }
+    });
+
+    // Increment not-interested score for this author
+    const user = await User.findById(req.userId).select('notInterestedUsers');
+    const existing = user.notInterestedUsers.find(
+      e => e.userId.toString() === targetUserId
+    );
+
+    if (existing) {
+      await User.findOneAndUpdate(
+        { _id: req.userId, 'notInterestedUsers.userId': targetUserId },
+        { $inc: { 'notInterestedUsers.$.score': 1 } }
+      );
+    } else {
+      await User.findByIdAndUpdate(req.userId, {
+        $push: { notInterestedUsers: { userId: targetUserId, score: 1 } }
+      });
+    }
+
+    res.json({ success: true, message: 'Got it — you will see less like this' });
+  } catch (error) {
+    console.error('Not interested error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
