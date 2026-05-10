@@ -4,9 +4,9 @@ const router = express.Router();
 const User = require('../models/User');
 const SafetyReport = require('../models/SafetyReport');
 const AuditLog = require('../models/AuditLog');
+const PostReport = require('../models/PostReport');
 const { authenticate, authorize, superAdminOnly, adminOnly, auditLog } = require('../middleware/auth');
 
-// ==================== DASHBOARD ====================
 
 /**
  * @route   GET /api/admin/dashboard/stats
@@ -689,6 +689,96 @@ router.get('/audit-logs', authenticate, superAdminOnly, async (req, res) => {
       success: false,
       message: 'Failed to load audit logs'
     });
+  }
+});
+
+// ==================== POST REPORTS ====================
+
+/**
+ * @route   GET /api/admin/post-reports
+ * @desc    Get all post reports (paginated)
+ * @access  Admin only
+ */
+router.get('/post-reports', authenticate, adminOnly, async (req, res) => {
+  try {
+    const { status = 'manual_review', page = 1, limit = 20 } = req.query;
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    const [reports, total] = await Promise.all([
+      PostReport.find({ status })
+        .populate('reportedBy',   'firstName lastName profilePhoto email')
+        .populate('reportedUser', 'firstName lastName profilePhoto email')
+        .populate('postId',       'imageUrl caption')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit)),
+      PostReport.countDocuments({ status })
+    ]);
+
+    res.json({
+      success: true,
+      reports,
+      pagination: { currentPage: parseInt(page), totalPages: Math.ceil(total / parseInt(limit)), total }
+    });
+  } catch (error) {
+    console.error('Get post reports error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+/**
+ * @route   PATCH /api/admin/post-reports/:id/resolve
+ * @desc    Resolve a post report and notify reporter
+ * @access  Admin only
+ */
+router.patch('/post-reports/:id/resolve', authenticate, adminOnly, async (req, res) => {
+  try {
+    const { adminNote } = req.body;
+
+    const report = await PostReport.findById(req.params.id)
+      .populate('reportedBy', '_id')
+      .populate('postId', '_id caption');
+
+    if (!report) return res.status(404).json({ success: false, message: 'Report not found' });
+    if (report.status === 'resolved') {
+      return res.status(400).json({ success: false, message: 'Already resolved' });
+    }
+
+    report.status     = 'resolved';
+    report.resolvedBy = req.userId;
+    report.resolvedAt = new Date();
+    report.adminNote  = adminNote || null;
+    await report.save();
+
+    // In-app notification to the reporter
+    const resolutionMessages = {
+      'Spam':           'Your report has been reviewed ✅ The post violated our spam policy and action has been taken. Thanks for keeping Humrah safe! 🛡️',
+      'Harassment':     'Your report has been reviewed ✅ We’ve taken action against the reported user for harassment. You’re safe here! 🛡️',
+      'Fake Profile':   'Your report has been reviewed ✅ The reported profile has been actioned for being fake. Thanks for helping us! 🛡️',
+      'Sexual Content': 'Your report has been reviewed ✅ The content violated our community guidelines and has been removed. 🛡️',
+      'Scam':           'Your report has been reviewed ✅ We’ve taken action against the reported scam account. Stay safe! 🛡️',
+      'Violence':       'Your report has been reviewed ✅ The violent content has been removed and action taken. 🛡️',
+      'Other':          'Your report has been reviewed ✅ We’ve investigated and taken appropriate action. Thanks for reporting! 🛡️'
+    };
+
+    const message = resolutionMessages[report.reason] || resolutionMessages['Other'];
+
+    // Socket: send in-app notification to reporter
+    const io = req.app.get('io');
+    if (io && report.reportedBy?._id) {
+      io.to(report.reportedBy._id.toString()).emit('REPORT_RESOLVED', {
+        type:     'REPORT_RESOLVED',
+        icon:     '🛡️',
+        message,
+        reportId: report._id,
+        reason:   report.reason
+      });
+    }
+
+    res.json({ success: true, message: 'Report resolved and reporter notified', report });
+  } catch (error) {
+    console.error('Resolve post report error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
