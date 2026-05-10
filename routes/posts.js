@@ -880,4 +880,20 @@ router.delete('/:id', auth, async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────
+//  UNHIDE POST
+//  DELETE /api/posts/:postId/hide
+// ─────────────────────────────────────────────────────────────
+
+router.delete('/:postId/hide', auth, async (req, res) => {
+  try {
+    await User.findByIdAndUpdate(req.userId, {
+      $pull: { hiddenPosts: req.params.postId }
+    });
+    res.json({ success: true, message: 'Post unhidden' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 module.exports = router;

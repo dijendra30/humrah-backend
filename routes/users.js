@@ -718,4 +718,54 @@ router.patch('/host-status', authenticate, async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────
+// ACTIVITY & PRIVACY
+// ─────────────────────────────────────────────────────────────
+
+// GET /api/users/me/activity-privacy
+router.get('/me/activity-privacy', authenticate, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId)
+      .select('hiddenPosts blockedUsers mutedUsers')
+      .populate('blockedUsers', 'firstName lastName profilePhoto')
+      .populate('mutedUsers',   'firstName lastName profilePhoto');
+
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    res.json({
+      success:      true,
+      hiddenPostIds: (user.hiddenPosts || []).map(id => id.toString()),
+      blockedUsers:  user.blockedUsers || [],
+      mutedUsers:    user.mutedUsers   || []
+    });
+  } catch (err) {
+    console.error('Activity privacy error:', err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// DELETE /api/users/me/blocked/:userId
+router.delete('/me/blocked/:userId', authenticate, async (req, res) => {
+  try {
+    await User.findByIdAndUpdate(req.userId, {
+      $pull: { blockedUsers: req.params.userId }
+    });
+    res.json({ success: true, message: 'User unblocked' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// DELETE /api/users/me/muted/:userId
+router.delete('/me/muted/:userId', authenticate, async (req, res) => {
+  try {
+    await User.findByIdAndUpdate(req.userId, {
+      $pull: { mutedUsers: req.params.userId }
+    });
+    res.json({ success: true, message: 'User unmuted' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 module.exports = router;
