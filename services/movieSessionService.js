@@ -774,12 +774,11 @@ async function getNearbySessions(userId, queryLat, queryLng) {
   const realSessions   = scored.filter(x => !x.isSystem).sort((a, b) => b.score - a.score);
   const systemSessions = scored.filter(x =>  x.isSystem).sort((a, b) => b.score - a.score);
 
-  // ── Display cap: max 4 sessions visible ──────────────────────────────────
-  // IMPORTANT: system generates exactly 3 sessions (11AM, 3PM, 7PM).
-  // MAX_VISIBLE = 4 means: if 1 real-user session exists, show it + 3 system = 4.
-  // If 2 real-user sessions exist, show 2 real + 2 system = 4.
-  // System NEVER creates a 4th session — max it generates is 3.
-  const MAX_VISIBLE = 4;
+  // ── Display cap: max 5 sessions visible ──────────────────────────────────
+  // System generates 3 sessions (11AM, 3PM, 7PM) + up to 2 real-user sessions
+  // can stack on top → total 5. If no real-user sessions: 3 system shown.
+  // If 2 real-user sessions: show both + 3 system = 5.
+  const MAX_VISIBLE = 5;
   const combined = [
     ...realSessions.slice(0, MAX_VISIBLE),
     ...systemSessions.slice(0, Math.max(0, MAX_VISIBLE - realSessions.length)),
