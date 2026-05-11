@@ -113,11 +113,11 @@ const FoodPostSchema = new mongoose.Schema(
       index: true,
     },
 
-    // Optional price hint
+    // Optional price hint — free-form string e.g. "₹100-₹500" from range slider
     priceRange: {
       type: String,
-      enum: ['₹', '₹₹', '₹₹₹', null],
       default: null,
+      maxlength: [30, 'Price range string too long'],
     },
 
     // ✅ Google Places rating — fetched once at create time, stored permanently
