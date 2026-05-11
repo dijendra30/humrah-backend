@@ -14,6 +14,7 @@ const {
   loginLimiter,
   registerLimiter,
 } = require('../middleware/rateLimitMiddleware');
+const { verifyGoogleIdToken } = require('../services/googleAuthService');
 
 // OTP constants live in services/otpService.js — single source of truth.
 
@@ -427,16 +428,22 @@ router.post('/login', loginLimiter, async (req, res) => {
 });
 
 // =============================================
-// GOOGLE AUTH ENDPOINT
+// GOOGLE AUTH ENDPOINT  (SECURE — server-side ID token verification)
 // =============================================
 
 /**
  * @route   POST /api/auth/google-auth
- * @desc    Unified Google Sign-In for Login and Register flows
+ * @desc    Unified Google Sign-In for Login and Register flows.
+ *
+ * SECURITY MODEL:
+ *   - Android sends ONLY idToken (obtained from Google Sign-In SDK).
+ *   - Backend verifies the token with Google's servers via google-auth-library.
+ *   - Backend trusts ONLY the verified payload (sub, email, name, picture).
+ *   - Client-sent email / name / googleId are NEVER used.
  *
  * LOGIN  (isRegister = false):
  *   - User MUST already exist  → return token → 200
- *   - User does NOT exist      → 404 "No account found. Please register first."
+ *   - User does NOT exist      → 404
  *
  * REGISTER (isRegister = true):
  *   - User does NOT exist → create account → isNewUser: true → 201
@@ -446,13 +453,13 @@ router.post('/login', loginLimiter, async (req, res) => {
  */
 router.post('/google-auth', async (req, res) => {
   try {
-    const { email, name, googleId, isRegister } = req.body;
+    const { idToken, isRegister } = req.body;
 
     // ── Input validation ─────────────────────────────────────────────────────
-    if (!email || !name || !googleId) {
+    if (!idToken || typeof idToken !== 'string' || idToken.trim() === '') {
       return res.status(400).json({
         success: false,
-        message: 'email, name, and googleId are required'
+        message: 'idToken is required'
       });
     }
 
@@ -463,10 +470,26 @@ router.post('/google-auth', async (req, res) => {
       });
     }
 
-    const normalizedEmail = email.toLowerCase().trim();
+    // ── CRITICAL: Verify the ID token with Google's servers ──────────────────
+    // verifyGoogleIdToken throws (with statusCode) on any failure.
+    // After this line, payload fields are cryptographically verified by Google.
+    let googlePayload;
+    try {
+      googlePayload = await verifyGoogleIdToken(idToken.trim());
+    } catch (verifyErr) {
+      return res.status(verifyErr.statusCode || 401).json({
+        success: false,
+        message: verifyErr.message
+      });
+    }
 
-    // ── Look up user by email ─────────────────────────────────────────────────
-    let user = await User.findOne({ email: normalizedEmail });
+    // Trust ONLY the verified payload — never req.body.email / req.body.googleId.
+    const verifiedGoogleId = googlePayload.sub;
+    const verifiedEmail    = googlePayload.email.toLowerCase().trim();
+    const verifiedName     = googlePayload.name || '';
+
+    // ── Look up user by verified email ────────────────────────────────────────
+    let user = await User.findOne({ email: verifiedEmail });
 
     // ════════════════════════════════════════════════════════════════════════
     //  LOGIN FLOW  (isRegister = false)
@@ -514,13 +537,12 @@ router.post('/google-auth', async (req, res) => {
         }
       }
 
-      // Update googleId and lastActive
-      if (!user.googleId) user.googleId = googleId;
+      // Keep googleId in sync with the verified sub.
+      if (!user.googleId) user.googleId = verifiedGoogleId;
       user.lastActive = new Date();
       await user.save();
 
       const token = generateToken(user._id, user.role || 'USER');
-
       console.log(`✅ Google login success: ${user.email}`);
 
       return res.status(200).json({
@@ -537,7 +559,7 @@ router.post('/google-auth', async (req, res) => {
 
     if (user) {
       // User already exists → log them in, indicate NOT a new user
-      if (!user.googleId) user.googleId = googleId;
+      if (!user.googleId) user.googleId = verifiedGoogleId;
       user.lastActive = new Date();
       await user.save();
 
@@ -554,8 +576,8 @@ router.post('/google-auth', async (req, res) => {
       });
     }
 
-    // ── Create new user ───────────────────────────────────────────────────────
-    const nameParts  = name.trim().split(' ');
+    // ── Create new user using ONLY verified payload fields ──────────────────
+    const nameParts  = verifiedName.trim().split(' ');
     const firstName  = nameParts[0] || 'User';
     const lastName   = nameParts.slice(1).join(' ') || '';
 
@@ -576,12 +598,12 @@ router.post('/google-auth', async (req, res) => {
     const newUser = new User({
       firstName,
       lastName,
-      email:         normalizedEmail,
-      googleId,
-      role:          'USER',
-      emailVerified: true,                // Google emails are pre-verified
-      acceptedTermsVersion:   termsVersion,
-      acceptedPrivacyVersion: privacyVersion,
+      email:                   verifiedEmail,      // ← verified by Google
+      googleId:                verifiedGoogleId,   // ← verified by Google (payload.sub)
+      role:                    'USER',
+      emailVerified:           true,               // Google ID tokens guarantee email ownership
+      acceptedTermsVersion:    termsVersion,
+      acceptedPrivacyVersion:  privacyVersion,
       lastLegalAcceptanceDate: new Date()
     });
 
