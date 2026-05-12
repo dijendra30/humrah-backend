@@ -16,11 +16,14 @@
 //   req.ip if the header is missing. This is reliable across Traefik versions.
 //
 // LAYERED RATE-LIMIT STRATEGY:
-//   Layer 1: globalLimiter    — broad IP-level throttle across all endpoints
-//   Layer 2: sendOtpLimiter   — tight limit on OTP generation (expensive, spammable)
-//   Layer 3: verifyOtpLimiter — tight limit on OTP verification (brute-force vector)
-//   Layer 4: otpService DB cooldown — per-email, cross-instance safe
-//   Layer 5: Otp.attempts+lockedUntil — per-document lockout stored in MongoDB
+//   Layer 1: globalLimiter          — broad IP-level throttle across all endpoints
+//   Layer 2: sendOtpLimiter         — tight limit on OTP generation (expensive, spammable)
+//   Layer 3: verifyOtpLimiter       — tight limit on OTP verification (brute-force vector)
+//   Layer 4: loginLimiter           — brute-force protection on login
+//   Layer 5: registerLimiter        — registration spam protection
+//   Layer 6: passwordResetLimiter   — reset abuse protection
+//   Layer 7: createSessionIpLimiter — gaming session IP throttle
+//   Layer 8: sessionCreationCooldown— DB-backed per-user cooldown (cross-instance safe)
 //
 // IMPORTANT: GamingSession is NOT imported at top level.
 //   Lazy-required inside sessionCreationCooldown() only to avoid circular
@@ -36,7 +39,6 @@ const { isWithinSpamWindow, nextAllowedCreateTime } = require('../utils/timeUtil
 // REAL IP EXTRACTOR
 // Reads X-Forwarded-For directly — more reliable than req.ip under Traefik.
 // Strips ::ffff: prefix so IPv4-mapped IPv6 addresses count as one bucket.
-// Also logs the resolved IP on every request so you can verify in server logs.
 // ─────────────────────────────────────────────────────────────────────────────
 const getClientIp = (req) => {
   const forwarded = req.headers['x-forwarded-for'];
@@ -47,17 +49,21 @@ const getClientIp = (req) => {
 };
 
 // ── Shared base options applied to all limiters ───────────────────────────────
+// validate flags explanation:
+//   keyGeneratorIpFallback: false — suppresses ERR_ERL_KEY_GEN_IPV6 warning
+//     because our getClientIp() already handles IPv6 normalisation via ::ffff: strip.
+//   xForwardedForHeader: false   — we read X-Forwarded-For manually; suppress
+//     express-rate-limit's own XFF validation which doesn't apply to our setup.
 const sharedOptions = {
   standardHeaders: true,
   legacyHeaders:   false,
   skipFailedRequests: false,
   skipSuccessfulRequests: false,
   keyGenerator: getClientIp,
-  // We intentionally read X-Forwarded-For directly (not via req.ip) because
-  // Traefik on Coolify can resolve req.ip to the container's internal address.
-  // Suppress express-rate-limit's IPv6 keyGenerator validation warning since
-  // our getClientIp already handles ::ffff: normalisation correctly.
-  validate: { xForwardedForHeader: false, ip: false },
+  validate: {
+    xForwardedForHeader:    false,
+    keyGeneratorIpFallback: false,
+  },
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
