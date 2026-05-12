@@ -97,10 +97,13 @@ const io = socketIo(server, {
 
 // =============================================
 // TRUST PROXY — CRITICAL for Render
-// Without this, req.ip returns the Render proxy IP on every request.
-// All rate limiters key off req.ip — they become useless without this.
+// Set to true to trust ALL X-Forwarded-For hops.
+// Render sits behind multiple proxy layers — setting this to 1 (one hop)
+// causes req.ip to resolve to Render's internal proxy IP instead of the
+// real client IP, making ALL rate limiters key off the same IP and
+// therefore never trigger. true = trust the leftmost IP in X-Forwarded-For.
 // =============================================
-app.set('trust proxy', 1);
+app.set('trust proxy', true);
 
 // =============================================
 // SECURITY MIDDLEWARE
