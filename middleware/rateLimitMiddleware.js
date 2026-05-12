@@ -19,6 +19,15 @@
 //   DB-backed limits survive restarts and work across all instances.
 //
 // ─────────────────────────────────────────────────────────────────────────────
+// express-rate-limit v7+ NOTE:
+//   ipKeyGenerator IS the keyGenerator — assign it directly, don't wrap it.
+//   Wrapping it like `(req) => ipKeyGenerator(req)` causes it to return
+//   the function reference itself as the key string on some versions,
+//   making every request use the same bucket → limiter is completely bypassed.
+//
+//   trust proxy must be set in Express (app.set('trust proxy', 1)) BEFORE
+//   these limiters run, or req.ip is the Render proxy IP for all requests.
+// ─────────────────────────────────────────────────────────────────────────────
 
 'use strict';
 
@@ -32,6 +41,7 @@ const sharedOptions = {
   legacyHeaders:   false,  // Suppress deprecated X-RateLimit-* headers
   skipFailedRequests: false,
   skipSuccessfulRequests: false,
+  keyGenerator: ipKeyGenerator, // ← assign directly, not wrapped in arrow function
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -41,9 +51,8 @@ const sharedOptions = {
 // ─────────────────────────────────────────────────────────────────────────────
 const globalLimiter = rateLimit({
   ...sharedOptions,
-  windowMs:     15 * 60 * 1000,
-  max:          100,
-  keyGenerator: (req) => ipKeyGenerator(req),
+  windowMs: 15 * 60 * 1000,
+  max:      100,
   handler: (_req, res) => {
     res.status(429).json({
       success: false,
@@ -59,9 +68,8 @@ const globalLimiter = rateLimit({
 // ─────────────────────────────────────────────────────────────────────────────
 const sendOtpLimiter = rateLimit({
   ...sharedOptions,
-  windowMs:     15 * 60 * 1000,
-  max:          3,
-  keyGenerator: (req) => ipKeyGenerator(req),
+  windowMs: 15 * 60 * 1000,
+  max:      3,
   handler: (_req, res) => {
     res.status(429).json({
       success: false,
@@ -77,9 +85,8 @@ const sendOtpLimiter = rateLimit({
 // ─────────────────────────────────────────────────────────────────────────────
 const verifyOtpLimiter = rateLimit({
   ...sharedOptions,
-  windowMs:     10 * 60 * 1000,
-  max:          5,
-  keyGenerator: (req) => ipKeyGenerator(req),
+  windowMs: 10 * 60 * 1000,
+  max:      5,
   handler: (_req, res) => {
     res.status(429).json({
       success: false,
@@ -93,9 +100,8 @@ const verifyOtpLimiter = rateLimit({
 // ─────────────────────────────────────────────────────────────────────────────
 const loginLimiter = rateLimit({
   ...sharedOptions,
-  windowMs:     15 * 60 * 1000,
-  max:          10,
-  keyGenerator: (req) => ipKeyGenerator(req),
+  windowMs: 15 * 60 * 1000,
+  max:      10,
   handler: (_req, res) => {
     res.status(429).json({
       success: false,
@@ -109,9 +115,8 @@ const loginLimiter = rateLimit({
 // ─────────────────────────────────────────────────────────────────────────────
 const registerLimiter = rateLimit({
   ...sharedOptions,
-  windowMs:     60 * 60 * 1000,
-  max:          5,
-  keyGenerator: (req) => ipKeyGenerator(req),
+  windowMs: 60 * 60 * 1000,
+  max:      5,
   handler: (_req, res) => {
     res.status(429).json({
       success: false,
@@ -125,9 +130,8 @@ const registerLimiter = rateLimit({
 // ─────────────────────────────────────────────────────────────────────────────
 const passwordResetLimiter = rateLimit({
   ...sharedOptions,
-  windowMs:     60 * 60 * 1000,
-  max:          5,
-  keyGenerator: (req) => ipKeyGenerator(req),
+  windowMs: 60 * 60 * 1000,
+  max:      5,
   handler: (_req, res) => {
     res.status(429).json({
       success: false,
@@ -141,9 +145,8 @@ const passwordResetLimiter = rateLimit({
 // ─────────────────────────────────────────────────────────────────────────────
 const createSessionIpLimiter = rateLimit({
   ...sharedOptions,
-  windowMs:     15 * 60 * 1000,
-  max:          5,
-  keyGenerator: (req) => ipKeyGenerator(req),
+  windowMs: 15 * 60 * 1000,
+  max:      5,
   handler: (_req, res) => {
     res.status(429).json({
       success: false,
