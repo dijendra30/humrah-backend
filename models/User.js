@@ -101,6 +101,19 @@ const userSchema = new mongoose.Schema({
     select: false
   },
 
+  // =============================================
+  // ✅ TOKEN VERSION — for forced logout / revocation
+  // Incremented on: logout-all, password change, admin force-logout.
+  // Every JWT carries the tokenVersion at issue time.
+  // Auth middleware rejects any token where payload.tv !== db.tokenVersion.
+  // Cost: one extra DB field read per request (already done for user fetch).
+  // =============================================
+  tokenVersion: {
+    type: Number,
+    default: 0,
+    select: true
+  },
+
   acceptedTermsVersion: {
     type: String,
     default: null
