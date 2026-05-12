@@ -47,9 +47,7 @@ const server = http.createServer(app);
 // ✅ Socket.IO with authentication
 const io = socketIo(server, {
   cors: {
-    origin: process.env.NODE_ENV === 'production'
-      ? ['https://api.humrah.in', 'https://humrah.in']
-      : '*',
+    origin: '*',   // Android native apps don't send an Origin header — allow all
     methods: ["GET", "POST", "PUT", "DELETE"]
   },
   transports: ['websocket', 'polling'],
@@ -70,9 +68,7 @@ app.use(globalLimiter);
 
 // CORS — restrict to known origins in production
 app.use(cors({
-  origin: process.env.NODE_ENV === 'production'
-    ? ['https://api.humrah.in', 'https://humrah.in']
-    : '*',
+  origin: '*',   // Android native apps don't send Origin header
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
