@@ -155,11 +155,26 @@ app.use(hpp());
 app.use(globalLimiter);
 
 // =============================================
-// BODY PARSING — conservative limits
-// 10mb was set globally, which is dangerous (memory exhaustion).
-// JSON APIs need at most 100kb. File uploads go through multer separately.
-// Only increase per-route if specifically needed.
+// BODY PARSING — tiered limits
+//
+// Default: 100kb — safe for all JSON API requests.
+// Exceptions below: 3 routes send base64-encoded images in JSON body.
+//   - POST /api/users/upload-profile-photo-base64
+//   - POST /api/users/submit-verification-photo-base64
+//   - POST /api/posts (imageBase64 field)
+//
+// Base64 inflates size by ~1.37x. A 1MB photo becomes ~1.4MB base64.
+// 5mb covers up to ~3.6MB raw image — reasonable for mobile camera output.
+// Multer-based routes (food, verification video, multipart photo) are
+// NOT affected by this — multer has its own independent fileSize limits.
 // =============================================
+
+// Per-route overrides for base64 upload endpoints — applied BEFORE global parser
+app.use('/api/users/upload-profile-photo-base64',    express.json({ limit: '5mb' }));
+app.use('/api/users/submit-verification-photo-base64', express.json({ limit: '5mb' }));
+app.use('/api/posts',                                express.json({ limit: '5mb' }));
+
+// Global limit for everything else
 app.use(express.json({ limit: '100kb' }));
 app.use(express.urlencoded({ extended: true, limit: '100kb' }));
 
