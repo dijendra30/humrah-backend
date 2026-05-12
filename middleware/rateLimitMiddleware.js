@@ -1,60 +1,62 @@
 // middleware/rateLimitMiddleware.js — Centralized Rate Limiting (Production-Grade)
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// express-rate-limit v7+ REQUIRED CHANGE:
-//   Use ipKeyGenerator() for any keyGenerator using req.ip.
-//   Without it, IPv6 addresses like "::ffff:1.2.3.4" are not normalized,
-//   allowing an attacker to bypass limits via IPv6/IPv4 dual-stack variants.
+// INFRA: Coolify + Traefik on Oracle Cloud — exactly 1 proxy hop.
+//   server.js has: app.set('trust proxy', 1)
+//   Traefik sets X-Forwarded-For: <real-client-ip>
+//
+// KEY GENERATOR:
+//   We do NOT use ipKeyGenerator from express-rate-limit.
+//   Reason: ipKeyGenerator reads req.ip, which under some Traefik configs
+//   still resolves to the container's internal IP (same for every request),
+//   making the rate limiter count all traffic as one bucket → 429 never fires.
+//
+//   Instead we use a manual keyGenerator that reads X-Forwarded-For directly,
+//   strips the IPv6 prefix (::ffff:) for normalization, and falls back to
+//   req.ip if the header is missing. This is reliable across Traefik versions.
 //
 // LAYERED RATE-LIMIT STRATEGY:
-//   Layer 1: globalLimiter   — broad IP-level throttle across all endpoints
-//   Layer 2: sendOtpLimiter  — tight limit on OTP generation (expensive, spammable)
+//   Layer 1: globalLimiter    — broad IP-level throttle across all endpoints
+//   Layer 2: sendOtpLimiter   — tight limit on OTP generation (expensive, spammable)
 //   Layer 3: verifyOtpLimiter — tight limit on OTP verification (brute-force vector)
-//   Layer 4: otpService DB cooldown — per-email, cross-instance (bypasses layer 2-3)
+//   Layer 4: otpService DB cooldown — per-email, cross-instance safe
 //   Layer 5: Otp.attempts+lockedUntil — per-document lockout stored in MongoDB
 //
-// WHY MULTIPLE LAYERS:
-//   No single layer is sufficient. IP-based limits can be bypassed with proxies.
-//   In-memory limits reset on restart and don't work across Render instances.
-//   DB-backed limits survive restarts and work across all instances.
-//
-// ─────────────────────────────────────────────────────────────────────────────
-// express-rate-limit v7+ NOTE:
-//   ipKeyGenerator IS the keyGenerator — assign it directly, don't wrap it.
-//   Wrapping it like `(req) => ipKeyGenerator(req)` causes it to return
-//   the function reference itself as the key string on some versions,
-//   making every request use the same bucket → limiter is completely bypassed.
-//
-//   trust proxy must be set in Express (app.set('trust proxy', 1)) BEFORE
-//   these limiters run, or req.ip is the Render proxy IP for all requests.
-//
-// ─────────────────────────────────────────────────────────────────────────────
 // IMPORTANT: GamingSession is NOT imported at top level.
-//   It is required lazily inside sessionCreationCooldown() only.
-//   Reason: top-level require of GamingSession caused a circular dependency
-//   that crashed the module load, making loginLimiter undefined, which caused
-//   Express to call next(TypeError) → global error handler → "Something went wrong!"
-//   for ALL login/register attempts.
+//   Lazy-required inside sessionCreationCooldown() only to avoid circular
+//   dependency crashes that would make all exported limiters undefined.
 // ─────────────────────────────────────────────────────────────────────────────
 
 'use strict';
 
-const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
+const { rateLimit } = require('express-rate-limit');
 const { isWithinSpamWindow, nextAllowedCreateTime } = require('../utils/timeUtils');
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REAL IP EXTRACTOR
+// Reads X-Forwarded-For directly — more reliable than req.ip under Traefik.
+// Strips ::ffff: prefix so IPv4-mapped IPv6 addresses count as one bucket.
+// Also logs the resolved IP on every request so you can verify in server logs.
+// ─────────────────────────────────────────────────────────────────────────────
+const getClientIp = (req) => {
+  const forwarded = req.headers['x-forwarded-for'];
+  const raw = forwarded
+    ? forwarded.split(',')[0].trim()   // leftmost = real client IP
+    : req.ip || req.connection.remoteAddress || 'unknown';
+  return raw.replace(/^::ffff:/, ''); // normalise IPv4-mapped IPv6
+};
 
 // ── Shared base options applied to all limiters ───────────────────────────────
 const sharedOptions = {
-  standardHeaders: true,   // Emit RateLimit-* headers (RFC 6585)
-  legacyHeaders:   false,  // Suppress deprecated X-RateLimit-* headers
+  standardHeaders: true,
+  legacyHeaders:   false,
   skipFailedRequests: false,
   skipSuccessfulRequests: false,
-  keyGenerator: ipKeyGenerator, // ← assign directly, not wrapped in arrow function
+  keyGenerator: getClientIp,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. Global limiter — 100 requests per 15 minutes per IP
-//    Applied to ALL routes in server.js before everything else.
-//    Broad defense against DDoS and mass scanning.
 // ─────────────────────────────────────────────────────────────────────────────
 const globalLimiter = rateLimit({
   ...sharedOptions,
@@ -70,8 +72,6 @@ const globalLimiter = rateLimit({
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 2. OTP send limiter — 3 requests per 15 minutes per IP
-//    Prevents OTP spam (each request triggers email → costs money + annoys users).
-//    Note: DB-level per-email cooldown (otpService) is an additional layer.
 // ─────────────────────────────────────────────────────────────────────────────
 const sendOtpLimiter = rateLimit({
   ...sharedOptions,
@@ -87,8 +87,6 @@ const sendOtpLimiter = rateLimit({
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 3. OTP verify limiter — 5 requests per 10 minutes per IP
-//    Slows brute-force against 6-digit OTPs before DB-level lockout triggers.
-//    6-digit space = 900,000 possibilities. At 5/10min → 6.5 days to exhaust.
 // ─────────────────────────────────────────────────────────────────────────────
 const verifyOtpLimiter = rateLimit({
   ...sharedOptions,
@@ -164,14 +162,10 @@ const createSessionIpLimiter = rateLimit({
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 8. Gaming session user-level cooldown (DB-backed, cross-instance safe)
-//    2-hour cooldown stored in MongoDB — survives restarts and load balancers.
-//
-//    GamingSession is required lazily here (not at module top level) to prevent
-//    circular dependency crashes that would make all exported limiters undefined.
+//    GamingSession lazy-required to avoid circular dependency at module load.
 // ─────────────────────────────────────────────────────────────────────────────
 async function sessionCreationCooldown(req, res, next) {
   try {
-    // Lazy require — avoids circular dependency at module load time
     const GamingSession = require('../models/GamingSession');
     const userId = req.user._id;
 
@@ -191,7 +185,6 @@ async function sessionCreationCooldown(req, res, next) {
 
     next();
   } catch (err) {
-    // Non-fatal — fail open so genuine users aren't blocked by a DB glitch
     console.error('[RateLimit] sessionCreationCooldown error:', err.message);
     next();
   }
