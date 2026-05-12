@@ -143,8 +143,18 @@ exports.updatePassword = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Current and new password are required.' });
     }
 
-    if (newPassword.length < 6) {
-      return res.status(400).json({ success: false, message: 'New password must be at least 6 characters.' });
+    // ── Password strength validation (mirrors client-side rules) ──────────────
+    if (newPassword.length < 8) {
+      return res.status(400).json({ success: false, message: 'Password must be at least 8 characters.' });
+    }
+    if (!/[a-zA-Z]/.test(newPassword)) {
+      return res.status(400).json({ success: false, message: 'Password must contain at least one letter.' });
+    }
+    if (!/[0-9]/.test(newPassword)) {
+      return res.status(400).json({ success: false, message: 'Password must contain at least one number.' });
+    }
+    if (!/[@$!%*?&]/.test(newPassword)) {
+      return res.status(400).json({ success: false, message: 'Password must contain at least one special character (@$!%*?&).' });
     }
 
     // Fetch user WITH password hash
