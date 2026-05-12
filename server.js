@@ -96,14 +96,14 @@ const io = socketIo(server, {
 });
 
 // =============================================
-// TRUST PROXY — CRITICAL for Render
-// Set to true to trust ALL X-Forwarded-For hops.
-// Render sits behind multiple proxy layers — setting this to 1 (one hop)
-// causes req.ip to resolve to Render's internal proxy IP instead of the
-// real client IP, making ALL rate limiters key off the same IP and
-// therefore never trigger. true = trust the leftmost IP in X-Forwarded-For.
+// TRUST PROXY — Coolify + Traefik on Oracle Cloud
+// Traefik is exactly 1 proxy hop in front of Node.
+// Setting to 1 tells Express to trust only the first
+// X-Forwarded-For entry, which is the real client IP.
+// The rate limiter keyGenerator reads X-Forwarded-For
+// directly (not req.ip) so this is a belt-and-suspenders.
 // =============================================
-app.set('trust proxy', true);
+app.set('trust proxy', 1);
 
 // =============================================
 // SECURITY MIDDLEWARE
