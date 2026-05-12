@@ -90,15 +90,24 @@ const authenticate = async (req, res, next) => {
     // Legacy: also check suspensionInfo directly (in case status field is stale)
     if (user.suspensionInfo?.isSuspended && user.status !== 'SUSPENDED') {
       const until = user.suspensionInfo.suspendedUntil;
-      return res.status(403).json({
-        success: false,
-        message: 'Account is suspended',
-        suspensionInfo: {
-          reason:       user.suspensionInfo.suspensionReason || 'Community guideline violation',
-          until:        until ? until.toISOString() : 'indefinite',
-          restrictions: user.suspensionInfo.restrictions || [],
-        }
-      });
+      // ✅ Auto-lift if suspension period has expired
+      if (until && new Date() > new Date(until)) {
+        await User.updateOne({ _id: user._id }, {
+          'suspensionInfo.isSuspended': false,
+          status: 'ACTIVE'
+        });
+        // Continue — suspension has expired
+      } else {
+        return res.status(403).json({
+          success: false,
+          message: 'Account is suspended',
+          suspensionInfo: {
+            reason:       user.suspensionInfo.suspensionReason || 'Community guideline violation',
+            until:        until ? until.toISOString() : 'indefinite',
+            restrictions: user.suspensionInfo.restrictions || [],
+          }
+        });
+      }
     }
 
     if (user.banInfo?.isBanned && user.status !== 'BANNED') {
