@@ -252,12 +252,15 @@ router.post('/reset-password', verifyOtpLimiter, async (req, res) => {
     }
 
     // 7. Rotate + save (pre-save hook in User.js bcrypts user.password)
+    //    Also increment tokenVersion so all existing JWTs are immediately invalidated.
+    //    Anyone who had a stolen token can no longer use it after a password reset.
     if (user.password) {
       user.previousPasswords = [user.password, ...prevHashes].slice(0, 5);
     }
     user.password            = newPassword;
     user.lastPasswordResetAt = new Date();
     user.resetPasswordCount  = (user.resetPasswordCount || 0) + 1;
+    user.tokenVersion        = (user.tokenVersion || 0) + 1;  // ✅ invalidate all old JWTs
     await user.save();
 
     console.log(`✅ Password reset success: ${user.email} (reset #${user.resetPasswordCount})`);

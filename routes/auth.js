@@ -60,9 +60,26 @@ if (!JWT_SECRET) {
 // =============================================
 // HELPER: GENERATE JWT TOKEN
 // =============================================
-const generateToken = (userId, role) => {
+// tokenVersion (tv) is embedded in the payload.
+// Auth middleware compares payload.tv against db.tokenVersion on every
+// request — if they differ the token is rejected immediately.
+// This allows instant revocation without a blocklist:
+//   - logout-all   → increment tokenVersion → all old tokens fail
+//   - password change → increment tokenVersion → stolen tokens fail
+//
+// Access token lifetime: 24h (down from 7d).
+//   Risk window for a stolen token is now 24h max instead of 7 days.
+//
+// FUTURE REFRESH TOKEN SLOT:
+//   When you add refresh tokens, generateToken() stays the same.
+//   Add a separate generateRefreshToken(userId, tokenVersion) that issues
+//   a long-lived (30d) opaque token stored hashed in a RefreshToken collection.
+//   POST /api/auth/refresh verifies the refresh token, checks tokenVersion,
+//   and issues a new 24h access token. Android calls /refresh when it gets 401.
+// =============================================
+const generateToken = (userId, role, tokenVersion = 0) => {
   return jwt.sign(
-    { userId, role },
+    { userId, role, tv: tokenVersion },
     JWT_SECRET,
     { expiresIn: '7d' }
   );
@@ -355,8 +372,8 @@ router.post('/login', loginLimiter, async (req, res) => {
     // Get role (handle both old and new User models)
     const userRole = user.role || 'USER';
 
-    // Generate token (includes role)
-    const token = generateToken(user._id, userRole);
+    // Generate token (includes role + tokenVersion for revocation support)
+    const token = generateToken(user._id, userRole, user.tokenVersion ?? 0);
 
     console.log(`✅ Login successful: ${user.email} (${userRole})`);
 
@@ -551,7 +568,7 @@ router.post('/google-auth', async (req, res) => {
       user.lastActive = new Date();
       await user.save();
 
-      const token = generateToken(user._id, user.role || 'USER');
+      const token = generateToken(user._id, user.role || 'USER', user.tokenVersion ?? 0);
       console.log(`✅ Google login success: ${user.email}`);
 
       return res.status(200).json({
@@ -572,7 +589,7 @@ router.post('/google-auth', async (req, res) => {
       user.lastActive = new Date();
       await user.save();
 
-      const token = generateToken(user._id, user.role || 'USER');
+      const token = generateToken(user._id, user.role || 'USER', user.tokenVersion ?? 0);
 
       console.log(`ℹ️ Google register: existing account ${user.email} → returning isNewUser=false`);
 
@@ -618,7 +635,7 @@ router.post('/google-auth', async (req, res) => {
 
     await newUser.save();
 
-    const token = generateToken(newUser._id, 'USER');
+    const token = generateToken(newUser._id, 'USER', newUser.tokenVersion ?? 0);
 
     console.log(`✅ Google register: new user created ${newUser.email}`);
 
@@ -1026,7 +1043,7 @@ router.post('/facebook-auth', async (req, res) => {
       user.lastActive = new Date();
       await user.save();
 
-      const token = generateToken(user._id, user.role || 'USER');
+      const token = generateToken(user._id, user.role || 'USER', user.tokenVersion ?? 0);
       console.log(`✅ Facebook login success: ${user.email}`);
 
       return res.status(200).json({
@@ -1045,7 +1062,7 @@ router.post('/facebook-auth', async (req, res) => {
       user.lastActive = new Date();
       await user.save();
 
-      const token = generateToken(user._id, user.role || 'USER');
+      const token = generateToken(user._id, user.role || 'USER', user.tokenVersion ?? 0);
       console.log(`ℹ️ Facebook register: existing account ${user.email} → isNewUser=false`);
 
       return res.status(200).json({
@@ -1090,7 +1107,7 @@ router.post('/facebook-auth', async (req, res) => {
 
     await newUser.save();
 
-    const token = generateToken(newUser._id, 'USER');
+    const token = generateToken(newUser._id, 'USER', newUser.tokenVersion ?? 0);
     console.log(`✅ Facebook register: new user created ${newUser.email}`);
 
     return res.status(201).json({
@@ -1107,6 +1124,30 @@ router.post('/facebook-auth', async (req, res) => {
       success: false,
       message: 'Server error during Facebook authentication'
     });
+  }
+});
+
+// =============================================
+// LOGOUT-ALL
+// =============================================
+
+/**
+ * @route   POST /api/auth/logout-all
+ * @desc    Invalidate ALL active JWTs for this user by incrementing tokenVersion.
+ *          Any token issued before this call will fail the tv check in auth middleware.
+ * @access  Private
+ */
+router.post('/logout-all', authenticate, async (req, res) => {
+  try {
+    await User.updateOne(
+      { _id: req.user._id },
+      { $inc: { tokenVersion: 1 } }
+    );
+    console.log(`✅ logout-all: tokenVersion incremented for ${req.user.email}`);
+    return res.json({ success: true, message: 'All sessions have been logged out.' });
+  } catch (error) {
+    console.error('logout-all error:', error);
+    return res.status(500).json({ success: false, message: 'Server error during logout' });
   }
 });
 
