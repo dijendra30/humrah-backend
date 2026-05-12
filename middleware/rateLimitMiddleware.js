@@ -53,6 +53,11 @@ const sharedOptions = {
   skipFailedRequests: false,
   skipSuccessfulRequests: false,
   keyGenerator: getClientIp,
+  // We intentionally read X-Forwarded-For directly (not via req.ip) because
+  // Traefik on Coolify can resolve req.ip to the container's internal address.
+  // Suppress express-rate-limit's IPv6 keyGenerator validation warning since
+  // our getClientIp already handles ::ffff: normalisation correctly.
+  validate: { xForwardedForHeader: false, ip: false },
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
