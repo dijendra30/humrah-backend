@@ -162,6 +162,12 @@ exports.updatePassword = async (req, res) => {
     // Assign plain password — the User model's pre('save') hook hashes it automatically.
     // Do NOT manually bcrypt.hash here; doing so would cause double-hashing.
     user.password = newPassword;
+
+    // ✅ Increment tokenVersion — invalidates all existing JWTs immediately.
+    // Any device still holding an old token will get 401 on next request
+    // and be forced to re-login. Prevents stolen tokens surviving after password change.
+    user.tokenVersion = (user.tokenVersion || 0) + 1;
+
     await user.save();
 
     res.json({ success: true, message: 'Password updated successfully.' });
