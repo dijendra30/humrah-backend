@@ -261,6 +261,15 @@ router.post('/login', loginLimiter, async (req, res) => {
     }
 
     // Verify password
+    // Guard: user may have registered via Google/Facebook and has no password.
+    // comparePassword now returns false safely, but be explicit here too.
+    if (!user.password) {
+      return res.status(401).json({
+        success: false,
+        message: 'This account uses Google or Facebook sign-in. Please use that instead.'
+      });
+    }
+
     let isMatch = false;
     try {
       isMatch = await user.comparePassword(password);
