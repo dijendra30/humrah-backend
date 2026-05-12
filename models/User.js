@@ -197,6 +197,13 @@ const userSchema = new mongoose.Schema({
     default: false,
   },
 
+  // Groq daily usage tracking — persisted to DB so it survives server restarts
+  // Structure: { date: 'YYYY-MM-DD', count: Number }
+  groqUsage: {
+    date:  { type: String,  default: null },
+    count: { type: Number,  default: 0    },
+  },
+
   // =============================================
   // ✅ USER TYPE SYSTEM
   // =============================================
