@@ -27,12 +27,19 @@
 //
 //   trust proxy must be set in Express (app.set('trust proxy', 1)) BEFORE
 //   these limiters run, or req.ip is the Render proxy IP for all requests.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// IMPORTANT: GamingSession is NOT imported at top level.
+//   It is required lazily inside sessionCreationCooldown() only.
+//   Reason: top-level require of GamingSession caused a circular dependency
+//   that crashed the module load, making loginLimiter undefined, which caused
+//   Express to call next(TypeError) → global error handler → "Something went wrong!"
+//   for ALL login/register attempts.
 // ─────────────────────────────────────────────────────────────────────────────
 
 'use strict';
 
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
-const GamingSession                  = require('../models/GamingSession');
 const { isWithinSpamWindow, nextAllowedCreateTime } = require('../utils/timeUtils');
 
 // ── Shared base options applied to all limiters ───────────────────────────────
@@ -158,9 +165,14 @@ const createSessionIpLimiter = rateLimit({
 // ─────────────────────────────────────────────────────────────────────────────
 // 8. Gaming session user-level cooldown (DB-backed, cross-instance safe)
 //    2-hour cooldown stored in MongoDB — survives restarts and load balancers.
+//
+//    GamingSession is required lazily here (not at module top level) to prevent
+//    circular dependency crashes that would make all exported limiters undefined.
 // ─────────────────────────────────────────────────────────────────────────────
 async function sessionCreationCooldown(req, res, next) {
   try {
+    // Lazy require — avoids circular dependency at module load time
+    const GamingSession = require('../models/GamingSession');
     const userId = req.user._id;
 
     const lastSession = await GamingSession.findOne({ creatorId: userId })
