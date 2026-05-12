@@ -613,6 +613,9 @@ userSchema.pre('save', async function (next) {
 });
 
 userSchema.methods.comparePassword = async function (candidatePassword) {
+  // Guard: Google/Facebook users have no password field.
+  // bcrypt.compare(anything, undefined) throws — catch it here cleanly.
+  if (!this.password) return false;
   return await bcrypt.compare(candidatePassword, this.password);
 };
 
