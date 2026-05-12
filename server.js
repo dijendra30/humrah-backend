@@ -1,4 +1,4 @@
-// server.js - UPDATED WITH LEGAL ACCEPTANCE ENFORCEMENT
+// server.js - UPDATED WITH LEGAL ACCEPTANCE ENFORCEMENT + PRODUCTION SECURITY HARDENING
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -22,7 +22,7 @@ const REQUIRED_ENV_VARS = [
   'MONGODB_URI',
   'AGORA_APP_ID',
   'AGORA_APP_CERTIFICATE',
-  'OTP_PEPPER',   // ← ADDED: without this every OTP call throws and auth is fully down
+  'OTP_PEPPER',
 ];
 const missingVars = REQUIRED_ENV_VARS.filter(v => !process.env[v]);
 if (missingVars.length > 0) {
@@ -44,36 +44,124 @@ try {
 const app = express();
 const server = http.createServer(app);
 
-// ✅ Socket.IO with authentication
+// =============================================
+// CORS ORIGIN WHITELIST
+// Android Retrofit does NOT send Origin headers for native requests.
+// The whitelist matters for:
+//   - Browser-based pages (reset-password.html)
+//   - Future web dashboard
+//   - Any browser fetch calls
+// null = allows requests with no Origin (native Android, Postman dev testing)
+// =============================================
+const ALLOWED_ORIGINS = [
+  // Add your web dashboard domain here when you have one
+  // e.g. 'https://admin.humrah.in'
+  'https://humrah.in',
+  'https://www.humrah.in',
+];
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    // Allow requests with no Origin header (native Android, server-to-server)
+    if (!origin) return callback(null, true);
+    if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+    // In development, allow localhost
+    if (process.env.NODE_ENV !== 'production' && origin.startsWith('http://localhost')) {
+      return callback(null, true);
+    }
+    return callback(new Error(`CORS blocked: ${origin}`));
+  },
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: false, // set true only if you add cookie auth later
+};
+
+// ✅ Socket.IO with same CORS whitelist
+// Android Socket.IO client does NOT send Origin — null check handles that.
 const io = socketIo(server, {
   cors: {
-    origin: '*',   // Android native apps don't send an Origin header — allow all
-    methods: ["GET", "POST", "PUT", "DELETE"]
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true);
+      if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+      if (process.env.NODE_ENV !== 'production' && origin.startsWith('http://localhost')) {
+        return callback(null, true);
+      }
+      return callback(new Error(`Socket CORS blocked: ${origin}`));
+    },
+    methods: ["GET", "POST"],
   },
   transports: ['websocket', 'polling'],
   pingTimeout: 60000,
   pingInterval: 25000
 });
 
-// Security middleware — applied BEFORE all routes
-// helmet: sets secure HTTP headers (XSS, clickjacking, MIME sniff, etc.)
-app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
-// mongoSanitize: strips MongoDB operators ($gt, $where) from req.body/query/params
-// prevents NoSQL injection attacks like { email: { "$gt": "" } }
+// =============================================
+// TRUST PROXY — CRITICAL for Render
+// Without this, req.ip returns the Render proxy IP on every request.
+// All rate limiters key off req.ip — they become useless without this.
+// =============================================
+app.set('trust proxy', 1);
+
+// =============================================
+// SECURITY MIDDLEWARE
+// Applied in this order deliberately.
+// =============================================
+
+// 1. Remove X-Powered-By header (don't advertise Express)
+app.disable('x-powered-by');
+
+// 2. Helmet: sets secure HTTP headers
+//    - X-Content-Type-Options: nosniff
+//    - X-Frame-Options: SAMEORIGIN
+//    - Strict-Transport-Security (HSTS)
+//    - Referrer-Policy
+//    - X-DNS-Prefetch-Control
+//    CSP is configured specifically (not disabled) to protect reset-password.html
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc:     ["'self'"],
+      scriptSrc:      ["'self'"],                    // no inline scripts on reset page
+      styleSrc:       ["'self'", "'unsafe-inline'"], // allow inline styles for the HTML page
+      imgSrc:         ["'self'", "data:", "https://res.cloudinary.com"], // profile photos
+      connectSrc:     ["'self'"],
+      fontSrc:        ["'self'"],
+      objectSrc:      ["'none'"],
+      frameSrc:       ["'none'"],
+      upgradeInsecureRequests: [],
+    },
+  },
+  crossOriginEmbedderPolicy: false, // keep false — Agora/Socket.IO need this off
+  hsts: {
+    maxAge: 31536000,       // 1 year
+    includeSubDomains: true,
+    preload: true,
+  },
+  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+}));
+
+// 3. CORS
+app.use(cors(corsOptions));
+
+// 4. mongoSanitize: strips $gt, $where, etc. from req.body/query/params
+//    Prevents NoSQL injection like { email: { "$gt": "" } }
 app.use(mongoSanitize());
-// hpp: prevent HTTP Parameter Pollution (duplicate params)
+
+// 5. hpp: prevent HTTP Parameter Pollution (duplicate params attack)
 app.use(hpp());
-// globalLimiter: 100 req / 15 min per IP across all endpoints
+
+// 6. Global rate limiter — 100 req / 15 min per IP
+//    trust proxy must be set BEFORE this runs so ipKeyGenerator gets real IP
 app.use(globalLimiter);
 
-// CORS — restrict to known origins in production
-app.use(cors({
-  origin: '*',   // Android native apps don't send Origin header
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+// =============================================
+// BODY PARSING — conservative limits
+// 10mb was set globally, which is dangerous (memory exhaustion).
+// JSON APIs need at most 100kb. File uploads go through multer separately.
+// Only increase per-route if specifically needed.
+// =============================================
+app.use(express.json({ limit: '100kb' }));
+app.use(express.urlencoded({ extended: true, limit: '100kb' }));
 
 // Make io available to routes
 app.set('io', io);
@@ -442,11 +530,17 @@ app.get('/api/health', (req, res) => {
 // GLOBAL ERROR HANDLER
 // =============================================
 app.use((err, req, res, next) => {
+  // CORS errors — return 403, not 500
+  if (err.message && err.message.startsWith('CORS blocked')) {
+    return res.status(403).json({ success: false, message: 'Forbidden' });
+  }
+
   console.error(err.stack);
   res.status(500).json({
     success: false,
     message: 'Something went wrong!',
-    error:   process.env.NODE_ENV === 'development' ? err.message : undefined
+    // Never leak stack traces in production
+    error: process.env.NODE_ENV === 'development' ? err.message : undefined
   });
 });
 
@@ -462,6 +556,9 @@ server.listen(PORT, () => {
   console.log(`✅ OTP system: MongoDB-backed, bcrypt+pepper, multi-instance safe`);
   console.log(`✅ FCM Token route: POST /api/auth/fcm-token`);
   console.log(`✅ Password reset: POST /api/auth/forgot-password + /api/auth/reset-password`);
+  console.log(`✅ Trust proxy enabled (Render reverse proxy)`);
+  console.log(`✅ Body size limit: 100kb JSON`);
+  console.log(`✅ CORS: origin whitelist active`);
 });
 
 // =============================================
