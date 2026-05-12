@@ -614,7 +614,7 @@ router.patch('/:id', auth, async (req, res) => {
   try {
     const post = await Post.findById(req.params.id);
     if (!post) return res.status(404).json({ success: false, message: 'Post not found' });
-    if (post.userId.toString() !== req.userId) {
+    if (post.userId.toString() !== req.userId.toString()) {
       return res.status(403).json({ success: false, message: 'Not authorized' });
     }
 
@@ -655,7 +655,7 @@ router.patch('/:id/toggle-comments', auth, async (req, res) => {
   try {
     const post = await Post.findById(req.params.id);
     if (!post) return res.status(404).json({ success: false, message: 'Post not found' });
-    if (post.userId.toString() !== req.userId) {
+    if (post.userId.toString() !== req.userId.toString()) {
       return res.status(403).json({ success: false, message: 'Not authorized' });
     }
 
@@ -849,7 +849,7 @@ router.delete('/:id', auth, async (req, res) => {
   try {
     const post = await Post.findById(req.params.id);
     if (!post) return res.status(404).json({ success: false, message: 'Post not found' });
-    if (post.userId.toString() !== req.userId) {
+    if (post.userId.toString() !== req.userId.toString()) {
       return res.status(403).json({ success: false, message: 'Not authorized' });
     }
 
