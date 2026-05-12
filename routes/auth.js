@@ -496,7 +496,7 @@ router.post('/google-auth', async (req, res) => {
     // ════════════════════════════════════════════════════════════════════════
     if (!isRegister) {
       if (!user) {
-        console.log(`🔍 Google login: no account for ${normalizedEmail}`);
+        console.log(`🔍 Google login: no account for ${verifiedEmail}`);  // FIX: was normalizedEmail (undefined at this scope)
         return res.status(404).json({
           success: false,
           message: 'No account found. Please register first.'
