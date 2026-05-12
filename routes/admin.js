@@ -767,12 +767,38 @@ router.patch('/post-reports/:id/resolve', authenticate, adminOnly, async (req, r
     const io = req.app.get('io');
     if (io && report.reportedBy?._id) {
       io.to(report.reportedBy._id.toString()).emit('REPORT_RESOLVED', {
-        type:     'REPORT_RESOLVED',
-        icon:     '🛡️',
-        message,
-        reportId: report._id,
-        reason:   report.reason
+        type: 'REPORT_RESOLVED', icon: '🛡️', message, reportId: report._id, reason: report.reason
       });
+    }
+
+    // FCM push (works even when user is offline)
+    try {
+      const reporter = await User.findById(report.reportedBy._id).select('fcmTokens');
+      if (reporter?.fcmTokens?.length) {
+        const { getMessaging } = require('firebase-admin/messaging');
+        await getMessaging().sendEachForMulticast({
+          notification: { title: '🛡️ Report Resolved', body: message },
+          data: { type: 'REPORT_RESOLVED', reportId: report._id.toString(), reason: report.reason },
+          tokens: reporter.fcmTokens
+        });
+      }
+    } catch (fcmErr) {
+      console.error('FCM notify error:', fcmErr.message);
+    }
+
+    // Save to activity feed (shows in heart icon)
+    try {
+      const { createOrAggregateActivity } = require('../controllers/activityController');
+      await createOrAggregateActivity({
+        userId: report.reportedBy._id,
+        actorId: req.userId,
+        type: 'REPORT_RESOLVED',
+        entityType: 'report',
+        entityId: report._id,
+        message
+      });
+    } catch (actErr) {
+      console.error('Activity log error:', actErr.message);
     }
 
     res.json({ success: true, message: 'Report resolved and reporter notified', report });
