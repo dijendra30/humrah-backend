@@ -42,6 +42,20 @@ const authenticate = async (req, res, next) => {
       });
     }
 
+    // ✅ TOKEN VERSION CHECK — rejects revoked tokens instantly.
+    // payload.tv is the tokenVersion at issue time.
+    // db.tokenVersion is the current value (incremented on logout-all / password change).
+    // Mismatch = token was issued before the last revocation event → reject.
+    // Existing users have no tv in their old tokens → treat as 0 (backward-compatible).
+    const payloadTv = decoded.tv ?? 0;
+    const dbTv      = user.tokenVersion   ?? 0;
+    if (payloadTv !== dbTv) {
+      return res.status(401).json({
+        success: false,
+        message: 'Session expired. Please login again.'
+      });
+    }
+
     // Check if account is locked (if method exists)
     if (user.isLocked && user.isLocked()) {
       return res.status(403).json({
