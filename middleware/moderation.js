@@ -240,6 +240,51 @@ const ZERO_TOL_NORMALIZED = [
 // OPENAI MODERATION LAYER
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// ── Token-bucket: max 3 calls/min to respect OpenAI free-tier RPM limit ──────
+const _openAiQueue = [];
+let   _openAiRunning = false;
+
+function _enqueueOpenAI(fn) {
+  return new Promise((resolve, reject) => {
+    _openAiQueue.push({ fn, resolve, reject });
+    if (!_openAiRunning) _drainOpenAIQueue();
+  });
+}
+
+async function _drainOpenAIQueue() {
+  _openAiRunning = true;
+  while (_openAiQueue.length > 0) {
+    const { fn, resolve, reject } = _openAiQueue.shift();
+    try { resolve(await fn()); } catch (e) { reject(e); }
+    if (_openAiQueue.length > 0) {
+      // 21 s gap ≈ ~2.8 calls/min, safely under the free-tier 3 RPM cap
+      await new Promise(r => setTimeout(r, 21000));
+    }
+  }
+  _openAiRunning = false;
+}
+
+async function _callOpenAI(input, apiKey, attempt = 1) {
+  try {
+    const res = await axios.post(
+      'https://api.openai.com/v1/moderations',
+      { input },
+      { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 10000 }
+    );
+    return res;
+  } catch (err) {
+    const status = err.response?.status;
+    // Retry up to 3 times on 429 with exponential backoff
+    if (status === 429 && attempt <= 3) {
+      const waitMs = attempt * 22000; // 22s, 44s, 66s
+      console.warn(`[MODERATION] OpenAI rate limit — retry ${attempt}/3 in ${waitMs / 1000}s`);
+      await new Promise(r => setTimeout(r, waitMs));
+      return _callOpenAI(input, apiKey, attempt + 1);
+    }
+    throw err;
+  }
+}
+
 async function checkWithOpenAI(fieldTexts) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
@@ -250,33 +295,30 @@ async function checkWithOpenAI(fieldTexts) {
 
   const input = Object.entries(fieldTexts).map(([f, t]) => `[${f}]: ${t}`).join('\n---\n');
 
-  try {
-    const res = await axios.post(
-      'https://api.openai.com/v1/moderations',
-      { input },
-      { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 6000 }
-    );
+  return _enqueueOpenAI(async () => {
+    try {
+      const res    = await _callOpenAI(input, apiKey);
+      const scores = res.data.results[0].category_scores;
+      const flagged = [];
+      let maxLevel  = LEVEL.CLEAN;
 
-    const scores  = res.data.results[0].category_scores;
-    const flagged = [];
-    let maxLevel  = LEVEL.CLEAN;
-
-    for (const [cat, threshold] of Object.entries(OPENAI_THRESHOLDS)) {
-      if ((scores[cat] ?? 0) >= threshold) {
-        flagged.push(cat);
-        const catLevel = AI_CATEGORY_LEVEL[cat] ?? LEVEL.POLICY;
-        if (catLevel > maxLevel) maxLevel = catLevel;
+      for (const [cat, threshold] of Object.entries(OPENAI_THRESHOLDS)) {
+        if ((scores[cat] ?? 0) >= threshold) {
+          flagged.push(cat);
+          const catLevel = AI_CATEGORY_LEVEL[cat] ?? LEVEL.POLICY;
+          if (catLevel > maxLevel) maxLevel = catLevel;
+        }
       }
-    }
-    return { safe: flagged.length === 0, flaggedCategories: flagged, maxLevel };
+      return { safe: flagged.length === 0, flaggedCategories: flagged, maxLevel };
 
-  } catch (err) {
-    const status = err.response?.status;
-    if (status === 401) console.error('[MODERATION] Invalid OPENAI_API_KEY');
-    else if (status === 429) console.warn('[MODERATION] OpenAI rate limit — skipping AI layer');
-    else console.error('[MODERATION] OpenAI unavailable (fail-open):', err.message);
-    return { safe: true, flaggedCategories: [], maxLevel: LEVEL.CLEAN };
-  }
+    } catch (err) {
+      const status = err.response?.status;
+      if (status === 401) console.error('[MODERATION] Invalid OPENAI_API_KEY — check your key');
+      else if (status === 429) console.warn('[MODERATION] OpenAI rate limit exhausted after retries — skipping AI layer');
+      else console.error('[MODERATION] OpenAI unavailable (fail-open):', err.message);
+      return { safe: true, flaggedCategories: [], maxLevel: LEVEL.CLEAN };
+    }
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
