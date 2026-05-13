@@ -660,11 +660,130 @@ router.get('/admin/pending-verifications', authenticate, adminOnly, async (req, 
 });
 
 
-// ============================================================
-// PATCH /host-status — Toggle Activity Host Mode visibility
-// Body: { hostActive: Boolean }
-// Only affects discovery visibility; does NOT remove host profile
-// ============================================================
+// ==================== DAILY MOOD ROUTES ====================
+
+// @route   PUT /api/users/me/daily-mood
+// @desc    Set/update user's daily mood
+// @access  Private
+router.put('/me/daily-mood', authenticate, async (req, res) => {
+  try {
+    const { moods, energyLevel, openTo, visible } = req.body;
+
+    // Validation
+    if (!moods || !Array.isArray(moods) || moods.length === 0) {
+      return res.status(400).json({ success: false, message: 'At least one mood is required' });
+    }
+    if (moods.length > 2) {
+      return res.status(400).json({ success: false, message: 'Maximum 2 moods allowed' });
+    }
+    if (energyLevel === undefined || energyLevel === null || energyLevel < 1 || energyLevel > 10) {
+      return res.status(400).json({ success: false, message: 'Energy level must be between 1 and 10' });
+    }
+    if (openTo && openTo.length > 5) {
+      return res.status(400).json({ success: false, message: 'Maximum 5 openTo items allowed' });
+    }
+
+    const now     = new Date();
+    const expires = new Date(now.getTime() + 24 * 60 * 60 * 1000); // +24h
+
+    const user = await User.findByIdAndUpdate(
+      req.userId,
+      {
+        dailyMood: {
+          moods,
+          energyLevel,
+          openTo: openTo || [],
+          updatedAt: now,
+          expiresAt: expires,
+          visible: visible !== false
+        }
+      },
+      { new: true }
+    ).select('dailyMood');
+
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    res.json({ success: true, message: 'Daily mood updated', dailyMood: user.dailyMood });
+
+  } catch (error) {
+    console.error('Set daily mood error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// @route   GET /api/users/me/daily-mood
+// @desc    Get current user's daily mood
+// @access  Private
+router.get('/me/daily-mood', authenticate, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId).select('dailyMood');
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    const mood = user.dailyMood;
+    const isActive = mood && mood.expiresAt && new Date(mood.expiresAt) > new Date();
+
+    res.json({ success: true, dailyMood: mood, isActive: !!isActive });
+  } catch (error) {
+    console.error('Get daily mood error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ==================== MATCHING TODAY'S MOOD ROUTE (spec alias) ====================
+
+// @route   PUT /api/users/me/mood
+// @desc    Set mood via spec field names (mood, vibeLevel, preferredPlace, visible)
+//          Maps → existing dailyMood schema fields
+// @access  Private
+router.put('/me/mood', authenticate, async (req, res) => {
+  try {
+    const { mood, vibeLevel, preferredPlace, showNearby, publicOnly } = req.body;
+
+    if (!mood) {
+      return res.status(400).json({ success: false, message: 'mood is required' });
+    }
+
+    // Map vibeLevel string → energyLevel 1-10
+    const energyMap = { lowkey: 3, normal: 6, social: 9 };
+    const energyLevel = energyMap[vibeLevel?.toLowerCase()] || 6;
+
+    // openTo = [preferredPlace] if set
+    const openTo = preferredPlace ? [preferredPlace] : [];
+
+    const now     = new Date();
+    const expires = new Date(now.getTime() + 4 * 60 * 60 * 1000); // 4h per spec
+
+    const user = await User.findByIdAndUpdate(
+      req.userId,
+      {
+        dailyMood: {
+          moods:       [mood],
+          energyLevel,
+          openTo,
+          updatedAt:   now,
+          expiresAt:   expires,
+          visible:     showNearby !== false
+        }
+      },
+      { new: true }
+    ).select('dailyMood');
+
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    res.json({
+      success:   true,
+      message:   '✨ You are now visible nearby',
+      dailyMood: user.dailyMood
+    });
+
+  } catch (error) {
+    console.error('Set mood error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ==================== HOST STATUS ROUTE ====================
+
 router.patch('/host-status', authenticate, async (req, res) => {
   try {
     const { hostActive } = req.body;
