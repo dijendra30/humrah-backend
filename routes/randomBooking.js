@@ -676,7 +676,18 @@ router.get('/chats/:chatId/messages', auth, async (req, res) => {
       });
     }
     
-    if (!chat.isParticipant(req.userId)) {
+    // ✅ FIX: Compare as strings explicitly to handle ObjectId vs string mismatch
+    const userIdStr = req.userId.toString();
+    const isParticipant = chat.participants.some(
+      p => p.userId.toString() === userIdStr
+    );
+
+    console.log('🔑 Participant check:');
+    console.log('   req.userId:', userIdStr);
+    console.log('   chat participants:', chat.participants.map(p => p.userId.toString()));
+    console.log('   isParticipant:', isParticipant);
+
+    if (!isParticipant) {
       return res.status(403).json({
         success: false,
         message: 'Access denied'
