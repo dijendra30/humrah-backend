@@ -442,6 +442,18 @@ const userSchema = new mongoose.Schema({
   updatedAt: { type: Date, default: Date.now },
 
   // =============================================
+  // ✅ DAILY MOOD (Matching Today's Mood feature)
+  // =============================================
+  dailyMood: {
+    moods:       { type: [String], default: [] },
+    energyLevel: { type: Number,   default: null, min: 1, max: 10 },
+    openTo:      { type: [String], default: [] },
+    updatedAt:   { type: Date,     default: null },
+    expiresAt:   { type: Date,     default: null },
+    visible:     { type: Boolean,  default: true }
+  },
+
+  // =============================================
   // ✅ BOOKING REFERENCES
   // =============================================
   bookingRefs: {
@@ -469,6 +481,7 @@ userSchema.methods.isImagePostBlocked = function () {
 // Single source of truth for indexes — no field-level index:true duplicates above.
 // =============================================
 userSchema.index({ last_known_lat: 1, last_known_lng: 1 });
+userSchema.index({ 'dailyMood.expiresAt': 1, 'dailyMood.visible': 1 }); // mood match queries
 userSchema.index({ 'moderationFlags.isFlagged': 1 });       // ← sole index for this field
 userSchema.index({ 'moderationFlags.strikeCount': 1 });
 userSchema.index({ last_location_updated_at: 1 });           // ← sole index for this field
