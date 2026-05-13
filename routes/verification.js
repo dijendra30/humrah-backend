@@ -285,6 +285,10 @@ async function processVerificationInBackground(sessionId, userId, io) {
       
       // Mark user as verified
       await user.markVerifiedViaVideo(result.faceEmbedding);
+      // Sync photoVerificationStatus so booking routes don't block this user
+      user.photoVerificationStatus = 'approved';
+      user.photoVerifiedAt = new Date();
+      await user.save();
       
       console.log(`✅ [Verification] User ${user._id} APPROVED and marked as verified`);
       
@@ -501,6 +505,9 @@ router.post('/admin/approve/:sessionId', auth, async (req, res) => {
     await session.save();
     
     user.verified = true;
+    user.photoVerificationStatus = 'approved';
+    user.photoVerifiedAt = new Date();
+    user.photoVerifiedBy = req.userId;
     user.verificationEmbedding = session.faceEmbedding;
     user.verifiedAt = new Date();
     await user.save();

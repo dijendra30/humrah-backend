@@ -97,11 +97,12 @@ router.post('/create', auth, async (req, res) => {
     console.log('='.repeat(60));
 
     const user = await User.findById(req.userId).select(
-      'random_trial_used verified home_city questionnaire'
+      'random_trial_used verified photoVerificationStatus home_city questionnaire'
     );
 
-    // ✅ VALIDATION: User must be verified
-    if (!user.verified) {
+    // ✅ VALIDATION: User must be verified (accept either flag to handle sync lag)
+    const isVerified = user.verified === true || user.photoVerificationStatus === 'approved';
+    if (!isVerified) {
       return res.status(403).json({
         success: false,
         message: 'Only verified users can create Random Meet requests. Please complete verification.'
@@ -443,10 +444,11 @@ router.post('/:bookingId/accept', auth, async (req, res) => {
       });
     }
 
-    const user = await User.findById(req.userId).select('verified');
+    const user = await User.findById(req.userId).select('verified photoVerificationStatus');
 
-    // ✅ VALIDATION: User must be verified
-    if (!user.verified) {
+    // ✅ VALIDATION: User must be verified (accept either flag to handle sync lag)
+    const isVerifiedAcceptor = user.verified === true || user.photoVerificationStatus === 'approved';
+    if (!isVerifiedAcceptor) {
       return res.status(403).json({
         success: false,
         message: 'Only verified users can accept Random Meet requests'
