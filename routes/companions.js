@@ -8,9 +8,9 @@ const admin  = require('firebase-admin');
 // ─── Allowed mood + openTo values (FIX #10: allowlist) ───────────────────────
 const VALID_MOODS = new Set([
   'Cafe Mood','Food Mood','Walk Mood','Talk Mood','Study Mood',
-  'Explore Mood','Chill Mood','Drive Mood','Photo Mood','Shop Mood',
+  'Explore Mood','Chill Mood','Photo Mood','Shop Mood',
   'Night Mood','Fitness Mood'
-]);
+]); // Drive Mood removed (safety concern)
 const VALID_OPEN_TO = new Set([
   'Cafe','Coffee','Food','Walk','Talk','Study','Explore',
   'Chill','Drive','Photos','Shopping','Night Out','Fitness'
@@ -136,7 +136,7 @@ router.get('/mood-matches', authenticate, async (req, res) => {
       : (a, b) => b.compatibilityScore - a.compatibilityScore
     );
 
-    res.json({ success: true, users: results.slice(0, 10), noMoodSet: false });
+    res.json({ success: true, users: results.slice(0, 10), noMoodSet: false, expiresAt: me.dailyMood.expiresAt });
 
   } catch (error) {
     console.error('Mood matches error:', error);

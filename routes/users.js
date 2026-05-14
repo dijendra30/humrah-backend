@@ -771,7 +771,7 @@ router.put('/me/mood', authenticate, async (req, res) => {
     const openTo = preferredPlace ? [preferredPlace] : [];
 
     const now     = new Date();
-    const expires = new Date(now.getTime() + 4 * 60 * 60 * 1000); // 4h per spec
+    const expires = new Date(now.getTime() + 3 * 60 * 60 * 1000); // 3h session expiry per spec
 
     const user = await User.findByIdAndUpdate(
       req.userId,
