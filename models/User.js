@@ -441,9 +441,7 @@ const userSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now },
 
-  // =============================================
-  // ✅ DAILY MOOD (Matching Today's Mood feature)
-  // =============================================
+  // Daily mood (Matching Today's Mood feature)
   dailyMood: {
     moods:       { type: [String], default: [] },
     energyLevel: { type: Number,   default: null, min: 1, max: 10 },
@@ -452,6 +450,9 @@ const userSchema = new mongoose.Schema({
     expiresAt:   { type: Date,     default: null },
     visible:     { type: Boolean,  default: true }
   },
+
+  // FIX #4: per-receiver last-request timestamp for duplicate throttle
+  moodRequestsSent: { type: Map, of: Date, default: {} },
 
   // =============================================
   // ✅ BOOKING REFERENCES
