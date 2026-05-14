@@ -74,7 +74,9 @@ router.put('/me', authenticate, async (req, res) => {
 // @access  Private
 router.get('/:id', authenticate, async (req, res) => {
   try {
-    const user = await User.findById(req.params.id).select('-password');
+    // FIX #12: exclude GPS coordinates, dailyMood, fcmTokens, blockedUsers from public profile
+    const user = await User.findById(req.params.id)
+      .select('-password -last_known_lat -last_known_lng -fcmTokens -blockedUsers -dailyMood');
     
     if (!user) {
       return res.status(404).json({ 
@@ -660,6 +662,17 @@ router.get('/admin/pending-verifications', authenticate, adminOnly, async (req, 
 });
 
 
+// Shared allowlists (FIX #10)
+const VALID_MOODS = new Set([
+  'Cafe Mood','Food Mood','Walk Mood','Talk Mood','Study Mood',
+  'Explore Mood','Chill Mood','Drive Mood','Photo Mood','Shop Mood',
+  'Night Mood','Fitness Mood'
+]);
+const VALID_OPEN_TO = new Set([
+  'Cafe','Coffee','Food','Walk','Talk','Study','Explore',
+  'Chill','Drive','Photos','Shopping','Night Out','Fitness'
+]);
+
 // ==================== DAILY MOOD ROUTES ====================
 
 // @route   PUT /api/users/me/daily-mood
@@ -682,9 +695,16 @@ router.put('/me/daily-mood', authenticate, async (req, res) => {
     if (openTo && openTo.length > 5) {
       return res.status(400).json({ success: false, message: 'Maximum 5 openTo items allowed' });
     }
+    // FIX #10: allowlist validation
+    if (!moods.every(m => VALID_MOODS.has(m))) {
+      return res.status(400).json({ success: false, message: 'Invalid mood value' });
+    }
+    if (openTo && !openTo.every(o => VALID_OPEN_TO.has(o))) {
+      return res.status(400).json({ success: false, message: 'Invalid openTo value' });
+    }
 
     const now     = new Date();
-    const expires = new Date(now.getTime() + 24 * 60 * 60 * 1000); // +24h
+    const expires = new Date(now.getTime() + 4 * 60 * 60 * 1000); // FIX #2: 4h not 24h
 
     const user = await User.findByIdAndUpdate(
       req.userId,
