@@ -66,6 +66,137 @@ function calcCompatibilityScore(me, other, maxKm) {
 }
 
 // =============================================================
+// MOOD PLACES — in-process cache (coord-keyed, 24h TTL)
+// =============================================================
+
+const moodPlacesCache = new Map(); // key: "lat_lng" → { data, fetchedAt }
+const CACHE_TTL_MS    = 24 * 60 * 60 * 1000;
+const CACHE_MOVE_KM   = 1; // invalidate if user moved > 1 km
+
+// Round to 2 decimal places ≈ 1.1km grid — nearby users share cache
+function cacheKey(lat, lng) {
+  return `${Math.round(lat * 100) / 100}_${Math.round(lng * 100) / 100}`;
+}
+
+function cacheValid(entry, lat, lng) {
+  if (!entry) return false;
+  if (Date.now() - entry.fetchedAt > CACHE_TTL_MS) return false;
+  if (haversineKm(lat, lng, entry.lat, entry.lng) > CACHE_MOVE_KM) return false;
+  return true;
+}
+
+// OSM tag config per mood — count + top 3 names only
+const MOOD_OSM_CONFIG = {
+  'Cafe Mood':    { queries: [['amenity', 'cafe|coffee_shop|bakery']],                                                                 label: 'cafes',          radius: 2000, fallback: 5000 },
+  'Food Mood':    { queries: [['amenity', 'restaurant|food_court|fast_food|bar']],                                                      label: 'food places',    radius: 2000, fallback: 5000 },
+  'Walk Mood':    { queries: [['leisure', 'park|garden|nature_reserve|playground']],                                                    label: 'parks',          radius: 4000, fallback: 8000 },
+  'Talk Mood':    { queries: [['amenity', 'cafe|community_centre|library|restaurant']],                                                 label: 'spots',          radius: 3000, fallback: 6000 },
+  'Study Mood':   { queries: [['amenity', 'library|cafe|university|college']],                                                          label: 'study spots',    radius: 3000, fallback: 6000 },
+  'Explore Mood': { queries: [['tourism','attraction|museum|viewpoint|gallery|theme_park|zoo'],['historic','monument|memorial|fort'],['railway','station']], label: 'explore spots', radius: 5000, fallback: 10000 },
+  'Chill Mood':   { queries: [['leisure', 'park|garden|pitch|nature_reserve']],                                                         label: 'chill spots',    radius: 4000, fallback: 8000 },
+  'Photo Mood':   { queries: [['tourism','attraction|viewpoint|museum|artwork|gallery'],['historic','monument|memorial|fort'],['natural','peak|water|wood|cliff|beach'],['leisure','park|garden']], label: 'photo spots', radius: 5000, fallback: 10000 },
+  'Shop Mood':    { queries: [['shop','mall|supermarket|department_store|clothes'],['amenity','marketplace']],                           label: 'shopping spots', radius: 3000, fallback: 6000 },
+  'Night Mood':   { queries: [['amenity', 'cafe|bar|cinema|restaurant|theatre']],                                                       label: 'safe spots',     radius: 2000, fallback: 4000 },
+  'Fitness Mood': { queries: [['leisure','fitness_centre|sports_centre|pitch|stadium|swimming_pool'],['amenity','gym'],['sport','fitness|gym|swimming|tennis']], label: 'fitness spots', radius: 3000, fallback: 6000 },
+};
+
+// Build minimal Overpass query — count + names only, no geometry
+function buildQuery(lat, lng, r, queries) {
+  const parts = queries.map(([k, v]) =>
+    `node(around:${r},${lat},${lng})["${k}"~"${v}"];way(around:${r},${lat},${lng})["${k}"~"${v}"];`
+  ).join('');
+  return `[out:json][timeout:12];(${parts});out tags 30;`;
+}
+
+// Fetch one mood from Overpass with fallback. Returns { count, names }.
+async function fetchOneMood(lat, lng, cfg, night) {
+  const https = require('https');
+  const qs    = require('querystring');
+  const initR = night ? Math.min(cfg.radius, 2000) : cfg.radius;
+
+  async function run(r) {
+    return new Promise((resolve) => {
+      const q    = buildQuery(lat, lng, r, cfg.queries);
+      const data = qs.stringify({ data: q });
+      const opts = {
+        hostname: 'overpass-api.de', path: '/api/interpreter',
+        method: 'POST', timeout: 13000,
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(data) }
+      };
+      const req = https.request(opts, res => {
+        let body = '';
+        res.on('data', d => body += d);
+        res.on('end', () => {
+          try {
+            const count = (body.match(/"type"\s*:\s*"(node|way)"/g) || []).length;
+            const nameMatches = [...body.matchAll(/"name"\s*:\s*"([^"]+)"/g)];
+            const names = [...new Set(nameMatches.map(m => m[1].trim()).filter(Boolean))].slice(0, 3);
+            resolve({ count, names });
+          } catch { resolve({ count: 0, names: [] }); }
+        });
+      });
+      req.on('error', () => resolve({ count: 0, names: [] }));
+      req.on('timeout', () => { req.destroy(); resolve({ count: 0, names: [] }); });
+      req.write(data); req.end();
+    });
+  }
+
+  const first = await run(initR);
+  if (first.count >= 3) return first;
+  const second = await run(cfg.fallback);
+  return second.count > first.count ? second : first;
+}
+
+// GET /api/companions/mood-places
+// One request — all 11 moods in parallel — cached by location
+router.get('/mood-places', authenticate, async (req, res) => {
+  try {
+    const me = await User.findById(req.userId).select('last_known_lat last_known_lng').lean();
+    if (!me || me.last_known_lat == null) {
+      return res.json({ success: true, places: {}, cached: false, message: 'Location not available' });
+    }
+
+    const { last_known_lat: lat, last_known_lng: lng } = me;
+    const key   = cacheKey(lat, lng);
+    const entry = moodPlacesCache.get(key);
+
+    if (cacheValid(entry, lat, lng)) {
+      return res.json({ success: true, places: entry.data, cached: true });
+    }
+
+    const night = isNightTime();
+
+    // Fetch all 11 moods in parallel
+    const moodKeys = Object.keys(MOOD_OSM_CONFIG);
+    const results  = await Promise.all(
+      moodKeys.map(moodKey => fetchOneMood(lat, lng, MOOD_OSM_CONFIG[moodKey], night)
+        .then(r => ({ moodKey, ...r, label: MOOD_OSM_CONFIG[moodKey].label }))
+        .catch(() => ({ moodKey, count: 0, names: [], label: MOOD_OSM_CONFIG[moodKey].label }))
+      )
+    );
+
+    const data = {};
+    results.forEach(({ moodKey, count, names, label }) => {
+      data[moodKey] = { count, names, label };
+    });
+
+    moodPlacesCache.set(key, { data, fetchedAt: Date.now(), lat, lng });
+
+    // Evict old entries (keep max 500 cache slots)
+    if (moodPlacesCache.size > 500) {
+      const oldest = [...moodPlacesCache.entries()].sort((a, b) => a[1].fetchedAt - b[1].fetchedAt)[0];
+      moodPlacesCache.delete(oldest[0]);
+    }
+
+    res.json({ success: true, places: data, cached: false });
+
+  } catch (error) {
+    console.error('Mood places error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// =============================================================
 // FIX #1: mood routes BEFORE /:companionId wildcard
 // =============================================================
 
