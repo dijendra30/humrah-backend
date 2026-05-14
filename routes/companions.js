@@ -107,7 +107,7 @@ router.get('/mood-matches', authenticate, async (req, res) => {
       'dailyMood.expiresAt': { $gt: now },
       'dailyMood.visible':   true
     })
-    .select('firstName age profilePhoto verified last_known_lat last_known_lng dailyMood questionnaire')
+    .select('firstName age profilePhoto verified photoVerificationStatus last_known_lat last_known_lng dailyMood questionnaire')
     .lean();
 
     const results = [];
@@ -119,13 +119,14 @@ router.get('/mood-matches', authenticate, async (req, res) => {
       if (distKm > MAX_KM) continue;
 
       results.push({
-        _id:                c._id,
-        firstName:          c.firstName,
-        age:                c.age || null,
-        profilePhoto:       c.profilePhoto,
-        verified:           c.verified,
-        distanceKm:         Math.round(distKm * 10) / 10,
-        compatibilityScore: calcCompatibilityScore(me, c, MAX_KM), // FIX #15
+        _id:                      c._id,
+        firstName:                c.firstName,
+        age:                      c.age || null,
+        profilePhoto:             c.profilePhoto,
+        verified:                 c.verified,
+        photoVerificationStatus:  c.photoVerificationStatus || null,
+        distanceKm:               Math.round(distKm * 10) / 10,
+        compatibilityScore:       calcCompatibilityScore(me, c, MAX_KM),
         dailyMood: { moods: c.dailyMood.moods, energyLevel: c.dailyMood.energyLevel, openTo: c.dailyMood.openTo }
       });
     }
