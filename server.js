@@ -491,6 +491,7 @@ const profileAssistantRoutes = require('./routes/profileAssistant');
 const movieSessionRoutes     = require('./routes/movieSessionRoutes');
 const passwordResetRoutes    = require('./routes/passwordReset');
 const fcmTokenRoutes         = require('./routes/fcmToken');
+const matchingMoodRoutes     = require('./routes/matchingMood');
 
 // =============================================
 // PUBLIC ROUTES
@@ -527,6 +528,7 @@ app.use('/api/food',              authenticate, enforceLegalAcceptance, foodRout
 app.use('/api',                   authenticate, enforceLegalAcceptance, movieSessionRoutes);
 app.use('/api/auth',              authenticate, fcmTokenRoutes);
 app.use('/api/events',            authenticate, require('./routes/featureClicks'));
+app.use('/api/matching-mood',      authenticate, enforceLegalAcceptance, matchingMoodRoutes);
 
 require('./cronJobs');
 
