@@ -1,162 +1,64 @@
 // services/nearbyPlaceService.js
-// Fetches nearby places from Overpass API (OpenStreetMap).
-// Called ONLY on app open — never on mood click / bottom sheet / Go Live.
-// Results cached per locationHash in MatchingTodayMood.nearbyData.
+// Overpass API fetch + locationHash utility.
+// Called ONLY from appOpen in matchingMoodController.
+// Cache check/write happens in the controller against MatchingTodayMood.
 'use strict';
 
 const https = require('https');
 
-// ─────────────────────────────────────────────────────────────────────────────
-// CONSTANTS
-// ─────────────────────────────────────────────────────────────────────────────
-
-// Cache valid for 12 hours (in ms). After this, re-fetch on next app open.
-const CACHE_TTL_MS = 12 * 60 * 60 * 1000;
-
-// Radius (metres) for Overpass search around user's location
 const SEARCH_RADIUS_M = 1200;
+const MAX_NAMES       = 3;
+const CACHE_TTL_MS    = 12 * 60 * 60 * 1000; // 12h
 
-// Max places to return in the names list
-const MAX_PLACE_NAMES = 3;
-
-// Overpass tags that count as "nearby activity places"
-const OVERPASS_FILTERS = `
-  node["amenity"~"cafe|restaurant|bar|fast_food|food_court|pub"](around:RADIUS,LAT,LNG);
-  node["leisure"~"fitness_centre|sports_centre|park|pitch"](around:RADIUS,LAT,LNG);
-  node["shop"~"mall|supermarket|convenience"](around:RADIUS,LAT,LNG);
-`.trim();
-
-// ─────────────────────────────────────────────────────────────────────────────
-// LOCATION HASH UTIL
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Generate a 2-decimal-place grid key from lat/lng.
- * ~1.1 km cell size. Same area = same hash = shared cache.
- * @param {number} lat
- * @param {number} lng
- * @returns {string}  e.g. "28.70_77.10"
- */
+// ── locationHash ─────────────────────────────────────────────────────────────
+// 2-decimal rounding → ~1.1km grid cell. Same area = same hash = cache reuse.
 function toLocationHash(lat, lng) {
-  const rLat = Math.round(lat * 100) / 100;
-  const rLng = Math.round(lng * 100) / 100;
-  return `${rLat.toFixed(2)}_${rLng.toFixed(2)}`;
+  return `${(Math.round(lat * 100) / 100).toFixed(2)}_${(Math.round(lng * 100) / 100).toFixed(2)}`;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// OVERPASS FETCH
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Fetch nearby place count + top names from Overpass API.
- * Returns { count, places } on success, { count: 0, places: [] } on failure.
- * @param {number} lat
- * @param {number} lng
- * @returns {Promise<{count:number, places:string[]}>}
- */
+// ── Overpass fetch ────────────────────────────────────────────────────────────
+// Returns { count, places } — flat list, top named places, all categories.
 async function fetchNearbyFromOverpass(lat, lng) {
-  const query = `
-    [out:json][timeout:10];
-    (
-      ${OVERPASS_FILTERS
-        .replace(/LAT/g, lat)
-        .replace(/LNG/g, lng)
-        .replace(/RADIUS/g, SEARCH_RADIUS_M)}
-    );
-    out body ${MAX_PLACE_NAMES + 20};
-  `.trim();
+  const R = SEARCH_RADIUS_M;
+  const query = `[out:json][timeout:12];(node["amenity"~"cafe|restaurant|fast_food|bar|pub|nightclub"](around:${R},${lat},${lng});node["leisure"~"fitness_centre|sports_centre|park|garden"](around:${R},${lat},${lng});node["shop"~"mall|supermarket|convenience"](around:${R},${lat},${lng});node["tourism"~"viewpoint|attraction"](around:${R},${lat},${lng}););out body 80;`;
 
   return new Promise((resolve) => {
     const body = `data=${encodeURIComponent(query)}`;
-    const options = {
+    const opts = {
       hostname: 'overpass-api.de',
       path:     '/api/interpreter',
       method:   'POST',
-      headers:  {
-        'Content-Type':   'application/x-www-form-urlencoded',
-        'Content-Length': Buffer.byteLength(body),
-        'User-Agent':     'Humrah-App/1.0',
-      },
+      headers:  { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(body), 'User-Agent': 'Humrah/1.0' },
     };
 
-    const req = https.request(options, (res) => {
+    const req = https.request(opts, (res) => {
       let raw = '';
-      res.on('data', (chunk) => (raw += chunk));
+      res.on('data', (c) => (raw += c));
       res.on('end', () => {
         try {
-          const json = JSON.parse(raw);
-          const elements = json.elements || [];
-
-          const count = elements.length;
-
-          // Extract named places, deduplicated, max MAX_PLACE_NAMES
-          const seen = new Set();
-          const places = [];
+          const elements = JSON.parse(raw).elements || [];
+          const count    = elements.length;
+          const seen     = new Set();
+          const places   = [];
           for (const el of elements) {
             const name = el.tags?.name;
-            if (name && !seen.has(name)) {
-              seen.add(name);
-              places.push(name);
-              if (places.length >= MAX_PLACE_NAMES) break;
-            }
+            if (name && !seen.has(name)) { seen.add(name); places.push(name); }
+            if (places.length >= MAX_NAMES) break;
           }
-
-          console.log(`📍 [Nearby] ${lat},${lng} → ${count} places, top: ${places.join(', ') || 'none'}`);
+          console.log(`📍 [Nearby] ${lat},${lng} → ${count} places`);
           resolve({ count, places });
         } catch (e) {
-          console.error('❌ [Nearby] Parse error:', e.message);
+          console.error('❌ [Nearby] parse error:', e.message);
           resolve({ count: 0, places: [] });
         }
       });
     });
 
-    req.on('error', (e) => {
-      console.error('❌ [Nearby] Request error:', e.message);
-      resolve({ count: 0, places: [] });
-    });
-
-    req.setTimeout(12000, () => {
-      console.warn('⚠️ [Nearby] Overpass timeout');
-      req.destroy();
-      resolve({ count: 0, places: [] });
-    });
-
+    req.on('error', (e) => { console.error('❌ [Nearby] request error:', e.message); resolve({ count: 0, places: [] }); });
+    req.setTimeout(14000, () => { req.destroy(); resolve({ count: 0, places: [] }); });
     req.write(body);
     req.end();
   });
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// MAIN EXPORT — used by matchingMoodController on app open
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Get nearby data for a user's location.
- * Uses MatchingTodayMood.nearbyData as cache.
- * Re-fetches if missing, stale (> CACHE_TTL_MS), or locationHash changed.
- *
- * @param {Object} moodDoc    Mongoose doc from MatchingTodayMood
- * @param {number} lat
- * @param {number} lng
- * @param {string} locationHash
- * @returns {Promise<{count:number, places:string[], fromCache:boolean}>}
- */
-async function resolveNearbyData(moodDoc, lat, lng, locationHash) {
-  const now = Date.now();
-  const cacheAge = moodDoc.updatedAt ? now - moodDoc.updatedAt.getTime() : Infinity;
-  const hashChanged = moodDoc.locationHash !== locationHash;
-  const hasData = moodDoc.nearbyData?.count > 0;
-
-  // Use cache if: same area, still fresh, has data
-  if (hasData && !hashChanged && cacheAge < CACHE_TTL_MS) {
-    console.log(`⚡ [Nearby] Cache hit — locationHash=${locationHash}`);
-    return { ...moodDoc.nearbyData.toObject(), fromCache: true };
-  }
-
-  // Re-fetch
-  console.log(`🔄 [Nearby] Cache miss — fetching Overpass (hash=${locationHash}, hashChanged=${hashChanged})`);
-  const fresh = await fetchNearbyFromOverpass(lat, lng);
-  return { ...fresh, fromCache: false };
-}
-
-module.exports = { toLocationHash, resolveNearbyData, fetchNearbyFromOverpass };
+module.exports = { toLocationHash, fetchNearbyFromOverpass, CACHE_TTL_MS };

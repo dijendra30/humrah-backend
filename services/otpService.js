@@ -73,7 +73,19 @@ async function sendOtp({ email, purpose, firstName = null, ipAddress = null, use
 
   // ── Send plaintext OTP via email ─────────────────────────────────────────
   // Only the user sees the raw OTP — DB only ever holds the hash.
-  await sendOTPEmail(normalizedEmail, rawOtp, firstName);
+  try {
+    await sendOTPEmail(normalizedEmail, rawOtp, firstName);
+  } catch (emailErr) {
+    // Log full error server-side (includes Brevo unauthorized IP details)
+    console.error('[OTP] Email send failed:', emailErr?.response?.data || emailErr.message);
+    // Clean up the saved OTP — it's useless if user never receives it
+    await Otp.deleteMany({ email: normalizedEmail, purpose });
+    return {
+      ok:      false,
+      status:  503,
+      message: 'Failed to send OTP email. Please try again later.',
+    };
+  }
 
   if (process.env.NODE_ENV !== 'production') {
     console.log(`[OTP] ${purpose} OTP sent → ${normalizedEmail} from IP ${ipAddress}`);
