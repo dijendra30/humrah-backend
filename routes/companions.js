@@ -147,16 +147,39 @@ async function fetchOneMood(lat, lng, cfg, night) {
   return second.count > first.count ? second : first;
 }
 
+// City-level coordinate fallback for major Indian cities
+const CITY_COORDS = {
+  'Delhi': [28.6139, 77.2090], 'New Delhi': [28.6139, 77.2090],
+  'Mumbai': [19.0760, 72.8777], 'Bangalore': [12.9716, 77.5946],
+  'Bengaluru': [12.9716, 77.5946], 'Hyderabad': [17.3850, 78.4867],
+  'Chennai': [13.0827, 80.2707], 'Kolkata': [22.5726, 88.3639],
+  'Pune': [18.5204, 73.8567], 'Ahmedabad': [23.0225, 72.5714],
+  'Jaipur': [26.9124, 75.7873], 'Surat': [21.1702, 72.8311],
+  'Lucknow': [26.8467, 80.9462], 'Kanpur': [26.4499, 80.3319],
+  'Nagpur': [21.1458, 79.0882], 'Indore': [22.7196, 75.8577],
+  'Bhopal': [23.2599, 77.4126], 'Patna': [25.5941, 85.1376],
+};
+
 // GET /api/companions/mood-places
-// One request — all 11 moods in parallel — cached by location
 router.get('/mood-places', authenticate, async (req, res) => {
   try {
-    const me = await User.findById(req.userId).select('last_known_lat last_known_lng').lean();
-    if (!me || me.last_known_lat == null) {
-      return res.json({ success: true, places: {}, cached: false, message: 'Location not available' });
-    }
+    const me = await User.findById(req.userId)
+      .select('last_known_lat last_known_lng questionnaire')
+      .lean();
+    if (!me) return res.json({ success: true, places: {}, cached: false });
 
-    const { last_known_lat: lat, last_known_lng: lng } = me;
+    let lat = me.last_known_lat;
+    let lng = me.last_known_lng;
+
+    // Fallback: use questionnaire city coords if GPS not available
+    if (lat == null || lng == null) {
+      const city = me.questionnaire?.city;
+      const coords = city && CITY_COORDS[city];
+      if (coords) { [lat, lng] = coords; }
+      else {
+        return res.json({ success: true, places: {}, cached: false, message: 'Location not available' });
+      }
+    }
     const key   = cacheKey(lat, lng);
     const entry = moodPlacesCache.get(key);
 
