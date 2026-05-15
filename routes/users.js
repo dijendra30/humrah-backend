@@ -6,6 +6,7 @@ const router = express.Router();
 const { authenticate, authorize, adminOnly, superAdminOnly, auditLog } = require('../middleware/auth');
 
 const User = require('../models/User');
+const DailyMood = require('../models/DailyMood');
 const { upload, uploadBuffer, uploadBase64, deleteImage } = require('../config/cloudinary');
 const { moderateQuestionnaire, applyStrikesAndEnforce, buildModerationResponse, buildAutoCleanSuccessResponse, LEVEL } = require('../middleware/moderation');
 const userActivityCtrl = require('../controllers/userActivityController');
@@ -731,73 +732,94 @@ router.put('/me/daily-mood', authenticate, async (req, res) => {
   }
 });
 
-// @route   GET /api/users/me/daily-mood
-// @desc    Get current user's daily mood
-// @access  Private
-router.get('/me/daily-mood', authenticate, async (req, res) => {
-  try {
-    const user = await User.findById(req.userId).select('dailyMood');
-    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
-
-    const mood = user.dailyMood;
-    const isActive = mood && mood.expiresAt && new Date(mood.expiresAt) > new Date();
-
-    res.json({ success: true, dailyMood: mood, isActive: !!isActive });
-  } catch (error) {
-    console.error('Get daily mood error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// ==================== MATCHING TODAY'S MOOD ROUTE (spec alias) ====================
+// (GET /me/daily-mood now handled above via DailyMood collection)
 
 // @route   PUT /api/users/me/mood
-// @desc    Set mood via spec field names (mood, vibeLevel, preferredPlace, visible)
-//          Maps → existing dailyMood schema fields
+// @desc    Go Live — writes to DailyMood collection (separate from User)
 // @access  Private
 router.put('/me/mood', authenticate, async (req, res) => {
   try {
-    const { mood, vibeLevel, preferredPlace, showNearby, publicOnly } = req.body;
+    const { mood, vibeLevel, preferredPlace, showNearby, intention } = req.body;
 
-    if (!mood) {
-      return res.status(400).json({ success: false, message: 'mood is required' });
-    }
-
-    // Map vibeLevel string → energyLevel 1-10
-    const energyMap = { lowkey: 3, normal: 6, social: 9 };
-    const energyLevel = energyMap[vibeLevel?.toLowerCase()] || 6;
-
-    // openTo = [preferredPlace] if set
-    const openTo = preferredPlace ? [preferredPlace] : [];
+    if (!mood) return res.status(400).json({ success: false, message: 'mood is required' });
 
     const now     = new Date();
-    const expires = new Date(now.getTime() + 3 * 60 * 60 * 1000); // 3h session expiry per spec
+    const expires = new Date(now.getTime() + 4 * 60 * 60 * 1000); // 4h expiry
 
-    const user = await User.findByIdAndUpdate(
-      req.userId,
+    // Upsert DailyMood document for this user
+    const dm = await DailyMood.findOneAndUpdate(
+      { userId: req.userId },
       {
-        dailyMood: {
-          moods:       [mood],
-          energyLevel,
-          openTo,
-          updatedAt:   now,
-          expiresAt:   expires,
-          visible:     showNearby !== false
-        }
+        userId:         req.userId,
+        mood,
+        vibeLevel:      vibeLevel || 'normal',
+        intention:      intention || null,
+        preferredPlace: preferredPlace || null,
+        visible:        showNearby !== false,
+        activatedAt:    now,
+        updatedAt:      now,
+        expiresAt:      expires
       },
-      { new: true }
-    ).select('dailyMood');
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
 
-    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    // Also keep User.dailyMood in sync for backward compatibility
+    const energyMap = { lowkey: 3, normal: 6, social: 9 };
+    const energyLevel = energyMap[(vibeLevel || 'normal').toLowerCase()] || 6;
+    await User.findByIdAndUpdate(req.userId, {
+      dailyMood: {
+        moods:       [mood],
+        energyLevel,
+        openTo:      preferredPlace ? [preferredPlace] : [],
+        updatedAt:   now,
+        expiresAt:   expires,
+        visible:     showNearby !== false
+      }
+    });
 
     res.json({
       success:   true,
       message:   '✨ You are now visible nearby',
-      dailyMood: user.dailyMood
+      dailyMood: { mood: dm.mood, vibeLevel: dm.vibeLevel, expiresAt: dm.expiresAt, visible: dm.visible }
     });
-
   } catch (error) {
     console.error('Set mood error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// @route   GET /api/users/me/daily-mood
+// @desc    Get active mood — reads DailyMood collection first, falls back to User.dailyMood
+// @access  Private
+router.get('/me/daily-mood', authenticate, async (req, res) => {
+  try {
+    const now = new Date();
+    const dm  = await DailyMood.findOne({ userId: req.userId, expiresAt: { $gt: now } }).lean();
+
+    if (dm) {
+      return res.json({
+        success:  true,
+        isActive: true,
+        dailyMood: {
+          moods:       [dm.mood],
+          mood:        dm.mood,
+          vibeLevel:   dm.vibeLevel,
+          intention:   dm.intention,
+          preferredPlace: dm.preferredPlace,
+          visible:     dm.visible,
+          activatedAt: dm.activatedAt,
+          expiresAt:   dm.expiresAt
+        }
+      });
+    }
+
+    // Fallback: check legacy User.dailyMood
+    const user = await User.findById(req.userId).select('dailyMood').lean();
+    const mood = user?.dailyMood;
+    const isActive = mood?.expiresAt && new Date(mood.expiresAt) > now;
+    res.json({ success: true, isActive: !!isActive, dailyMood: mood || null });
+  } catch (error) {
+    console.error('Get daily mood error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
