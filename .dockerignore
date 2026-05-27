@@ -1,0 +1,35 @@
+# Git
+.git
+.gitignore
+
+# Dev / CI artifacts
+*.md
+.env
+.env.*
+!.env.example
+
+# Logs
+logs
+*.log
+npm-debug.log*
+
+# Test
+test
+tests
+__tests__
+*.test.js
+*.spec.js
+
+# Dev dependencies (already stripped via npm ci --omit=dev)
+# node_modules is included by the multi-stage build; don't ignore it here
+# (the COPY . . in stage 2 needs it excluded but we copy from deps stage)
+node_modules
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode
+.idea
+*.swp
