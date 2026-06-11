@@ -1,63 +1,85 @@
-// middleware/rateLimitMiddleware.js — Centralized Rate Limiting (Production-Grade)
-// ─────────────────────────────────────────────────────────────────────────────
+// middleware/rateLimitMiddleware.js — Production Rate Limiting
+// =============================================================================
 //
 // INFRA: Coolify + Traefik on Oracle Cloud — exactly 1 proxy hop.
 //   server.js has: app.set('trust proxy', 1)
 //   Traefik sets X-Forwarded-For: <real-client-ip>
 //
+// STRATEGY:
+//   Before login  → IP-based limits  (no userId available)
+//   After login   → User-token-based limits (keyed on userId, not IP)
+//   This prevents shared-IP false positives (office, carrier NAT, college WiFi)
+//   while still protecting auth endpoints from brute force.
+//
+// LAYERS:
+//   PUBLIC / PRE-AUTH (IP-keyed):
+//     sendOtpLimiter       3 req / 15 min   — OTP send (expensive + spammable)
+//     verifyOtpLimiter     3 req / 15 min   — OTP verify (brute-force vector)
+//     loginLimiter         5 req / 15 min   — brute-force login
+//     registerLimiter      5 req / 15 min   — signup spam
+//     passwordResetLimiter 3 req / 15 min   — reset abuse
+//     publicApiLimiter     100 req / 15 min — unauthenticated guest API reads
+//
+//   AUTHENTICATED (userId-keyed):
+//     authApiLimiter       1500 req / 15 min — all normal app API traffic
+//     chatMessageLimiter   60 req / min      — message send (per user)
+//     vibeRequestLimiter   20 req / hour     — mood/vibe request button
+//     nearbyMoodLimiter    300 req / 15 min  — nearby mood fetch (polling-heavy)
+//     uploadLimiter        30 req / 15 min   — photo/media uploads
+//     searchLimiter        100 req / 15 min  — search endpoints
+//
+//   SPECIAL:
+//     createSessionIpLimiter  5 req / 15 min (IP) — gaming session creation
+//     sessionCreationCooldown DB-backed per-user 2h cooldown
+//
 // KEY GENERATOR:
-//   We do NOT use ipKeyGenerator from express-rate-limit.
-//   Reason: ipKeyGenerator reads req.ip, which under some Traefik configs
-//   still resolves to the container's internal IP (same for every request),
-//   making the rate limiter count all traffic as one bucket → 429 never fires.
+//   getClientIp()  — reads X-Forwarded-For directly (Traefik-safe, ::ffff: stripped)
+//   getUserId()    — reads req.userId set by authenticate middleware
 //
-//   Instead we use a manual keyGenerator that reads X-Forwarded-For directly,
-//   strips the IPv6 prefix (::ffff:) for normalization, and falls back to
-//   req.ip if the header is missing. This is reliable across Traefik versions.
-//
-// LAYERED RATE-LIMIT STRATEGY:
-//   Layer 1: globalLimiter          — broad IP-level throttle across all endpoints
-//   Layer 2: sendOtpLimiter         — tight limit on OTP generation (expensive, spammable)
-//   Layer 3: verifyOtpLimiter       — tight limit on OTP verification (brute-force vector)
-//   Layer 4: loginLimiter           — brute-force protection on login
-//   Layer 5: registerLimiter        — registration spam protection
-//   Layer 6: passwordResetLimiter   — reset abuse protection
-//   Layer 7: createSessionIpLimiter — gaming session IP throttle
-//   Layer 8: sessionCreationCooldown— DB-backed per-user cooldown (cross-instance safe)
-//
-// IMPORTANT: GamingSession is NOT imported at top level.
+// NOTE: GamingSession is NOT imported at top level.
 //   Lazy-required inside sessionCreationCooldown() only to avoid circular
 //   dependency crashes that would make all exported limiters undefined.
-// ─────────────────────────────────────────────────────────────────────────────
+// =============================================================================
 
 'use strict';
 
 const { rateLimit } = require('express-rate-limit');
 const { isWithinSpamWindow, nextAllowedCreateTime } = require('../utils/timeUtils');
 
-// ─────────────────────────────────────────────────────────────────────────────
-// REAL IP EXTRACTOR
-// Reads X-Forwarded-For directly — more reliable than req.ip under Traefik.
-// Strips ::ffff: prefix so IPv4-mapped IPv6 addresses count as one bucket.
-// ─────────────────────────────────────────────────────────────────────────────
+// =============================================================================
+// KEY GENERATORS
+// =============================================================================
+
+/**
+ * IP extractor — reads X-Forwarded-For directly (reliable under Traefik).
+ * Strips ::ffff: so IPv4-mapped IPv6 addresses bucket together.
+ */
 const getClientIp = (req) => {
   const forwarded = req.headers['x-forwarded-for'];
   const raw = forwarded
-    ? forwarded.split(',')[0].trim()   // leftmost = real client IP
-    : req.ip || req.connection.remoteAddress || 'unknown';
-  return raw.replace(/^::ffff:/, ''); // normalise IPv4-mapped IPv6
+    ? forwarded.split(',')[0].trim()
+    : req.ip || req.connection?.remoteAddress || 'unknown';
+  return raw.replace(/^::ffff:/, '');
 };
 
-// ── Shared base options applied to all limiters ───────────────────────────────
-// validate flags explanation:
-//   keyGeneratorIpFallback: false — suppresses ERR_ERL_KEY_GEN_IPV6 warning
-//     because our getClientIp() already handles IPv6 normalisation via ::ffff: strip.
-//   xForwardedForHeader: false   — we read X-Forwarded-For manually; suppress
-//     express-rate-limit's own XFF validation which doesn't apply to our setup.
-const sharedOptions = {
+/**
+ * User ID extractor — set by authenticate middleware on all protected routes.
+ * Falls back to IP so unauthenticated requests still get rate-limited.
+ */
+const getUserId = (req) => {
+  const uid = req.userId?.toString() || req.user?._id?.toString();
+  return uid ? `uid:${uid}` : `ip:${getClientIp(req)}`;
+};
+
+// =============================================================================
+// SHARED BASE OPTIONS
+// =============================================================================
+
+/** Base options for IP-keyed limiters (pre-auth endpoints) */
+const ipBase = {
   standardHeaders: true,
   legacyHeaders:   false,
-  skipFailedRequests: false,
+  skipFailedRequests:     false,
   skipSuccessfulRequests: false,
   keyGenerator: getClientIp,
   validate: {
@@ -66,119 +88,189 @@ const sharedOptions = {
   },
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 1. Global limiter — 100 requests per 15 minutes per IP
-// ─────────────────────────────────────────────────────────────────────────────
-const globalLimiter = rateLimit({
-  ...sharedOptions,
-  windowMs: 15 * 60 * 1000,
-  max:      100,
-  handler: (_req, res) => {
-    res.status(429).json({
-      success: false,
-      message: 'Too many requests from this device. Please slow down and try again later.',
-    });
+/** Base options for user-token-keyed limiters (post-auth endpoints) */
+const userBase = {
+  standardHeaders: true,
+  legacyHeaders:   false,
+  skipFailedRequests:     false,
+  skipSuccessfulRequests: false,
+  keyGenerator: getUserId,
+  validate: {
+    xForwardedForHeader:    false,
+    keyGeneratorIpFallback: false,
   },
-});
+};
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 2. OTP send limiter — 3 requests per 15 minutes per IP
-// ─────────────────────────────────────────────────────────────────────────────
+// =============================================================================
+// HELPER: build 429 handler
+// =============================================================================
+const handler429 = (message) => (_req, res) => {
+  res.status(429).json({ success: false, message });
+};
+
+// =============================================================================
+// PUBLIC / PRE-AUTH LIMITERS  (IP-keyed)
+// =============================================================================
+
+/** OTP send — 3 / 15 min / IP */
 const sendOtpLimiter = rateLimit({
-  ...sharedOptions,
+  ...ipBase,
   windowMs: 15 * 60 * 1000,
   max:      3,
-  handler: (_req, res) => {
-    res.status(429).json({
-      success: false,
-      message: 'Too many OTP requests from this device. Please try again later.',
-    });
-  },
+  handler:  handler429('Too many OTP requests from this device. Please try again in 15 minutes.'),
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 3. OTP verify limiter — 5 requests per 10 minutes per IP
-// ─────────────────────────────────────────────────────────────────────────────
+/** OTP verify — 3 / 15 min / IP */
 const verifyOtpLimiter = rateLimit({
-  ...sharedOptions,
-  windowMs: 10 * 60 * 1000,
-  max:      5,
-  handler: (_req, res) => {
-    res.status(429).json({
-      success: false,
-      message: 'Too many verification attempts. Please wait and try again.',
-    });
-  },
+  ...ipBase,
+  windowMs: 15 * 60 * 1000,
+  max:      3,
+  handler:  handler429('Too many verification attempts. Please wait and try again.'),
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 4. Login limiter — 10 requests per 15 minutes per IP
-// ─────────────────────────────────────────────────────────────────────────────
+/** Login — 5 / 15 min / IP */
 const loginLimiter = rateLimit({
-  ...sharedOptions,
+  ...ipBase,
   windowMs: 15 * 60 * 1000,
-  max:      10,
-  handler: (_req, res) => {
-    res.status(429).json({
-      success: false,
-      message: 'Too many login attempts. Please try again later.',
-    });
-  },
+  max:      5,
+  handler:  handler429('Too many login attempts from this device. Please try again in 15 minutes.'),
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 5. Registration limiter — 5 requests per hour per IP
-// ─────────────────────────────────────────────────────────────────────────────
+/** Register — 5 / 15 min / IP */
 const registerLimiter = rateLimit({
-  ...sharedOptions,
-  windowMs: 60 * 60 * 1000,
-  max:      5,
-  handler: (_req, res) => {
-    res.status(429).json({
-      success: false,
-      message: 'Too many registration attempts from this IP. Please try again later.',
-    });
-  },
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 6. Password reset limiter — 5 requests per hour per IP
-// ─────────────────────────────────────────────────────────────────────────────
-const passwordResetLimiter = rateLimit({
-  ...sharedOptions,
-  windowMs: 60 * 60 * 1000,
-  max:      5,
-  handler: (_req, res) => {
-    res.status(429).json({
-      success: false,
-      message: 'Too many password reset requests. Please try again later.',
-    });
-  },
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 7. Gaming session IP limiter — 5 per 15 minutes per IP
-// ─────────────────────────────────────────────────────────────────────────────
-const createSessionIpLimiter = rateLimit({
-  ...sharedOptions,
+  ...ipBase,
   windowMs: 15 * 60 * 1000,
   max:      5,
-  handler: (_req, res) => {
-    res.status(429).json({
-      success: false,
-      message: 'Too many session creation attempts. Please try again later.',
-    });
-  },
+  handler:  handler429('Too many registration attempts from this device. Please try again later.'),
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 8. Gaming session user-level cooldown (DB-backed, cross-instance safe)
-//    GamingSession lazy-required to avoid circular dependency at module load.
-// ─────────────────────────────────────────────────────────────────────────────
+/** Password reset — 3 / 15 min / IP */
+const passwordResetLimiter = rateLimit({
+  ...ipBase,
+  windowMs: 15 * 60 * 1000,
+  max:      3,
+  handler:  handler429('Too many password reset requests. Please try again in 15 minutes.'),
+});
+
+/**
+ * Public guest API reads — 100 / 15 min / IP
+ * For unauthenticated endpoints (legal docs, check-email, etc.)
+ */
+const publicApiLimiter = rateLimit({
+  ...ipBase,
+  windowMs: 15 * 60 * 1000,
+  max:      100,
+  handler:  handler429('Too many requests. Please try again shortly.'),
+});
+
+// =============================================================================
+// AUTHENTICATED LIMITERS  (userId-keyed — prevents shared-IP false positives)
+// =============================================================================
+
+/**
+ * Authenticated app APIs — 1500 / 15 min / user
+ * Covers home feed, spotlight, bookings, profiles, chats list, etc.
+ * A heavy user makes ~100-200 req per session; 1500 gives 7-10 normal sessions.
+ */
+const authApiLimiter = rateLimit({
+  ...userBase,
+  windowMs: 15 * 60 * 1000,
+  max:      1500,
+  handler:  handler429('You\'re making too many requests. Please slow down and try again shortly.'),
+});
+
+/**
+ * Chat message send — 60 / min / user
+ * Prevents message spam. 60/min = 1/sec which is faster than any human types.
+ */
+const chatMessageLimiter = rateLimit({
+  ...userBase,
+  windowMs: 60 * 1000,
+  max:      60,
+  handler:  handler429('You\'re sending messages too fast. Please slow down.'),
+});
+
+/**
+ * Vibe / mood request button — 20 / hour / user
+ * Prevents request spam to other users.
+ */
+const vibeRequestLimiter = rateLimit({
+  ...userBase,
+  windowMs: 60 * 60 * 1000,
+  max:      20,
+  handler:  handler429('You\'re sending too many requests. Please wait a while before trying again.'),
+});
+
+/**
+ * Nearby mood fetch — 300 / 15 min / user
+ * This endpoint is called frequently (background polling + manual refresh).
+ * 300 / 15 min = 20/min which is well above any polling interval.
+ */
+const nearbyMoodLimiter = rateLimit({
+  ...userBase,
+  windowMs: 15 * 60 * 1000,
+  max:      300,
+  handler:  handler429('Too many location requests. Please wait a moment.'),
+});
+
+/**
+ * Upload APIs — 30 / 15 min / user
+ * Covers profile photo, verification photo, food post image, etc.
+ */
+const uploadLimiter = rateLimit({
+  ...userBase,
+  windowMs: 15 * 60 * 1000,
+  max:      30,
+  handler:  handler429('Too many uploads. Please wait before uploading again.'),
+});
+
+/**
+ * Search APIs — 100 / 15 min / user
+ * Covers user search, post search, etc.
+ */
+const searchLimiter = rateLimit({
+  ...userBase,
+  windowMs: 15 * 60 * 1000,
+  max:      100,
+  handler:  handler429('Too many search requests. Please wait a moment.'),
+});
+
+// =============================================================================
+// SPECIAL / MIXED LIMITERS
+// =============================================================================
+
+/**
+ * Gaming session creation — IP-keyed (5 / 15 min)
+ * IP-keyed because session spam can come from throwaway accounts on same IP.
+ */
+const createSessionIpLimiter = rateLimit({
+  ...ipBase,
+  windowMs: 15 * 60 * 1000,
+  max:      5,
+  handler:  handler429('Too many session creation attempts. Please try again later.'),
+});
+
+/**
+ * Global fallback limiter — 500 / 15 min / IP
+ * Applied in server.js as the outermost catch-all.
+ * Only hits scrapers/DDoS at this threshold; normal users never see it
+ * because the specific limiters above fire first.
+ */
+const globalLimiter = rateLimit({
+  ...ipBase,
+  windowMs: 15 * 60 * 1000,
+  max:      500,
+  handler:  handler429('You\'re moving a little fast \u2728 Please take a moment and try again shortly.'),
+});
+
+// =============================================================================
+// DB-BACKED PER-USER GAMING SESSION COOLDOWN
+// Lazy-required to avoid circular dependency at module load.
+// =============================================================================
 async function sessionCreationCooldown(req, res, next) {
   try {
     const GamingSession = require('../models/GamingSession');
-    const userId = req.user._id;
+    const userId = req.user?._id || req.userId;
 
     const lastSession = await GamingSession.findOne({ creatorId: userId })
       .sort({ createdAt: -1 })
@@ -197,17 +289,32 @@ async function sessionCreationCooldown(req, res, next) {
     next();
   } catch (err) {
     console.error('[RateLimit] sessionCreationCooldown error:', err.message);
-    next();
+    next(); // fail-open so a DB blip doesn't block all session creation
   }
 }
 
+// =============================================================================
+// EXPORTS
+// =============================================================================
 module.exports = {
+  // Pre-auth (IP-keyed)
   globalLimiter,
+  publicApiLimiter,
   sendOtpLimiter,
   verifyOtpLimiter,
   loginLimiter,
   registerLimiter,
   passwordResetLimiter,
+
+  // Post-auth (user-keyed)
+  authApiLimiter,
+  chatMessageLimiter,
+  vibeRequestLimiter,
+  nearbyMoodLimiter,
+  uploadLimiter,
+  searchLimiter,
+
+  // Special
   createSessionIpLimiter,
   sessionCreationCooldown,
 };

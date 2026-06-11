@@ -27,13 +27,21 @@ const DEFAULT_LANGUAGE  = 'Hindi';
 const MAX_RADIUS_M      = 20_000;   // 20 km initial fetch
 const WIDE_RADIUS_M     = 50_000;   // 50 km fallback
 
-// ─── Fallback movies (used when TMDB key missing / request fails) ─────────────
+// ── TMDB language code → session display label ────────────────────────────────
+// Used by generateSystemSessions() to derive session language from the movie.
+// Only Hindi and English are supported for system-generated sessions (Humrah spec).
+const _LANG_DISPLAY = { hi: 'Hindi', en: 'English' };
+
+// ─── Fallback movies (used ONLY when TMDB key missing / request fails) ───────
+// Hindi-first per Humrah spec. Updated for 2024–2025 Indian theatrical slate.
+// posterPath is null (no image in outage mode). IDs are TMDB movie IDs.
 const FALLBACK_MOVIES = [
-  { id: '1136406', title: 'Leo',              posterPath: null },
-  { id: '1212458', title: 'Animal',           posterPath: null },
-  { id: '976573',  title: 'Jawan',            posterPath: null },
-  { id: '1126166', title: 'Salaar',           posterPath: null },
-  { id: '1010591', title: 'Rocky Aur Rani',   posterPath: null },
+  { id: '1295691', title: 'Pushpa 2: The Rule',               posterPath: null, language: 'hi', popularity: 98 },
+  { id: '1262229', title: 'Stree 2',                          posterPath: null, language: 'hi', popularity: 95 },
+  { id: '1221931', title: 'Singham Again',                    posterPath: null, language: 'hi', popularity: 78 },
+  { id: '1011985', title: 'Fighter',                          posterPath: null, language: 'hi', popularity: 75 },
+  { id: '1350480', title: 'Sky Force',                        posterPath: null, language: 'hi', popularity: 72 },
+  { id: '822119',  title: 'Captain America: Brave New World', posterPath: null, language: 'en', popularity: 88 },
 ];
 
 // Fallback theatres placed AT user coords so geo queries always find them
@@ -51,6 +59,60 @@ function _buildFallbackTheatres(lat, lng) {
 // ─── TMDB cache (15 min in-memory) ───────────────────────────────────────────
 let _moviesCache = { data: null, ts: 0 };
 const CACHE_TTL  = 15 * 60 * 1000;
+
+// ─── Recently used movies cache (rotation — prevents same movie repeating) ───
+// Tracks the last N movieIds used by the system generator across all calls.
+// Cleared every 24 hours so the pool fully resets each day.
+const RECENT_MOVIE_MAX   = 9;   // remember last 9 used movie IDs
+const RECENT_MOVIE_TTL   = 24 * 60 * 60 * 1000; // 24 h
+let _recentMovieIds      = [];  // [{ id: string, ts: number }]
+
+function _pruneRecentMovies() {
+  const cutoff = Date.now() - RECENT_MOVIE_TTL;
+  _recentMovieIds = _recentMovieIds.filter(e => e.ts > cutoff);
+}
+
+function _markMovieUsed(movieId) {
+  _pruneRecentMovies();
+  // Remove if already present (re-insert at end = most recent)
+  _recentMovieIds = _recentMovieIds.filter(e => e.id !== String(movieId));
+  _recentMovieIds.push({ id: String(movieId), ts: Date.now() });
+  // Keep list bounded
+  if (_recentMovieIds.length > RECENT_MOVIE_MAX) {
+    _recentMovieIds = _recentMovieIds.slice(_recentMovieIds.length - RECENT_MOVIE_MAX);
+  }
+}
+
+function _getRecentMovieIds() {
+  _pruneRecentMovies();
+  return new Set(_recentMovieIds.map(e => e.id));
+}
+
+// ─── Fisher-Yates shuffle (in-place, returns array) ──────────────────────────
+function _shuffle(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+// ─── Language-priority pool builder ──────────────────────────────────────────
+// Shuffles within each language bucket, then concatenates Hindi → English → other.
+// This preserves randomness for variety while guaranteeing Hindi movies are always
+// picked before English ones when slots are filled sequentially.
+//
+// WHY THIS EXISTS:
+//   A flat _shuffle() on the full movie list destroys the Hindi-first ordering
+//   produced by fetchTrendingMovies(). English movies randomly end up at index 0,
+//   1, or 2 — the exact indices picked for the 3 daily slots. This function fixes
+//   that by making the shuffle language-aware.
+function _buildLangPriorityPool(src) {
+  const hi    = _shuffle(src.filter(m => m.language === 'hi'));
+  const en    = _shuffle(src.filter(m => m.language === 'en'));
+  const other = _shuffle(src.filter(m => m.language !== 'hi' && m.language !== 'en'));
+  return [...hi, ...en, ...other];
+}
 
 // ─── Haversine (metres) ───────────────────────────────────────────────────────
 function _haversine(lat1, lng1, lat2, lng2) {
@@ -248,7 +310,31 @@ function _formatSession(session, currentUserId, distMetres = null) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// fetchTrendingMovies — TMDB with 15-min cache + FALLBACK_MOVIES
+// fetchTrendingMovies — India-first movie pool for system-generated sessions
+//
+// SOURCES (fetched in parallel, merged with source-priority dedup):
+//   1. /movie/now_playing?region=IN (page 1)  ← highest priority: in theatres NOW
+//   2. /movie/now_playing?region=IN (page 2)  ← extends the IN now-playing pool
+//   3. /movie/popular?region=IN&with_original_language=hi  ← dedicated Hindi popular
+//   4. /movie/popular?region=IN               ← India-popular across all languages
+//   5. /trending/movie/week                   ← global trending (blockbuster catches)
+//
+// LANGUAGE FILTER (Humrah spec — Delhi launch):
+//   Priority 1 → Hindi   (original_language = 'hi')
+//   Priority 2 → English (original_language = 'en')
+//   All others → excluded UNLESS popularity >= GLOBAL_POP_THRESHOLD
+//                (covers Avatar / Avengers / Mission Impossible scale events only)
+//
+// QUALITY GATES:
+//   • poster_path must exist
+//   • vote_count >= 50
+//   • popularity  >= 20
+//   • release_date within last ~3 months  (now_playing bypasses this gate)
+//
+// POOL: up to 30 movies, sorted Hindi-first → English-second → global,
+//       and Now-Playing-first within each language tier.
+//
+// Cache: 15 min in-memory (CACHE_TTL).
 // ─────────────────────────────────────────────────────────────────────────────
 async function fetchTrendingMovies() {
   const now = Date.now();
@@ -261,27 +347,134 @@ async function fetchTrendingMovies() {
   }
 
   try {
-    const params = new URLSearchParams({
-      api_key:            KEY,
-      region:             'IN',
-      sort_by:            'popularity.desc',
-      with_release_type:  '2|3',
-      'release_date.gte': '2024-01-01',
-      'vote_count.gte':   '100',
-      language:           'en-IN',
-      page:               '1',
+    const BASE = 'https://api.themoviedb.org/3';
+
+    // ── Parallel fetch from FIVE TMDB sources ────────────────────────────
+    // Sources 1+2: now_playing India pages 1 & 2 (confirmed theatrical content)
+    // Source 3: popular Hindi-only (with_original_language=hi) — boosts Hindi pool
+    // Source 4: popular India (all langs, filtered downstream to hi/en)
+    // Source 5: global trending — catches mega-blockbusters (Avatar, Avengers…)
+    const [np1Settled, np2Settled, hindiPopSettled, popularSettled, trendingSettled] = await Promise.allSettled([
+      fetch(`${BASE}/movie/now_playing?${new URLSearchParams({ api_key: KEY, region: 'IN', language: 'en-US', page: '1' })}`),
+      fetch(`${BASE}/movie/now_playing?${new URLSearchParams({ api_key: KEY, region: 'IN', language: 'en-US', page: '2' })}`),
+      fetch(`${BASE}/movie/popular?${new URLSearchParams(    { api_key: KEY, region: 'IN', language: 'en-US', page: '1', with_original_language: 'hi' })}`),
+      fetch(`${BASE}/movie/popular?${new URLSearchParams(    { api_key: KEY, region: 'IN', language: 'en-US', page: '1' })}`),
+      fetch(`${BASE}/trending/movie/week?${new URLSearchParams({ api_key: KEY, language: 'en-US' })}`),
+    ]);
+
+    // ── Parse each settled promise — failures yield empty arrays ──────────
+    const parseSettled = async (settled, src) => {
+      if (settled.status !== 'fulfilled') {
+        console.warn(`[movies] ${src} fetch rejected: ${settled.reason?.message}`);
+        return [];
+      }
+      if (!settled.value.ok) {
+        console.warn(`[movies] ${src} HTTP ${settled.value.status}`);
+        return [];
+      }
+      const data = await settled.value.json();
+      return (data.results || []).map(m => ({ ...m, _src: src }));
+    };
+
+    const [np1Raw, np2Raw, hindiPopRaw, popularRaw, trendingRaw] = await Promise.all([
+      parseSettled(np1Settled,       'now_playing'),
+      parseSettled(np2Settled,       'now_playing'),  // same _src tag → same source priority
+      parseSettled(hindiPopSettled,  'popular'),       // Hindi-only popular → same tier as general popular
+      parseSettled(popularSettled,   'popular'),
+      parseSettled(trendingSettled,  'trending'),
+    ]);
+
+    // Merge both now_playing pages into a single list
+    const nowPlayingRaw = [...np1Raw, ...np2Raw];
+
+    console.log(`[movies] raw — nowPlaying:${nowPlayingRaw.length} hindiPop:${hindiPopRaw.length} popular:${popularRaw.length} trending:${trendingRaw.length}`);
+
+    // ── Merge with source-priority dedup ──────────────────────────────────
+    // Priority order: now_playing > hindiPop > popular > trending
+    // Hindi popular is placed before general popular so Hindi movies win dedup
+    // when they appear in both lists (ensures _src stays 'popular' for both,
+    // but the dedicated Hindi source runs first so its richer metadata wins).
+    const seen   = new Set();
+    const merged = [...nowPlayingRaw, ...hindiPopRaw, ...popularRaw, ...trendingRaw].filter(m => {
+      if (seen.has(m.id)) return false;
+      seen.add(m.id);
+      return true;
     });
-    const res = await fetch(`https://api.themoviedb.org/3/discover/movie?${params}`);
-    if (!res.ok) throw new Error(`TMDB HTTP ${res.status}`);
-    const data = await res.json();
-    const list = (data.results || []).slice(0, 20).map(m => ({
-      id: m.id, title: m.title, posterPath: m.poster_path || null,
-      rating: Math.round(m.vote_average * 10) / 10,
+
+    // ── Recency gate ──────────────────────────────────────────────────────
+    // Movies more than ~3 months old are unlikely to still be in theatres.
+    // now_playing bypasses this gate because TMDB guarantees they're playing.
+    const cutoff = new Date();
+    cutoff.setMonth(cutoff.getMonth() - 3);
+    const cutoffStr = cutoff.toISOString().slice(0, 10); // YYYY-MM-DD
+
+    // ── Global popularity exception threshold ─────────────────────────────
+    // Only truly mega-blockbusters (Avatar / Avengers / Mission Impossible scale)
+    // pass the Hindi/English language gate as exceptions. Set high intentionally —
+    // this exception should be rare and cover only globally dominant films.
+    const GLOBAL_POP_THRESHOLD = 200;
+
+    // ── India + Language filter ───────────────────────────────────────────
+    const filtered = merged.filter(m => {
+      if (!m.poster_path)               return false; // no poster → broken UI card
+      if ((m.vote_count  || 0) < 50)    return false; // too few votes → unreliable
+      if ((m.popularity  || 0) < 20)    return false; // too niche for Indian screens
+
+      // Recency: now_playing bypasses; popular/trending must be within 3-month window
+      if (m._src !== 'now_playing' && m.release_date && m.release_date < cutoffStr) return false;
+
+      // Language gate — Hindi first, English second
+      const lang = m.original_language;
+      if (lang === 'hi' || lang === 'en') return true;
+
+      // Global exception: only mega-blockbusters regardless of language
+      return (m.popularity || 0) >= GLOBAL_POP_THRESHOLD;
+    });
+
+    if (!filtered.length) throw new Error('0 movies after India/language filter');
+
+    // ── Priority sort ─────────────────────────────────────────────────────
+    //  0 — Hindi   + now_playing  (current Hindi theatrical releases in IN)
+    //  1 — Hindi   + popular / trending
+    //  2 — English + now_playing  (current English theatrical releases in IN)
+    //  3 — English + popular / trending
+    //  4 — Global exception (very high popularity, non-HI/EN)
+    const _srcPriority = (m) => {
+      const hi = m.original_language === 'hi';
+      const en = m.original_language === 'en';
+      const np = m._src === 'now_playing';
+      if (hi && np) return 0;
+      if (hi)       return 1;
+      if (en && np) return 2;
+      if (en)       return 3;
+      return 4;
+    };
+
+    filtered.sort((a, b) => {
+      const diff = _srcPriority(a) - _srcPriority(b);
+      if (diff !== 0) return diff;
+      return (b.popularity || 0) - (a.popularity || 0); // within tier: most popular first
+    });
+
+    // ── Build pool of up to 30 movies ─────────────────────────────────────
+    const pool = filtered.slice(0, 30).map(m => ({
+      id:         m.id,
+      title:      m.title,
+      posterPath: m.poster_path || null,
+      rating:     Math.round((m.vote_average || 0) * 10) / 10,
+      language:   m.original_language,  // 'hi' | 'en' | other — used by generateSystemSessions
+      source:     m._src,               // 'now_playing' | 'popular' | 'trending'
+      popularity: m.popularity || 0,
     }));
-    if (!list.length) throw new Error('TMDB returned 0 results');
-    _moviesCache = { data: list, ts: now };
-    console.log(`[movies] TMDB: ${list.length} movie(s) cached`);
-    return list;
+
+    _moviesCache = { data: pool, ts: now };
+
+    const hiCount = pool.filter(m => m.language === 'hi').length;
+    const enCount = pool.filter(m => m.language === 'en').length;
+    const npCount = pool.filter(m => m.source  === 'now_playing').length;
+    console.log(`[movies] pool: ${pool.length} total | Hindi:${hiCount} English:${enCount} NowPlaying:${npCount}`);
+
+    return pool;
   } catch (err) {
     console.warn(`[movies] TMDB failed (${err.message}) — fallback`);
     return _moviesCache.data?.length ? _moviesCache.data : FALLBACK_MOVIES;
@@ -446,7 +639,7 @@ function _istNow() {
 // ─────────────────────────────────────────────────────────────────────────────
 function _buildShowTimeUTC(istDateStr, hourIST, minuteIST) {
   const [y, mo, d] = istDateStr.split('-').map(Number);
-  // IST − 5:30 = UTC
+  // IST - 5:30 = UTC
   const utcMinutes = hourIST * 60 + minuteIST - 330; // 330 = 5*60+30
   const utcHour    = Math.floor(utcMinutes / 60);
   const utcMin     = utcMinutes % 60;
@@ -473,11 +666,14 @@ function _buildShowTimeUTC(istDateStr, hourIST, minuteIST) {
 //  • Duplicate guard: skip if same movie+city+date+time already active
 //  • Max 3 system sessions total across all slots — enforced by slot-fill logic
 //  • Returns count of sessions created
+//
+// Language per slot: derived from movie.language via _LANG_DISPLAY.
+//   hi → 'Hindi'  |  en → 'English'  |  other → userLang → DEFAULT_LANGUAGE
+//   Tamil and other regional languages are excluded upstream in fetchTrendingMovies().
 // ─────────────────────────────────────────────────────────────────────────────
 async function generateSystemSessions(userCtx, lat, lng) {
-  const nowIST    = _istNow();
-  const istHour   = nowIST.getUTCHours();
-  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+  const nowIST  = _istNow();
+  const istHour = nowIST.getUTCHours();
 
   // Determine target day: before 7 PM IST → today, else → tomorrow
   const AFTER_7PM = istHour >= 19;
@@ -502,34 +698,92 @@ async function generateSystemSessions(userCtx, lat, lng) {
 
   const userLang = userCtx?.languagePreference || DEFAULT_LANGUAGE;
   const city     = (userCtx?.city || '').trim().toLowerCase();
-  const langPool = [userLang, 'Hindi', 'English', 'Tamil']
-    .filter((v, i, a) => a.indexOf(v) === i);
-  let created    = 0;
+  let   created  = 0;
 
-  // Collect already-used slots + movies for target date in this city
+  // Collect already-used slots + movies for target date near these coordinates.
+  // We intentionally do NOT filter by city here — city is unreliable user profile
+  // data that causes duplicate sessions for the same physical theatre.
+  // Instead, use geo proximity to find sessions near these coords.
   const existingQuery = {
     status: 'active',
     date:   targetDateStr,
-    ...(city ? { city } : {}),
   };
-  const existingSessions = await MovieSession.find(existingQuery)
-    .select('movieId time isSystemGenerated')
-    .lean();
+  let existingSessions = [];
+  if (lat !== null && lng !== null) {
+    try {
+      existingSessions = await MovieSession.find({
+        ...existingQuery,
+        location: {
+          $nearSphere: {
+            $geometry:    { type: 'Point', coordinates: [lng, lat] },
+            $maxDistance: MAX_RADIUS_M,
+          },
+        },
+      }).select('movieId time theatrePlaceId isSystemGenerated').lean();
+    } catch (_) {
+      // geo index not ready — fall back to bare date query
+      existingSessions = await MovieSession.find(existingQuery)
+        .select('movieId time theatrePlaceId isSystemGenerated').lean();
+    }
+  } else {
+    existingSessions = await MovieSession.find(existingQuery)
+      .select('movieId time theatrePlaceId isSystemGenerated').lean();
+  }
 
-  // Count existing system sessions for this date+city (max 3 allowed)
+  // Count existing system sessions for this date near user (max 3 allowed)
   const existingSystemCount = existingSessions.filter(s => s.isSystemGenerated).length;
   if (existingSystemCount >= 3) {
     console.log(`   ⚠️ already ${existingSystemCount} system sessions for ${targetDateStr} — skipping`);
     return 0;
   }
 
-  const existingSlotTimes = new Set(existingSessions.map(s => s.time));
-  const usedMovieIds      = new Set(existingSessions.map(s => s.movieId));
+  const existingSlotTimes    = new Set(existingSessions.map(s => s.time));
+  const existingPlaceIdSlots = new Set(existingSessions.map(s => `${s.theatrePlaceId}|${s.time}`));
+  const usedMovieIds         = new Set(existingSessions.map(s => s.movieId));
 
   console.log(`   existing: ${existingSessions.length} session(s), slots taken: ${[...existingSlotTimes].join(', ')}`);
 
-  const moviePool = movies.filter(m => !usedMovieIds.has(m.id.toString()));
-  let movieIdx    = 0;
+  // ── Build movie pool with LANGUAGE-PRIORITY shuffle ───────────────────────
+  //
+  // ROOT CAUSE OF ENGLISH SESSIONS:
+  //   A flat _shuffle() on the full movie list destroys the Hindi-first ordering
+  //   that fetchTrendingMovies() produces. English movies end up at random positions
+  //   0, 1, or 2 — the exact indices picked for the 3 daily time slots.
+  //
+  // FIX:
+  //   Use _buildLangPriorityPool() which shuffles WITHIN each language bucket,
+  //   then concatenates Hindi → English → other. This guarantees all Hindi movies
+  //   appear before any English movie in the final pool, so slot picks are always
+  //   Hindi-first by construction, not by chance.
+  //
+  // Exclusion tiers (unchanged):
+  //   Tier 1: not used today AND not recently used by system
+  //   Tier 2: not used today (relax recent-use exclusion if pool < 3)
+  //   Tier 3: full pool (last resort, all exclusions dropped)
+  const recentIds = _getRecentMovieIds();
+
+  // Tier 1: not used today AND not recently used by system
+  const tier1 = movies.filter(m => !usedMovieIds.has(String(m.id)) && !recentIds.has(String(m.id)));
+  let moviePool = _buildLangPriorityPool(tier1);
+
+  // Tier 2: fall back — allow recently-used movies if pool is too small
+  if (moviePool.length < 3) {
+    console.log(`   [pool] tier-1 pool too small (${moviePool.length}) — relaxing recent-use exclusion`);
+    const tier2 = movies.filter(m => !usedMovieIds.has(String(m.id)));
+    moviePool = _buildLangPriorityPool(tier2);
+  }
+
+  // Tier 3: all movies (shouldn't happen in practice with 20+ TMDB results)
+  if (moviePool.length === 0) {
+    console.log(`   [pool] all movies used today — using full priority pool`);
+    moviePool = _buildLangPriorityPool([...movies]);
+  }
+
+  const poolHi = moviePool.filter(m => m.language === 'hi').length;
+  const poolEn = moviePool.filter(m => m.language === 'en').length;
+  console.log(`   [pool] ${moviePool.length} movie(s) available | Hindi:${poolHi} English:${poolEn}`);
+
+  let movieIdx = 0;
 
   for (let i = 0; i < SYSTEM_SHOW_TIMES.length; i++) {
     const slot    = SYSTEM_SHOW_TIMES[i];
@@ -558,22 +812,36 @@ async function generateSystemSessions(userCtx, lat, lng) {
 
     const movie   = moviePool[movieIdx++];
     const theatre = theatres[i % theatres.length];
-    const lang    = i === 0 ? userLang : (langPool[i % langPool.length] || DEFAULT_LANGUAGE);
+
+    // ── Derive session display language from the movie's own language code ──
+    // hi → Hindi, en → English, anything else → userLang → DEFAULT_LANGUAGE.
+    // This ensures the session language always reflects the actual film being shown.
+    // Tamil and other regional languages are excluded upstream in fetchTrendingMovies()
+    // so in practice this resolves to either 'Hindi' or 'English' for every slot.
+    const lang = _LANG_DISPLAY[movie.language] || userLang || DEFAULT_LANGUAGE;
 
     // Build correct UTC showTime from IST date + slot
     const showTime  = _buildShowTimeUTC(targetDateStr, slot.hour, slot.minute);
     const expiresAt = new Date(showTime.getTime() +  15 * 60_000);
     const chatExpAt = new Date(showTime.getTime() + 180 * 60_000);
 
-    console.log(`   [${slot.label}] "${movie.title}" @ "${theatre.name}" (${lang}) showTime=${showTime.toISOString()}`);
+    console.log(`   [${slot.label}] "${movie.title}" (${movie.language}→${lang}) @ "${theatre.name}" showTime=${showTime.toISOString()}`);
 
-    // Final duplicate guard
+    // Final duplicate guard — use theatrePlaceId+date+time as the unique key.
+    // city is NOT used here because it comes from user.questionnaire.city which
+    // can be wrong (e.g. "north delhi" for a Bhilai theatre). Two different users
+    // with different home cities would otherwise create duplicate sessions for the
+    // exact same physical theatre at the exact same time.
+    const placeIdSlotKey = `${theatre.placeId}|${timeStr}`;
+    if (theatre.placeId && existingPlaceIdSlots.has(placeIdSlotKey)) {
+      console.log(`   [${slot.label}] skip — placeId+time slot already filled (dedup)`);
+      continue;
+    }
     const dupExists = await MovieSession.exists({
-      movieId: movie.id.toString(),
-      date:    targetDateStr,
-      time:    timeStr,
-      status:  'active',
-      ...(city ? { city } : {}),
+      theatrePlaceId: theatre.placeId || null,
+      date:           targetDateStr,
+      time:           timeStr,
+      status:         'active',
     });
     if (dupExists) {
       console.log(`   [${slot.label}] skip — exact duplicate found`);
@@ -624,7 +892,8 @@ async function generateSystemSessions(userCtx, lat, lng) {
         console.warn(`   [${slot.label}] ⚠️ chat failed: ${chatErr.message}`);
       }
 
-      usedMovieIds.add(movie.id.toString());
+      usedMovieIds.add(String(movie.id));
+      _markMovieUsed(movie.id);  // update rotation cache
       created++;
     } catch (err) {
       console.error(`   [${slot.label}] ❌ ${err.message}`);
@@ -710,11 +979,14 @@ async function getNearbySessions(userId, queryLat, queryLng) {
   // expiresAt > now ensures past-slot sessions (e.g. 11 AM at 2 PM) are excluded.
   // showTime > now is an additional guard so sessions whose slot hasn't started yet
   // but whose expiresAt is in the future don't accidentally surface.
+  // IMPORTANT: do NOT filter by city in the base query.
+  // City is user.questionnaire.city — it can be wrong or stale (e.g. a Bhilai user
+  // with city="north delhi" in profile). Geo distance via $nearSphere is the correct
+  // isolation mechanism. Sessions far away are naturally excluded by the 20 km radius.
   const baseQuery = {
     status:    'active',
     expiresAt: { $gt: now },
-    showTime:  { $gt: new Date(now.getTime() - 15 * 60_000) }, // allow up to 15 min grace (expiresAt covers this)
-    ...(userCity ? { city: userCity } : {}),
+    showTime:  { $gt: new Date(now.getTime() - 15 * 60_000) }, // allow up to 15 min grace
   };
 
   // STEP 1
@@ -747,7 +1019,7 @@ async function getNearbySessions(userId, queryLat, queryLng) {
     console.log('STEP 2: enough real sessions — skipping generation');
   }
 
-  // STEP 4 — Score, sort, cap at 4 (per spec: "max 4 sessions visible")
+  // STEP 4 — Score, sort, cap at 5 visible
   //
   // Sort priority (per spec):
   //   1. Real-user sessions first  (score +200)
@@ -756,8 +1028,8 @@ async function getNearbySessions(userId, queryLat, queryLng) {
   //   4. Language match + boosted  (score bonus)
   //
   // Fill strategy:
-  //   Take all real-user sessions (up to 4), fill remainder with system sessions
-  //   until total = 4.  This ensures real users always dominate.
+  //   Take all real-user sessions (up to 5), fill remainder with system sessions
+  //   until total = 5. Real users always dominate.
 
   const scored = sessions.map(s => {
     const distM = (loc.lat !== null && s.location?.coordinates)
@@ -774,10 +1046,9 @@ async function getNearbySessions(userId, queryLat, queryLng) {
   const realSessions   = scored.filter(x => !x.isSystem).sort((a, b) => b.score - a.score);
   const systemSessions = scored.filter(x =>  x.isSystem).sort((a, b) => b.score - a.score);
 
-  // ── Display cap: max 5 sessions visible ──────────────────────────────────
+  // Display cap: max 5 sessions visible
   // System generates 3 sessions (11AM, 3PM, 7PM) + up to 2 real-user sessions
   // can stack on top → total 5. If no real-user sessions: 3 system shown.
-  // If 2 real-user sessions: show both + 3 system = 5.
   const MAX_VISIBLE = 5;
   const combined = [
     ...realSessions.slice(0, MAX_VISIBLE),
@@ -1147,8 +1418,8 @@ async function sendMessage(userId, sessionId, text, io) {
 // Sends FCM push + (optionally) activity feed entry.
 // Messages per spec:
 //  1  participant  → "Your hangout didn't get any joins this time. Try again later."
-//  ≤2 participants → "Only a few people joined this time. Try again with a different time."
-//  ≥3 participants → "Your hangout was active 🎉 Hope you had a great time!"
+//  <=2 participants → "Only a few people joined this time. Try again with a different time."
+//  >=3 participants → "Your hangout was active 🎉 Hope you had a great time!"
 // ─────────────────────────────────────────────────────────────────────────────
 async function sendPostSessionNotifications(session) {
   // Only for user-created sessions
@@ -1220,7 +1491,6 @@ async function debugSessions() {
     })),
   };
 }
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // getMySessions
@@ -1301,7 +1571,7 @@ async function getMySessions(userId) {
 //
 // Called when a user selects a movie in the create flow.
 // Checks if an active session exists for the same movie in the same city
-// within 10–15 km AND within the next 2 hours.
+// within 10-15 km AND within the next 2 hours.
 //
 // Returns ONE suggestion at most (spec: "show ONLY ONE suggestion").
 //

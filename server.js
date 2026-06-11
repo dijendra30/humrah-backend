@@ -1,4 +1,4 @@
-// server.js - UPDATED WITH LEGAL ACCEPTANCE ENFORCEMENT + PRODUCTION SECURITY HARDENING
+// server.js - UPDATED WITH LEGAL ACCEPTANCE ENFORCEMENT + PRODUCTION SECURITY HARDENING + LIVE LOCATION MATCHMAKING
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -44,28 +44,19 @@ try {
 const app = express();
 const server = http.createServer(app);
 
-// =============================================
-// CORS ORIGIN WHITELIST
-// Android Retrofit does NOT send Origin headers for native requests.
-// The whitelist matters for:
-//   - Browser-based pages (reset-password.html)
-//   - Future web dashboard
-//   - Any browser fetch calls
-// null = allows requests with no Origin (native Android, Postman dev testing)
-// =============================================
+server.keepAliveTimeout = 120000;
+server.headersTimeout   = 125000;
+
 const ALLOWED_ORIGINS = [
-  // Add your web dashboard domain here when you have one
-  // e.g. 'https://admin.humrah.in'
   'https://humrah.in',
   'https://www.humrah.in',
 ];
 
 const corsOptions = {
   origin: (origin, callback) => {
-    // Allow requests with no Origin header (native Android, server-to-server)
     if (!origin) return callback(null, true);
     if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
-    // In development, allow localhost
+    if (origin.endsWith('.vercel.app') || origin === 'https://admin.humrah.in') return callback(null, true);
     if (process.env.NODE_ENV !== 'production' && origin.startsWith('http://localhost')) {
       return callback(null, true);
     }
@@ -73,16 +64,15 @@ const corsOptions = {
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: false, // set true only if you add cookie auth later
+  credentials: false,
 };
 
-// ✅ Socket.IO with same CORS whitelist
-// Android Socket.IO client does NOT send Origin — null check handles that.
 const io = socketIo(server, {
   cors: {
     origin: (origin, callback) => {
       if (!origin) return callback(null, true);
       if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+      if (origin.endsWith('.vercel.app') || origin === 'https://admin.humrah.in') return callback(null, true);
       if (process.env.NODE_ENV !== 'production' && origin.startsWith('http://localhost')) {
         return callback(null, true);
       }
@@ -90,111 +80,62 @@ const io = socketIo(server, {
     },
     methods: ["GET", "POST"],
   },
-  transports: ['websocket', 'polling'],
-  pingTimeout: 60000,
-  pingInterval: 25000
+  transports: ['websocket'],
+  pingTimeout: 90000,
+  pingInterval: 25000,
+  upgradeTimeout: 10000,
+  allowUpgrades: true,
 });
 
-// =============================================
-// TRUST PROXY — Coolify + Traefik on Oracle Cloud
-// Traefik is exactly 1 proxy hop in front of Node.
-// Setting to 1 tells Express to trust only the first
-// X-Forwarded-For entry, which is the real client IP.
-// The rate limiter keyGenerator reads X-Forwarded-For
-// directly (not req.ip) so this is a belt-and-suspenders.
-// =============================================
 app.set('trust proxy', 1);
 
-// =============================================
-// SECURITY MIDDLEWARE
-// Applied in this order deliberately.
-// =============================================
-
-// 1. Remove X-Powered-By header (don't advertise Express)
 app.disable('x-powered-by');
 
-// 2. Helmet: sets secure HTTP headers
-//    - X-Content-Type-Options: nosniff
-//    - X-Frame-Options: SAMEORIGIN
-//    - Strict-Transport-Security (HSTS)
-//    - Referrer-Policy
-//    - X-DNS-Prefetch-Control
-//    CSP is configured specifically (not disabled) to protect reset-password.html
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
-      defaultSrc:     ["'self'"],
-      scriptSrc:      ["'self'"],                    // no inline scripts on reset page
-      styleSrc:       ["'self'", "'unsafe-inline'"], // allow inline styles for the HTML page
-      imgSrc:         ["'self'", "data:", "https://res.cloudinary.com"], // profile photos
-      connectSrc:     ["'self'"],
-      fontSrc:        ["'self'"],
-      objectSrc:      ["'none'"],
-      frameSrc:       ["'none'"],
+      defaultSrc:  ["'self'"],
+      scriptSrc:   ["'self'", "'unsafe-inline'", "https://unpkg.com", "https://cdnjs.cloudflare.com"],
+      styleSrc:    ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+      imgSrc:      ["'self'", "data:", "https://res.cloudinary.com", "https://*.tile.openstreetmap.org", "https://*.google.com"],
+      connectSrc:  ["'self'", "https://api.humrah.in"],
+      fontSrc:     ["'self'", "https://fonts.gstatic.com"],
+      objectSrc:   ["'none'"],
+      frameSrc:    ["'none'"],
       upgradeInsecureRequests: [],
     },
   },
-  crossOriginEmbedderPolicy: false, // keep false — Agora/Socket.IO need this off
-  hsts: {
-    maxAge: 31536000,       // 1 year
-    includeSubDomains: true,
-    preload: true,
-  },
+  crossOriginEmbedderPolicy: false,
+  hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
   referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
 }));
 
-// 3. CORS
 app.use(cors(corsOptions));
-
-// 4. mongoSanitize: strips $gt, $where, etc. from req.body/query/params
-//    Prevents NoSQL injection like { email: { "$gt": "" } }
 app.use(mongoSanitize());
-
-// 5. hpp: prevent HTTP Parameter Pollution (duplicate params attack)
 app.use(hpp());
-
-// 6. Global rate limiter — 100 req / 15 min per IP
-//    trust proxy must be set BEFORE this runs so ipKeyGenerator gets real IP
 app.use(globalLimiter);
 
-// =============================================
-// BODY PARSING — tiered limits
-//
-// Default: 100kb — safe for all JSON API requests.
-// Exceptions below: 3 routes send base64-encoded images in JSON body.
-//   - POST /api/users/upload-profile-photo-base64
-//   - POST /api/users/submit-verification-photo-base64
-//   - POST /api/posts (imageBase64 field)
-//
-// Base64 inflates size by ~1.37x. A 1MB photo becomes ~1.4MB base64.
-// 5mb covers up to ~3.6MB raw image — reasonable for mobile camera output.
-// Multer-based routes (food, verification video, multipart photo) are
-// NOT affected by this — multer has its own independent fileSize limits.
-// =============================================
-
-// Per-route overrides for base64 upload endpoints — applied BEFORE global parser
-app.use('/api/users/upload-profile-photo-base64',    express.json({ limit: '5mb' }));
+app.use('/api/users/upload-profile-photo-base64',      express.json({ limit: '5mb' }));
 app.use('/api/users/submit-verification-photo-base64', express.json({ limit: '5mb' }));
-app.use('/api/posts',                                express.json({ limit: '5mb' }));
+app.use('/api/posts',                                  express.json({ limit: '5mb' }));
 
-// Global limit for everything else
 app.use(express.json({ limit: '100kb' }));
 app.use(express.urlencoded({ extended: true, limit: '100kb' }));
 
-// Make io available to routes
 app.set('io', io);
 
-// =============================================
-// ✅ SERVE STATIC PUBLIC FILES
-// Must come BEFORE any route registration
-// =============================================
 app.use(express.static(path.join(__dirname, 'public')));
 
-// =============================================
-// ✅ CLEAN URL: GET /reset-password?token=XYZ
-// =============================================
 app.get('/reset-password', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'reset-password.html'));
+});
+
+app.get('/live/:sessionId', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'humrah-live-safety.html'));
+});
+
+app.get('/humrah-live-safety.html', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'humrah-live-safety.html'));
 });
 
 // =============================================
@@ -213,18 +154,12 @@ io.use((socket, next) => {
     if (!token) token = socket.handshake.query?.token;
     if (!token) token = socket.handshake.headers?.authorization?.replace('Bearer ', '');
 
-    if (!token) {
-      console.log('❌ Socket auth failed: No token provided');
-      return next(new Error('Authentication error: No token provided'));
-    }
+    if (!token) return next(new Error('Authentication error: No token provided'));
 
     const JWT_SECRET = process.env.JWT_SECRET;
-    if (!JWT_SECRET) {
-      console.error('[server.js] JWT_SECRET env var is not set. Rejecting socket connection.');
-      return next(new Error('Authentication error: Server misconfiguration'));
-    }
-    const decoded = jwt.verify(token, JWT_SECRET);
+    if (!JWT_SECRET) return next(new Error('Authentication error: Server misconfiguration'));
 
+    const decoded = jwt.verify(token, JWT_SECRET);
     socket.userId   = decoded.userId;
     socket.userRole = decoded.role || 'USER';
 
@@ -236,14 +171,12 @@ io.use((socket, next) => {
           socket.userName  = `${user.firstName} ${user.lastName || ''}`.trim();
           socket.userPhoto = user.profilePhoto;
           userInfo.set(socket.userId, { name: socket.userName, photo: socket.userPhoto });
-          console.log(`✅ Socket authenticated: ${socket.userName} (${socket.userId})`);
         }
       })
       .catch(err => { console.error('Error fetching user info:', err); socket.userName = 'User'; });
 
     next();
   } catch (err) {
-    console.log('❌ Socket auth failed:', err.message);
     if (err.name === 'TokenExpiredError') return next(new Error('Authentication error: Token expired'));
     if (err.name === 'JsonWebTokenError')  return next(new Error('Authentication error: Invalid token'));
     return next(new Error('Authentication error: ' + err.message));
@@ -257,7 +190,7 @@ io.on('connection', (socket) => {
   const userId   = socket.userId;
   const userName = socket.userName;
 
-  console.log(`✅ User connected: ${userName} (${socket.id})`);
+  socket.join(`user:${userId}`);
 
   userPresence.set(userId, {
     socketId: socket.id,
@@ -269,7 +202,6 @@ io.on('connection', (socket) => {
 
   io.emit('user-online', { userId, userName });
 
-  // ==================== JOIN CHAT ====================
   socket.on('join-chat', async (data) => {
     try {
       const { chatId } = data;
@@ -277,56 +209,54 @@ io.on('connection', (socket) => {
       socket.chatId = chatId;
       if (!chatUsers.has(chatId)) chatUsers.set(chatId, new Set());
       chatUsers.get(chatId).add(socket.id);
-      console.log(`📥 ${userName} joined chat: ${chatId}`);
-      socket.to(chatId).emit('user-joined', { userId, userName });
 
-      const Message           = mongoose.model('Message');
+      socket.to(chatId).emit('user-online', { userId, userName });
+
       const RandomBookingChat = mongoose.model('RandomBookingChat');
       const chat = await RandomBookingChat.findById(chatId);
       if (chat) {
-        const otherUserId = chat.participants.find(p => p.userId.toString() !== userId)?.userId;
-        const pending = await Message.find({
-          chatId, senderId: otherUserId, deliveryStatus: 'SENT'
-        }).populate('senderId', 'firstName lastName profilePhoto');
-
-        if (pending.length > 0) {
-          console.log(`📬 Delivering ${pending.length} pending messages to ${userName}`);
-          for (const msg of pending) {
-            socket.emit('new-message', {
-              _id: msg._id.toString(), chatId: msg.chatId.toString(),
-              senderId: msg.senderId._id.toString(),
-              senderIdRaw: {
-                _id: msg.senderId._id.toString(), firstName: msg.senderId.firstName,
-                lastName: msg.senderId.lastName, profilePhoto: msg.senderId.profilePhoto
-              },
-              content: msg.content, messageType: msg.messageType,
-              timestamp: msg.timestamp.toISOString(), deliveryStatus: 'SENT'
-            });
-            msg.deliveryStatus = 'DELIVERED';
-            msg.deliveredAt    = new Date();
-            await msg.save();
-            io.to(chatId).emit('message-delivered', {
-              messageId: msg._id.toString(), deliveredTo: userId,
-              deliveredAt: msg.deliveredAt.toISOString()
-            });
+        const otherParticipant = chat.participants.find(p => p.userId.toString() !== userId);
+        if (otherParticipant) {
+          const otherId = otherParticipant.userId.toString();
+          if (isUserOnline(otherId)) {
+            socket.emit('user-online', { userId: otherId });
+          } else {
+            const lastSeen = getUserLastSeen(otherId);
+            socket.emit('user-offline', { userId: otherId, lastSeen: lastSeen?.toISOString() || null });
           }
+        }
+
+        const Message = mongoose.model('Message');
+        const otherUserId = chat.participants.find(p => p.userId.toString() !== userId)?.userId;
+        const pending = await Message.find({ chatId, senderId: otherUserId, deliveryStatus: 'SENT' })
+          .populate('senderId', 'firstName lastName profilePhoto');
+
+        for (const msg of pending) {
+          socket.emit('new-message', {
+            _id: msg._id.toString(), chatId: msg.chatId.toString(),
+            senderId: msg.senderId._id.toString(),
+            senderIdRaw: { _id: msg.senderId._id.toString(), firstName: msg.senderId.firstName, lastName: msg.senderId.lastName, profilePhoto: msg.senderId.profilePhoto },
+            content: msg.content, messageType: msg.messageType,
+            timestamp: msg.timestamp.toISOString(), deliveryStatus: 'SENT'
+          });
+          msg.deliveryStatus = 'DELIVERED';
+          msg.deliveredAt    = new Date();
+          await msg.save();
+          io.to(chatId).emit('message-delivered', { messageId: msg._id.toString(), deliveredTo: userId, deliveredAt: msg.deliveredAt.toISOString() });
         }
       }
     } catch (error) { console.error('Join chat error:', error); }
   });
 
-  // ==================== LEAVE CHAT ====================
   socket.on('leave-chat', (chatId) => {
     socket.leave(chatId);
     if (chatUsers.has(chatId)) {
       chatUsers.get(chatId).delete(socket.id);
       if (chatUsers.get(chatId).size === 0) chatUsers.delete(chatId);
     }
-    console.log(`📤 ${userName} left chat: ${chatId}`);
     socket.to(chatId).emit('user-left', { userId, userName });
   });
 
-  // ==================== MESSAGE DELIVERED ====================
   socket.on('message-delivered', async (data) => {
     try {
       const { messageId, chatId } = data;
@@ -336,15 +266,11 @@ io.on('connection', (socket) => {
         message.deliveryStatus = 'DELIVERED';
         message.deliveredAt    = new Date();
         await message.save();
-        socket.to(chatId).emit('message-delivered', {
-          messageId, deliveredTo: userId, deliveredAt: message.deliveredAt.toISOString()
-        });
-        console.log(`✅ Message ${messageId} delivered to ${userName}`);
+        socket.to(chatId).emit('message-delivered', { messageId, deliveredTo: userId, deliveredAt: message.deliveredAt.toISOString() });
       }
     } catch (error) { console.error('Message delivered error:', error); }
   });
 
-  // ==================== MESSAGE READ ====================
   socket.on('message-read', async (data) => {
     try {
       const { messageId, chatId } = data;
@@ -354,62 +280,113 @@ io.on('connection', (socket) => {
         message.deliveryStatus = 'READ';
         message.readAt         = new Date();
         await message.save();
-        socket.to(chatId).emit('message-read', {
-          messageId, readBy: userId, readAt: message.readAt.toISOString()
-        });
-        console.log(`✅ Message ${messageId} read by ${userName}`);
+        socket.to(chatId).emit('message-read', { messageId, readBy: userId, readAt: message.readAt.toISOString() });
       }
     } catch (error) { console.error('Message read error:', error); }
   });
 
-  // ==================== TYPING INDICATORS ====================
+  const typingTimeouts = new Map();
+
   socket.on('typing-start', ({ chatId }) => {
+    if (!chatId) return;
     socket.to(chatId).emit('user-typing', { userId, userName, isTyping: true });
-  });
-  socket.on('typing-stop', ({ chatId }) => {
-    socket.to(chatId).emit('user-typing', { userId, userName, isTyping: false });
+    const key = `${socket.id}:${chatId}`;
+    if (typingTimeouts.has(key)) clearTimeout(typingTimeouts.get(key));
+    typingTimeouts.set(key, setTimeout(() => {
+      socket.to(chatId).emit('user-typing', { userId, userName, isTyping: false });
+      typingTimeouts.delete(key);
+    }, 6000));
   });
 
-  // ==================== CALL SIGNALING ====================
+  socket.on('typing-stop', ({ chatId }) => {
+    if (!chatId) return;
+    socket.to(chatId).emit('user-typing', { userId, userName, isTyping: false });
+    const key = `${socket.id}:${chatId}`;
+    if (typingTimeouts.has(key)) { clearTimeout(typingTimeouts.get(key)); typingTimeouts.delete(key); }
+  });
+
   socket.on('initiate-call', async (data) => {
     try {
       const { chatId, callerId, calleeId, isAudioOnly } = data;
-      console.log(`📞 Call initiated: ${userName} (${callerId}) → ${calleeId} (audio: ${isAudioOnly})`);
       const callerInfo = userInfo.get(callerId) || { name: userName, photo: socket.userPhoto };
-      socket.to(chatId).emit('incoming-call', {
-        chatId, callerId, callerName: callerInfo.name, callerPhoto: callerInfo.photo,
-        isAudioOnly, timestamp: new Date().toISOString()
-      });
+      socket.to(chatId).emit('incoming-call', { chatId, callerId, callerName: callerInfo.name, callerPhoto: callerInfo.photo, isAudioOnly, timestamp: new Date().toISOString() });
     } catch (error) { console.error('Call initiation error:', error); }
   });
 
   socket.on('accept-call', ({ chatId, calleeId }) => {
-    console.log(`✅ Call accepted by: ${userName} (${calleeId})`);
     const calleeInfo = userInfo.get(calleeId) || { name: userName, photo: socket.userPhoto };
-    socket.to(chatId).emit('call-accepted', {
-      calleeId, calleeName: calleeInfo.name, calleePhoto: calleeInfo.photo,
-      timestamp: new Date().toISOString()
-    });
+    socket.to(chatId).emit('call-accepted', { calleeId, calleeName: calleeInfo.name, calleePhoto: calleeInfo.photo, timestamp: new Date().toISOString() });
+  });
+
+  // BUG 5 FIX: Handle accept-voice-call socket emit from Android.
+  // Android sends BOTH this socket emit AND POST /api/voice-call/accept/:callId (HTTP).
+  // The HTTP route does the real work (generates Agora token, updates DB).
+  // This handler exists so the emit is acknowledged server-side and is visible in
+  // server logs — it emits nothing back because the HTTP route already does that
+  // via voice-call-accepted on the caller's user room.
+  socket.on('accept-voice-call', ({ callId }) => {
+    if (!callId) return;
+    console.log(`📡 Socket: accept-voice-call received for callId=${callId} from userId=${userId} (HTTP flow handles the real acceptance)`);
+    // No additional emit needed — POST /api/voice-call/accept/:callId already emits
+    // voice-call-accepted to the caller via io.to('user:callerId').
   });
 
   socket.on('reject-call', ({ chatId, calleeId }) => {
-    console.log(`❌ Call rejected by: ${userName} (${calleeId})`);
     socket.to(chatId).emit('call-rejected', { calleeId, timestamp: new Date().toISOString() });
   });
 
   socket.on('end-call', ({ chatId }) => {
-    console.log(`📵 Call ended in chat: ${chatId} by ${userName}`);
     socket.to(chatId).emit('call-ended', { endedBy: userId, timestamp: new Date().toISOString() });
   });
 
-  // ==================== WEBRTC SIGNALING ====================
   socket.on('webrtc-offer',         ({ chatId, offer })     => socket.to(chatId).emit('webrtc-offer',         { from: userId, offer }));
   socket.on('webrtc-answer',        ({ chatId, answer })    => socket.to(chatId).emit('webrtc-answer',        { from: userId, answer }));
   socket.on('webrtc-ice-candidate', ({ chatId, candidate }) => socket.to(chatId).emit('webrtc-ice-candidate', { from: userId, candidate }));
 
-  // ==================== DISCONNECT ====================
+  // ── Movie Session Chat rooms ──────────────────────────────────────────────
+  // Room name: "movie-chat-{chatId}"
+  // Events: join-movie-chat, leave-movie-chat, movie-send-message
+  // Emitted back: movie-new-message, movie-user-joined, movie-user-left, movie-typing
+
+  socket.on('join-movie-chat', async ({ chatId }) => {
+    if (!chatId) return;
+    socket.join(`movie-chat-${chatId}`);
+    socket.movieChatId = chatId;
+
+    // Notify others in the room
+    socket.to(`movie-chat-${chatId}`).emit('movie-user-joined', {
+      userId,
+      userName,
+      userPhoto: socket.userPhoto,
+    });
+  });
+
+  socket.on('leave-movie-chat', ({ chatId }) => {
+    if (!chatId) return;
+    socket.leave(`movie-chat-${chatId}`);
+    if (socket.movieChatId === chatId) socket.movieChatId = null;
+    socket.to(`movie-chat-${chatId}`).emit('movie-user-left', { userId, userName });
+  });
+
+  socket.on('movie-typing-start', ({ chatId }) => {
+    if (!chatId) return;
+    socket.to(`movie-chat-${chatId}`).emit('movie-typing', { userId, userName, isTyping: true });
+  });
+
+  socket.on('movie-typing-stop', ({ chatId }) => {
+    if (!chatId) return;
+    socket.to(`movie-chat-${chatId}`).emit('movie-typing', { userId, userName, isTyping: false });
+  });
+
   socket.on('disconnect', () => {
-    console.log(`❌ User disconnected: ${userName} (${socket.id})`);
+    for (const [key, timeout] of typingTimeouts.entries()) {
+      if (key.startsWith(socket.id)) {
+        clearTimeout(timeout);
+        typingTimeouts.delete(key);
+        const chatId = key.split(':')[1];
+        if (chatId) socket.to(chatId).emit('user-typing', { userId, isTyping: false });
+      }
+    }
     const user = userPresence.get(userId);
     if (user) { user.status = 'OFFLINE'; user.lastSeen = new Date(); }
     io.emit('user-offline', { userId, userName, lastSeen: user?.lastSeen?.toISOString() });
@@ -421,34 +398,29 @@ io.on('connection', (socket) => {
   });
 });
 
-// =============================================
-// PRESENCE HELPER FUNCTIONS
-// =============================================
-function isUserOnline(userId)  { return userPresence.get(userId)?.status === 'ONLINE'; }
+function isUserOnline(userId)   { return userPresence.get(userId)?.status === 'ONLINE'; }
 function getUserLastSeen(userId) { return userPresence.get(userId)?.lastSeen || null; }
-function getUserInfo(userId)   { return userInfo.get(userId) || null; }
-global.isUserOnline   = isUserOnline;
+function getUserInfo(userId)     { return userInfo.get(userId) || null; }
+global.isUserOnline    = isUserOnline;
 global.getUserLastSeen = getUserLastSeen;
-global.getUserInfo    = getUserInfo;
+global.getUserInfo     = getUserInfo;
 
 // =============================================
-// IMPORT JOBS & MIDDLEWARE
+// JOBS & CLEANUP
 // =============================================
-const { startExpiryJob }           = require('./jobs/sessionExpiryJob');
+const { startExpiryJob }             = require('./jobs/sessionExpiryJob');
 const { startMovieSessionExpiryJob } = require('./jobs/movieSessionExpiryJob');
+const { startMovieDailySessionJob }  = require('./jobs/movieDailySessionJob');
 const { runStartupCleanup, scheduleDailyCleanup } = require('./utils/autoModerationCleanup');
 const { startPayoutCronJobs } = require('./cronJobs/payoutCron');
 
-// =============================================
-// DATABASE CONNECTION
-// =============================================
 const connectDB = async () => {
   try {
     await mongoose.connect(process.env.MONGODB_URI);
     console.log('✅ MongoDB Connected');
-
     startExpiryJob(io);
     startMovieSessionExpiryJob();
+    startMovieDailySessionJob();  // pre-seeds tomorrow's system sessions at 7 PM IST
     startPayoutCronJobs();
     await runStartupCleanup();
     scheduleDailyCleanup();
@@ -461,14 +433,13 @@ const connectDB = async () => {
 connectDB();
 
 // =============================================
-// IMPORT MIDDLEWARE & ROUTES
+// ROUTES
 // =============================================
 const { authenticate, adminOnly } = require('./middleware/auth');
 const { enforceLegalAcceptance }  = require('./middleware/enforceLegalAcceptance');
 const moderationRoutes            = require('./routes/moderation');
-
-const gamingRoutes           = require('./routes/gamingRoutes');
-const { initSessionSocket }  = require('./sockets/sessionSocket');
+const gamingRoutes                = require('./routes/gamingRoutes');
+const { initSessionSocket }       = require('./sockets/sessionSocket');
 initSessionSocket(io);
 
 const authRoutes             = require('./routes/auth');
@@ -492,17 +463,33 @@ const movieSessionRoutes     = require('./routes/movieSessionRoutes');
 const passwordResetRoutes    = require('./routes/passwordReset');
 const fcmTokenRoutes         = require('./routes/fcmToken');
 const matchingMoodRoutes     = require('./routes/matchingMood');
+const moodRequestRoutes      = require('./routes/moodRequest');
+const safetyToolsRoutes      = require('./routes/safetyTools');
+const safetyTicketRoutes     = require('./routes/safetyTickets'); // ✅ Phase 2 Safety Tickets
+// ✅ NEW: Lightweight live location for matchmaking (separate from safety live-location)
+const liveLocationMatchmakingRoutes = require('./routes/liveLocationMatchmaking');
 
-// =============================================
-// PUBLIC ROUTES
-// =============================================
+// Health check must stay public and before broad authenticated /api routes.
+// ── Public routes ──────────────────────────────────────────────────────────────
+app.get('/api/health', (req, res) => {
+  res.json({
+    status:   'OK',
+    message:  'Humrah API is running',
+    socketConnections:      io.engine.clientsCount,
+    activeChats:            chatUsers.size,
+    onlineUsers:            Array.from(userPresence.values()).filter(u => u.status === 'ONLINE').length,
+  });
+});
+
 app.use('/api/auth',  authRoutes);
 app.use('/api/auth',  passwordResetRoutes);
+app.use('/api/admin-dashboard-auth', require('./routes/adminDashboardAuth'));
 app.use('/api/legal', legalRoutes);
 
-// =============================================
-// PROTECTED ROUTES
-// =============================================
+const { liveLocationPollLimiter } = require('./routes/liveLocationRoutes');
+app.get('/api/live-location/:sessionId', liveLocationPollLimiter, require('./controllers/liveLocationController').get);
+
+// ── Protected routes ───────────────────────────────────────────────────────────
 app.use('/api/users',             authenticate, enforceLegalAcceptance, userRoutes);
 app.use('/api/events',            authenticate, enforceLegalAcceptance, eventRoutes);
 app.use('/api/companions',        authenticate, enforceLegalAcceptance, companionRoutes);
@@ -517,8 +504,10 @@ app.use('/api/payment',           authenticate, enforceLegalAcceptance, paymentR
 app.use('/api/random-booking',    authenticate, enforceLegalAcceptance, require('./routes/randomBooking'));
 app.use('/api/verification',      authenticate, enforceLegalAcceptance, require('./routes/verification'));
 app.use('/api/settings',          authenticate, enforceLegalAcceptance, settingsRoutes);
-app.use('/api/profile-assistant', profileAssistantRoutes);
+app.use('/api/profile-assistant', authenticate, profileAssistantRoutes);
 app.use('/api/admin',             authenticate, require('./routes/admin'));
+app.use('/api/admin-dashboard',   authenticate, require('./routes/adminDashboard'));
+app.use('/api/admin-analytics',   authenticate, require('./routes/adminAnalytics'));
 app.use('/api/moderation',        authenticate, adminOnly, moderationRoutes);
 app.use('/api/agora',             authenticate, enforceLegalAcceptance, require('./routes/agora'));
 app.use('/api/voice-call',        authenticate, enforceLegalAcceptance, require('./routes/voice-call'));
@@ -528,62 +517,44 @@ app.use('/api/food',              authenticate, enforceLegalAcceptance, foodRout
 app.use('/api',                   authenticate, enforceLegalAcceptance, movieSessionRoutes);
 app.use('/api/auth',              authenticate, fcmTokenRoutes);
 app.use('/api/events',            authenticate, require('./routes/featureClicks'));
-app.use('/api/matching-mood',      authenticate, enforceLegalAcceptance, matchingMoodRoutes);
+app.use('/api/matching-mood',     authenticate, enforceLegalAcceptance, matchingMoodRoutes);
+app.use('/api/mood-request',      authenticate, enforceLegalAcceptance, moodRequestRoutes);
+app.use('/api/safety-tools',      authenticate, enforceLegalAcceptance, safetyToolsRoutes);
+app.use('/api/safety-tickets',    authenticate, enforceLegalAcceptance, safetyTicketRoutes); // ✅ Phase 2
+app.use('/api/live-location',     authenticate, enforceLegalAcceptance, require('./routes/liveLocationRoutes'));
+app.use('/api',                   authenticate, enforceLegalAcceptance, require('./routes/moderation_route'));
+
+// ✅ NEW: Live location for matchmaking — POST /api/users/matchmaking-location
+//         Separate from safety live-location. Updates liveLocation on User doc.
+app.use('/api/users/matchmaking-location', authenticate, enforceLegalAcceptance, liveLocationMatchmakingRoutes);
 
 require('./cronJobs');
+require('./jobs/moodExpiry');
 
-// =============================================
-// HEALTH CHECK
-// =============================================
-app.get('/api/health', (req, res) => {
-  res.json({
-    status:   'OK',
-    message:  'Humrah API is running',
-    socketConnections:      io.engine.clientsCount,
-    activeChats:            chatUsers.size,
-    onlineUsers:            Array.from(userPresence.values()).filter(u => u.status === 'ONLINE').length,
-    gamingNamespaceClients: io.of('/gaming').sockets.size
-  });
-});
-
-// =============================================
-// GLOBAL ERROR HANDLER
-// =============================================
+// ── Global error handler ───────────────────────────────────────────────────────
 app.use((err, req, res, next) => {
-  // CORS errors — return 403, not 500
   if (err.message && err.message.startsWith('CORS blocked')) {
     return res.status(403).json({ success: false, message: 'Forbidden' });
   }
-
   console.error(err.stack);
   res.status(500).json({
     success: false,
     message: 'Something went wrong!',
-    // Never leak stack traces in production
     error: process.env.NODE_ENV === 'development' ? err.message : undefined
   });
 });
 
-// =============================================
-// START SERVER
-// =============================================
-const PORT = process.env.PORT || 3000;
-
-server.listen(PORT, () => {
-  console.log(`🚀 Humrah Server running on port ${PORT}`);
+// ── Start server ───────────────────────────────────────────────────────────────
+const PORT = process.env.PORT || 10000;
+const HOST = process.env.HOST || '0.0.0.0';
+server.listen(PORT, HOST, () => {
+  console.log(`🚀 Humrah Server running on ${HOST}:${PORT}`);
   console.log(`✅ Socket.IO enabled`);
   console.log(`✅ Legal compliance enforcement active`);
-  console.log(`✅ OTP system: MongoDB-backed, bcrypt+pepper, multi-instance safe`);
-  console.log(`✅ FCM Token route: POST /api/auth/fcm-token`);
-  console.log(`✅ Password reset: POST /api/auth/forgot-password + /api/auth/reset-password`);
-  console.log(`✅ Trust proxy enabled (Render reverse proxy)`);
-  console.log(`✅ Body size limit: 100kb JSON`);
-  console.log(`✅ CORS: origin whitelist active`);
+  console.log(`✅ Live Location Matchmaking: POST /api/users/matchmaking-location`);
+  console.log(`✅ Live Location Status:      GET  /api/users/matchmaking-location/status`);
 });
 
-// =============================================
-// GRACEFUL SHUTDOWN
-// =============================================
 const gracefulShutdown = async (signal) => {
   console.log(`\n${signal} signal received: closing HTTP server`);
   server.close(async () => {

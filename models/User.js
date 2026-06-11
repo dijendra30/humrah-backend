@@ -1,4 +1,4 @@
-// models/User.js - UPDATED with MEMBER/COMPANION User Type System + LOCATION SUPPORT
+// models/User.js - UPDATED with MEMBER/COMPANION User Type System + LOCATION SUPPORT + LIVE LOCATION
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
@@ -6,6 +6,14 @@ const bcrypt = require('bcryptjs');
 const questionnaireSchema = new mongoose.Schema({
   name: String,
   city: String,
+  // ── Language preference ────────────────────────────────────────────────────
+  // preferredLanguages is the canonical multi-select field (new clients).
+  // languagePreference is the legacy single-string field kept for backward
+  // compat. On first save by a new client, preferredLanguages is written
+  // and languagePreference is left as-is (or null). The migration script
+  // scripts/migrateLanguageField.js back-fills preferredLanguages for all
+  // existing users that only have languagePreference set.
+  preferredLanguages: [String],
   languagePreference: String,
   hangoutPreferences: [String],
   availableTimes: [String],
@@ -83,7 +91,7 @@ const userSchema = new mongoose.Schema({
   },
 
   // =============================================
-  // ✅ PASSWORD RESET SECURITY FIELDS
+  // PASSWORD RESET SECURITY FIELDS
   // =============================================
   lastPasswordResetAt: {
     type: Date,
@@ -102,11 +110,7 @@ const userSchema = new mongoose.Schema({
   },
 
   // =============================================
-  // ✅ TOKEN VERSION — for forced logout / revocation
-  // Incremented on: logout-all, password change, admin force-logout.
-  // Every JWT carries the tokenVersion at issue time.
-  // Auth middleware rejects any token where payload.tv !== db.tokenVersion.
-  // Cost: one extra DB field read per request (already done for user fetch).
+  // TOKEN VERSION -- for forced logout / revocation
   // =============================================
   tokenVersion: {
     type: Number,
@@ -114,25 +118,10 @@ const userSchema = new mongoose.Schema({
     select: true
   },
 
-  acceptedTermsVersion: {
-    type: String,
-    default: null
-  },
-
-  acceptedPrivacyVersion: {
-    type: String,
-    default: null
-  },
-
-  lastLegalAcceptanceDate: {
-    type: Date,
-    default: null
-  },
-
-  requiresLegalReacceptance: {
-    type: Boolean,
-    default: false
-  },
+  acceptedTermsVersion:    { type: String,  default: null },
+  acceptedPrivacyVersion:  { type: String,  default: null },
+  lastLegalAcceptanceDate: { type: Date,    default: null },
+  requiresLegalReacceptance: { type: Boolean, default: false },
 
   notifications: {
     activityRequests:  { type: Boolean, default: true },
@@ -141,71 +130,38 @@ const userSchema = new mongoose.Schema({
     appUpdates:        { type: Boolean, default: true }
   },
 
-  // ── Blocked users ─────────────────────────────────────────────────────────────
-  blockedUsers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  blockedUsers:  [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  mutedUsers:    [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  hiddenPosts:   [{ type: mongoose.Schema.Types.ObjectId, ref: 'Post' }],
+  savedPosts:    [{ type: mongoose.Schema.Types.ObjectId, ref: 'Post' }],
 
-  // ── Muted users (silent — they don't know) ───────────────────────────────────
-  mutedUsers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
-
-  // ── Hidden posts (never show again) ─────────────────────────────────────────
-  hiddenPosts: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Post' }],
-
-  // ── Saved / Bookmarked posts ─────────────────────────────────────
-  savedPosts: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Post' }],
-
-  // ── Not Interested — score per user (show less from them) ───────────────────
-  notInterestedUsers: [
-    {
-      userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-      score:  { type: Number, default: 1 }
-    }
-  ],
-
-  // ── Pending email change (OTP flow) ───────────────────────────────────────────
-  pendingEmail:           { type: String,  default: null, select: false },
-  pendingEmailOTP:        { type: String,  default: null, select: false },
-  pendingEmailOTPExpires: { type: Date,    default: null, select: false },
-
-  // ── Community Guidelines acceptance ──────────────────────────────────────────
-  acceptedCommunityVersion: { type: String,  default: null },
-  communityAcceptedAt:      { type: Date,    default: null },
-  communityAcceptedDevice:  { type: String,  default: null },
-  communityAcceptedIP:      { type: String,  default: null },
-
-  // Safety disclaimer acceptance log
-  safetyDisclaimerAcceptances: [{
-    acceptedAt: Date,
-    bookingId: mongoose.Schema.Types.ObjectId,
-    ipAddress: String
+  notInterestedUsers: [{
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    score:  { type: Number, default: 1 }
   }],
 
-  // Video verification consent log
-  videoVerificationConsents: [{
-    acceptedAt: Date,
-    sessionId: String,
-    ipAddress: String
-  }],
+  pendingEmail:           { type: String, default: null, select: false },
+  pendingEmailOTP:        { type: String, default: null, select: false },
+  pendingEmailOTPExpires: { type: Date,   default: null, select: false },
 
-  // Data deletion tracking
-  deletionRequestedAt: {
-    type: Date,
-    default: null
-  },
+  acceptedCommunityVersion: { type: String, default: null },
+  communityAcceptedAt:      { type: Date,   default: null },
+  communityAcceptedDevice:  { type: String, default: null },
+  communityAcceptedIP:      { type: String, default: null },
 
-  profileBotConsent: {
-    type:    Boolean,
-    default: false,
-  },
+  safetyDisclaimerAcceptances: [{ acceptedAt: Date, bookingId: mongoose.Schema.Types.ObjectId, ipAddress: String }],
+  videoVerificationConsents:   [{ acceptedAt: Date, sessionId: String, ipAddress: String }],
 
-  // Groq daily usage tracking — persisted to DB so it survives server restarts
-  // Structure: { date: 'YYYY-MM-DD', count: Number }
+  deletionRequestedAt: { type: Date,    default: null },
+  profileBotConsent:   { type: Boolean, default: false },
+
   groqUsage: {
-    date:  { type: String,  default: null },
-    count: { type: Number,  default: 0    },
+    date:  { type: String, default: null },
+    count: { type: Number, default: 0 },
   },
 
   // =============================================
-  // ✅ USER TYPE SYSTEM
+  // USER TYPE SYSTEM
   // =============================================
   userType: {
     type: String,
@@ -214,7 +170,6 @@ const userSchema = new mongoose.Schema({
     index: true
   },
 
-  // Role & Status (Admin Access)
   role: {
     type: String,
     enum: ['USER', 'SAFETY_ADMIN', 'SUPER_ADMIN'],
@@ -230,87 +185,67 @@ const userSchema = new mongoose.Schema({
     index: true
   },
 
-  // ── Suspension info ───────────────────────────────────────────────────────
   suspensionInfo: {
-    isSuspended:     { type: Boolean, default: false },
-    suspensionReason:{ type: String,  default: null  },
-    suspendedAt:     { type: Date,    default: null  },
-    suspendedUntil:  { type: Date,    default: null  },
-    suspendedBy:     { type: String,  default: null  },
-    autoLiftAt:      { type: Date,    default: null  },
+    isSuspended:      { type: Boolean, default: false },
+    suspensionReason: { type: String,  default: null  },
+    suspendedAt:      { type: Date,    default: null  },
+    suspendedUntil:   { type: Date,    default: null  },
+    suspendedBy:      { type: String,  default: null  },
+    autoLiftAt:       { type: Date,    default: null  },
   },
 
   // =============================================
-  // ✅ LOCATION FIELDS (Privacy-Safe)
-  // FIX: removed index:true from last_location_updated_at — covered by userSchema.index() below
+  // LEGACY LOCATION FIELDS (Privacy-Safe)
+  // Kept for backward compat. New code should prefer liveLocation.
   // =============================================
-  last_known_lat: {
-    type: Number,
-    default: null
-  },
-  last_known_lng: {
-    type: Number,
-    default: null
-  },
-  last_location_updated_at: {
-    type: Date,
-    default: null
-    // ✅ FIX: index:true removed — duplicate of userSchema.index({ last_location_updated_at: 1 }) below
+  last_known_lat:           { type: Number, default: null },
+  last_known_lng:           { type: Number, default: null },
+  last_location_updated_at: { type: Date,   default: null },
+
+  // =============================================
+  // LIVE LOCATION -- Lightweight matchmaking location
+  //
+  // Updated ONLY on specific triggers (no background tracking):
+  //   1. App opens
+  //   2. App resumes after long background idle
+  //   3. Surprise Meetup screen opens
+  //   4. Before "Find My Match" tap
+  //   5. Before creating a meetup
+  //
+  // profileCity (questionnaire.city) is NEVER touched here.
+  // Used by: Surprise Meetup system, nearby match search.
+  // Stale after 60 minutes -> frontend must refresh before matchmaking.
+  // =============================================
+  liveLocation: {
+    lat:       { type: Number, default: null },
+    lng:       { type: Number, default: null },
+    city:      { type: String, default: null },  // reverse-geocoded, not profileCity
+    state:     { type: String, default: null },
+    updatedAt: { type: Date,   default: null },
   },
 
   // =============================================
-  // ✅ VIDEO VERIFICATION FIELDS
+  // VIDEO VERIFICATION FIELDS
   // =============================================
-  verificationEmbedding: {
-    type: [Number],
-    default: null
-  },
-  verifiedAt: {
-    type: Date,
-    default: null
-  },
-  verificationType: {
-    type: String,
-    enum: ['PHOTO', 'VIDEO', 'MANUAL', null],
-    default: null
-  },
-  verificationAttempts: {
-    type: Number,
-    default: 0
-  },
-  lastVerificationAttempt: {
-    type: Date,
-    default: null
-  },
-  verificationRejections: {
-    type: [{
-      reason: String,
-      rejectedAt: Date,
-      sessionId: String
-    }],
-    default: []
-  },
+  verificationEmbedding:   { type: [Number], default: null },
+  verifiedAt:              { type: Date,     default: null },
+  verificationType:        { type: String, enum: ['PHOTO', 'VIDEO', 'MANUAL', null], default: null },
+  verificationAttempts:    { type: Number,   default: 0 },
+  lastVerificationAttempt: { type: Date,     default: null },
+  verificationRejections:  { type: [{ reason: String, rejectedAt: Date, sessionId: String }], default: [] },
 
   // Payment Info
   paymentInfo: {
     upiId: { type: String, default: null },
     upiName: { type: String, default: null },
-    upiStatus: {
-      type: String,
-      enum: ['not_set', 'pending_verification', 'verified', 'failed'],
-      default: 'not_set'
-    },
+    upiStatus: { type: String, enum: ['not_set', 'pending_verification', 'verified', 'failed'], default: 'not_set' },
     upiVerifiedAt: { type: Date, default: null },
     upiLastUpdated: { type: Date, default: null },
     upiVerificationAttempts: { type: Number, default: 0 },
     totalEarnings: { type: Number, default: 0 },
     verificationPhoto: { type: String, default: null },
     verificationPhotoPublicId: { type: String, default: null },
-    photoVerificationStatus: {
-      type: String,
-      enum: ['not_submitted', 'pending', 'approved', 'rejected'],
-      default: 'not_submitted'
-    },
+    photoVerificationStatus: { type: String, enum: ['not_submitted', 'pending', 'approved', 'rejected'], default: 'not_submitted' },
     pendingPayout: { type: Number, default: 0 },
     completedPayouts: { type: Number, default: 0 },
     lastPayoutDate: { type: Date, default: null },
@@ -323,125 +258,94 @@ const userSchema = new mongoose.Schema({
   },
 
   ratingStats: {
-    averageRating: { type: Number, default: 0, min: 0, max: 5 },
-    totalRatings: { type: Number, default: 0 },
-    completedBookings: { type: Number, default: 0 },
+    averageRating:    { type: Number, default: 0, min: 0, max: 5 },
+    totalRatings:     { type: Number, default: 0 },
+    completedBookings:{ type: Number, default: 0 },
     starDistribution: {
-      five: { type: Number, default: 0 },
-      four: { type: Number, default: 0 },
+      five:  { type: Number, default: 0 },
+      four:  { type: Number, default: 0 },
       three: { type: Number, default: 0 },
-      two: { type: Number, default: 0 },
-      one: { type: Number, default: 0 }
+      two:   { type: Number, default: 0 },
+      one:   { type: Number, default: 0 }
     }
   },
 
   profileEditStats: {
-    lastPhotoUpdate: { type: Date, default: null },
-    lastBioUpdate: { type: Date, default: null },
+    lastPhotoUpdate:    { type: Date, default: null },
+    lastBioUpdate:      { type: Date, default: null },
     lastAgeGroupUpdate: { type: Date, default: null },
-    totalEdits: { type: Number, default: 0 }
+    totalEdits:         { type: Number, default: 0 }
   },
 
-  imageStrikeCount: {
-    type: Number,
-    default: 0,
-    min: 0,
-    max: 3
-  },
+  imageStrikeCount:      { type: Number, default: 0, min: 0, max: 3 },
+  imagePostBlockedUntil: { type: Date,   default: null },
+  lastImageViolationAt:  { type: Date,   default: null },
 
-  imagePostBlockedUntil: {
-    type: Date,
-    default: null
-  },
-
-  lastImageViolationAt: {
-    type: Date,
-    default: null
-  },
-
-  imageModerationLog: [
-    {
-      createdAt:     { type: Date, default: Date.now },
-      action:        { type: String },
-      blockReason:   { type: String },
-      strikeCount:   { type: Number },
-      safeSearch:    { type: mongoose.Schema.Types.Mixed },
-      imagePublicId: { type: String, default: null }
-    }
-  ],
+  imageModerationLog: [{
+    createdAt:     { type: Date, default: Date.now },
+    action:        { type: String },
+    blockReason:   { type: String },
+    strikeCount:   { type: Number },
+    safeSearch:    { type: mongoose.Schema.Types.Mixed },
+    imagePublicId: { type: String, default: null }
+  }],
 
   // =============================================
-  // ✅ TIERED MODERATION FLAGS v2
+  // TIERED MODERATION FLAGS v2
   // =============================================
   moderationFlags: {
-    // ✅ FIX: index:true removed from isFlagged — duplicate of userSchema.index() below
-    isFlagged:         { type: Boolean, default: false },
-
-    strikeCount:       { type: Number,  default: 0 },
-
+    isFlagged:   { type: Boolean, default: false },
+    strikeCount: { type: Number,  default: 0 },
     violations: [{
-      field:           String,
-      level:           { type: Number, default: 0 },
-      reason:          String,
-      originalValue:   String,
-      cleanedValue:    String,
-      categories:      [String],
-      detectedAt:      { type: Date, default: Date.now },
-      route:           String,
+      field:         String,
+      level:         { type: Number, default: 0 },
+      reason:        String,
+      originalValue: String,
+      cleanedValue:  String,
+      categories:    [String],
+      detectedAt:    { type: Date, default: Date.now },
+      route:         String,
     }],
-
     lastViolationAt:   { type: Date,    default: null },
     autoSuspendedAt:   { type: Date,    default: null },
-
     reviewedByAdmin:   { type: Boolean, default: false },
     adminReviewNote:   { type: String,  default: null },
     lastReviewedAt:    { type: Date,    default: null },
   },
 
-  profilePhoto: { type: String, default: null },
-  profilePhotoPublicId: { type: String, default: null },
+  profilePhoto:        { type: String, default: null },
+  profilePhotoPublicId:{ type: String, default: null },
+  questionnaire:       { type: questionnaireSchema, default: {} },
+  verified:            { type: Boolean, default: false },
+  hostActive:          { type: Boolean, default: true },
+  emailVerified:       { type: Boolean, default: false },
 
-  questionnaire: {
-    type: questionnaireSchema,
-    default: {}
-  },
+  verificationPhoto:                { type: String, default: null },
+  verificationPhotoPublicId:        { type: String, default: null },
+  photoVerificationStatus:          { type: String, enum: ['not_submitted', 'pending', 'approved', 'rejected'], default: 'not_submitted' },
+  verificationPhotoSubmittedAt:     { type: Date,   default: null },
+  photoVerifiedAt:                  { type: Date,   default: null },
+  photoVerifiedBy:                  { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  photoRejectionReason:             { type: String, default: null },
+  emailVerificationOTP:             { type: String, default: null },
+  emailVerificationExpires:         { type: Date,   default: null },
 
-  verified: { type: Boolean, default: false },
-
-  hostActive: { type: Boolean, default: true },
-  emailVerified: { type: Boolean, default: false },
-
-  verificationPhoto: { type: String, default: null },
-  verificationPhotoPublicId: { type: String, default: null },
-  photoVerificationStatus: {
-    type: String,
-    enum: ['not_submitted', 'pending', 'approved', 'rejected'],
-    default: 'not_submitted'
-  },
-  verificationPhotoSubmittedAt: { type: Date, default: null },
-  photoVerifiedAt: { type: Date, default: null },
-  photoVerifiedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
-  photoRejectionReason: { type: String, default: null },
-
-  emailVerificationOTP: { type: String, default: null },
-  emailVerificationExpires: { type: Date, default: null },
-
-  googleId: String,
+  googleId:   String,
   facebookId: String,
 
-  fcmTokens: {
-    type: [String],
-    default: []
-  },
+  fcmTokens: { type: [String], default: [] },
 
-  isPremium: { type: Boolean, default: false },
-  premiumExpiresAt: { type: Date, default: null },
+  isPremium:       { type: Boolean, default: false },
+  premiumExpiresAt:{ type: Date,    default: null },
 
   lastActive: { type: Date, default: Date.now },
-  createdAt: { type: Date, default: Date.now },
-  updatedAt: { type: Date, default: Date.now },
+  createdAt:  { type: Date, default: Date.now },
+  updatedAt:  { type: Date, default: Date.now },
 
-  // Daily mood (Matching Today's Mood feature)
+  // =============================================
+  // DEPRECATED -- do not write to these fields.
+  // Mood state now lives entirely in matchingTodayMoods collection.
+  // =============================================
   dailyMood: {
     moods:       { type: [String], default: [] },
     energyLevel: { type: Number,   default: null, min: 1, max: 10 },
@@ -450,12 +354,10 @@ const userSchema = new mongoose.Schema({
     expiresAt:   { type: Date,     default: null },
     visible:     { type: Boolean,  default: true }
   },
-
-  // FIX #4: per-receiver last-request timestamp for duplicate throttle
   moodRequestsSent: { type: Map, of: Date, default: {} },
 
   // =============================================
-  // ✅ BOOKING REFERENCES
+  // BOOKING REFERENCES
   // =============================================
   bookingRefs: {
     type: [{
@@ -471,28 +373,28 @@ const userSchema = new mongoose.Schema({
 
 }, { timestamps: true });
 
-// Check if user is currently blocked from uploading images
 userSchema.methods.isImagePostBlocked = function () {
   if (!this.imagePostBlockedUntil) return false;
   return new Date() < new Date(this.imagePostBlockedUntil);
 };
 
 // =============================================
-// ✅ INDEXES FOR PERFORMANCE
-// Single source of truth for indexes — no field-level index:true duplicates above.
+// INDEXES
 // =============================================
 userSchema.index({ last_known_lat: 1, last_known_lng: 1 });
-userSchema.index({ 'dailyMood.expiresAt': 1, 'dailyMood.visible': 1 }); // mood match queries
-userSchema.index({ 'moderationFlags.isFlagged': 1 });       // ← sole index for this field
+userSchema.index({ 'liveLocation.lat': 1, 'liveLocation.lng': 1 });
+userSchema.index({ 'liveLocation.updatedAt': 1 });
+userSchema.index({ 'liveLocation.city': 1 }); // companion city filter (live city)
+userSchema.index({ 'dailyMood.expiresAt': 1, 'dailyMood.visible': 1 });
+userSchema.index({ 'moderationFlags.isFlagged': 1 });
 userSchema.index({ 'moderationFlags.strikeCount': 1 });
-userSchema.index({ last_location_updated_at: 1 });           // ← sole index for this field
+userSchema.index({ last_location_updated_at: 1 });
 userSchema.index({ 'bookingRefs.bookingId': 1 });
 userSchema.index({ 'bookingRefs.status': 1 });
 
 // =============================================
-// ✅ METHODS
+// METHODS
 // =============================================
-
 userSchema.methods.canAttemptVerification = function() {
   if (!this.lastVerificationAttempt) return true;
   const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
@@ -500,21 +402,16 @@ userSchema.methods.canAttemptVerification = function() {
   if (this.verificationAttempts < 3) return true;
   return false;
 };
-
 userSchema.methods.recordVerificationAttempt = async function() {
   this.verificationAttempts += 1;
   this.lastVerificationAttempt = new Date();
   return await this.save();
 };
-
 userSchema.methods.recordVerificationRejection = async function(reason, sessionId) {
   this.verificationRejections.push({ reason, rejectedAt: new Date(), sessionId });
-  if (this.verificationRejections.length > 5) {
-    this.verificationRejections = this.verificationRejections.slice(-5);
-  }
+  if (this.verificationRejections.length > 5) this.verificationRejections = this.verificationRejections.slice(-5);
   return await this.save();
 };
-
 userSchema.methods.markVerifiedViaVideo = async function(embedding) {
   this.verified = true;
   this.verifiedAt = new Date();
@@ -524,53 +421,53 @@ userSchema.methods.markVerifiedViaVideo = async function(embedding) {
   return await this.save();
 };
 
-// =============================================
-// ✅ MIDDLEWARE: Auto-update userType
-// =============================================
 userSchema.pre('save', function(next) {
   if (this.questionnaire && this.questionnaire.becomeCompanion) {
-    if (this.questionnaire.becomeCompanion === "Yes, I'm interested") {
-      this.userType = 'COMPANION';
-    } else {
-      this.userType = 'MEMBER';
-    }
+    this.userType = this.questionnaire.becomeCompanion === "Yes, I'm interested" ? 'COMPANION' : 'MEMBER';
   }
   next();
 });
 
-// =============================================
-// ✅ LOCATION METHODS
-// =============================================
+// Legacy location helpers -- kept for backward compat
 userSchema.methods.updateLocation = function(lat, lng) {
   this.last_known_lat = lat;
   this.last_known_lng = lng;
   this.last_location_updated_at = new Date();
 };
-
 userSchema.methods.hasRecentLocation = function() {
   if (!this.last_location_updated_at) return false;
-  const hoursSinceUpdate = (Date.now() - this.last_location_updated_at.getTime()) / (1000 * 60 * 60);
-  return hoursSinceUpdate < 24;
+  return (Date.now() - this.last_location_updated_at.getTime()) / (1000 * 60 * 60) < 24;
 };
-
 userSchema.methods.getLocationForMatching = function() {
   if (!this.hasRecentLocation()) return null;
-  return {
-    lat: this.last_known_lat,
-    lng: this.last_known_lng,
-    updatedAt: this.last_location_updated_at
-  };
+  return { lat: this.last_known_lat, lng: this.last_known_lng, updatedAt: this.last_location_updated_at };
 };
 
-// =============================================
-// ✅ USER TYPE METHODS
-// =============================================
+// Live location helpers
+userSchema.methods.updateLiveLocation = function(lat, lng, city = null, state = null) {
+  const now = new Date();
+  this.liveLocation = { lat, lng, city, state, updatedAt: now };
+  this.last_known_lat           = lat;
+  this.last_known_lng           = lng;
+  this.last_location_updated_at = now;
+};
+userSchema.methods.hasFreshLiveLocation = function() {
+  if (!this.liveLocation?.updatedAt) return false;
+  return (Date.now() - new Date(this.liveLocation.updatedAt).getTime()) < 60 * 60 * 1000;
+};
+userSchema.methods.getBestLocationForMatching = function() {
+  if (this.liveLocation?.lat && this.liveLocation?.lng && this.hasFreshLiveLocation()) {
+    return { lat: this.liveLocation.lat, lng: this.liveLocation.lng, city: this.liveLocation.city, state: this.liveLocation.state, updatedAt: this.liveLocation.updatedAt, source: 'live' };
+  }
+  if (this.hasRecentLocation()) {
+    return { lat: this.last_known_lat, lng: this.last_known_lng, city: null, state: null, updatedAt: this.last_location_updated_at, source: 'legacy' };
+  }
+  return null;
+};
+
 userSchema.methods.isCompanion = function() { return this.userType === 'COMPANION'; };
 userSchema.methods.isMember    = function() { return this.userType === 'MEMBER'; };
 
-// =============================================
-// ✅ PROFILE METHODS
-// =============================================
 userSchema.methods.getPublicProfile = function() {
   return {
     _id: this._id,
@@ -626,15 +523,13 @@ userSchema.methods.getPrivateProfile = function() {
     last_known_lat: this.last_known_lat,
     last_known_lng: this.last_known_lng,
     last_location_updated_at: this.last_location_updated_at,
+    liveLocation: this.liveLocation,
     createdAt: this.createdAt,
     updatedAt: this.updatedAt,
     lastActive: this.lastActive
   };
 };
 
-// =============================================
-// ✅ PASSWORD METHODS
-// =============================================
 userSchema.pre('save', async function (next) {
   if (!this.isModified('password')) return next();
   try {
@@ -647,16 +542,12 @@ userSchema.pre('save', async function (next) {
 });
 
 userSchema.methods.comparePassword = async function (candidatePassword) {
-  // Guard: Google/Facebook users have no password field.
-  // bcrypt.compare(anything, undefined) throws — catch it here cleanly.
   if (!this.password) return false;
   return await bcrypt.compare(candidatePassword, this.password);
 };
-
 userSchema.methods.isFullyVerified = function() {
   return this.emailVerified && this.photoVerificationStatus === 'approved';
 };
-
 userSchema.methods.hasAcceptedCurrentLegal = async function() {
   const LegalVersion = mongoose.model('LegalVersion');
   const [termsDoc, privacyDoc] = await Promise.all([
@@ -670,34 +561,23 @@ userSchema.methods.hasAcceptedCurrentLegal = async function() {
     !this.requiresLegalReacceptance
   );
 };
-
 userSchema.methods.acceptCommunityGuidelines = async function(version, ipAddress, deviceFingerprint) {
   this.acceptedCommunityVersion = version;
-  this.communityAcceptedAt      = new Date();
-  this.communityAcceptedIP      = ipAddress          || null;
-  this.communityAcceptedDevice  = deviceFingerprint  || null;
+  this.communityAcceptedAt     = new Date();
+  this.communityAcceptedIP     = ipAddress         || null;
+  this.communityAcceptedDevice = deviceFingerprint || null;
   return this.save();
 };
-
 userSchema.methods.logSafetyDisclaimer = function(bookingId, ipAddress) {
   this.safetyDisclaimerAcceptances.push({ acceptedAt: new Date(), bookingId, ipAddress });
-  if (this.safetyDisclaimerAcceptances.length > 100) {
-    this.safetyDisclaimerAcceptances = this.safetyDisclaimerAcceptances.slice(-100);
-  }
+  if (this.safetyDisclaimerAcceptances.length > 100) this.safetyDisclaimerAcceptances = this.safetyDisclaimerAcceptances.slice(-100);
   return this.save();
 };
-
 userSchema.methods.logVideoConsent = function(sessionId, ipAddress) {
   this.videoVerificationConsents.push({ acceptedAt: new Date(), sessionId, ipAddress });
-  if (this.videoVerificationConsents.length > 10) {
-    this.videoVerificationConsents = this.videoVerificationConsents.slice(-10);
-  }
+  if (this.videoVerificationConsents.length > 10) this.videoVerificationConsents = this.videoVerificationConsents.slice(-10);
   return this.save();
 };
-
-// =============================================
-// ✅ MODERATION STRIKE METHOD
-// =============================================
 userSchema.methods.addModerationStrike = async function(violations, route) {
   const { applyStrikesAndEnforce } = require('./middleware/moderation');
   return applyStrikesAndEnforce(this, violations, route);

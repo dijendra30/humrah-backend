@@ -1,444 +1,261 @@
-// routes/safetyReports.js - Safety & Misconduct Reporting Routes
-const express = require('express');
-const router = express.Router();
+// routes/safetyReports.js
+// Auth is applied globally in server.js — DO NOT add auth per-route here.
+// Admin routes are protected with adminOnly from middleware/auth.js.
+
+const express      = require('express');
+const router       = express.Router();
 const SafetyReport = require('../models/SafetyReport');
-const User = require('../models/User');
-const { auth } = require('../middleware/auth'); // ✅ Use your existing auth
-const { upload, uploadBuffer } = require('../config/cloudinary'); // ✅ Use your existing cloudinary
+const { adminOnly } = require('../middleware/auth');
+const { upload, uploadBuffer } = require('../config/cloudinary');
 
 // ==================== USER ENDPOINTS ====================
 
-/**
- * @route   POST /api/safety/reports
- * @desc    Submit a safety report
- * @access  Private
- */
-router.post('/reports', auth, async (req, res) => {
+// POST /api/safety/reports
+router.post('/reports', async (req, res) => {
     try {
-        const {
-            reportedUserId,
-            category,
-            description,
-            evidenceUrls,
-            contactPreference
-        } = req.body;
-        
-         // ✅ category is mandatory
+        const { reportedUserId, category, description, evidenceUrls, contactPreference } = req.body;
+
         if (!category) {
-            return res.status(400).json({
-                success: false,
-                message: 'Category is required'
-            });
+            return res.status(400).json({ success: false, message: 'Category is required' });
         }
 
-        // ✅ If reportedUserId exists, validate it
-       let reportedUser = null;
-
-        
-        // Validate phone number if phone contact is selected
         if (contactPreference?.phone && !contactPreference?.phoneNumber) {
             return res.status(400).json({
                 success: false,
                 message: 'Phone number is required when phone contact is selected'
             });
         }
-        
-        // Create report
+
         const report = await SafetyReport.create({
-            reporterId: req.userId,
-            reportedUserId: reportedUserId || null, // optional now
+            reporterId:        req.userId,
+            reportedUserId:    reportedUserId || null,
             category,
-            description: description?.trim(),
-            evidenceUrls: evidenceUrls || [],
+            description:       description?.trim(),
+            evidenceUrls:      evidenceUrls || [],
             contactPreference: contactPreference || {},
-            isGeneralReport: !reportedUserId
+            isGeneralReport:   !reportedUserId
         });
-        
-        // Log report for monitoring
+
         console.log(`🛡️ Safety Report Created:`, {
-            reportId: report._id,
-            category: report.category,
-            priority: report.priority,
+            reportId:     report._id,
+            category:     report.category,
+            priority:     report.priority,
             reportedUser: reportedUserId
         });
-        
-        // TODO: Send notification to safety team for urgent reports
-        // if (report.priority === 'URGENT') {
-        //     await sendAdminNotification(report);
-        // }
-        
+
         res.status(201).json({
-            success: true,
-            message: 'Thanks for reporting. Our team will review this and take appropriate action.',
+            success:  true,
+            message:  'Thanks for reporting. Our team will review this and take appropriate action.',
             reportId: report._id.toString(),
-            status: report.status
+            status:   report.status
         });
-        
     } catch (error) {
         console.error('Submit report error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to submit report'
-        });
+        res.status(500).json({ success: false, message: 'Failed to submit report' });
     }
 });
 
-/**
- * @route   POST /api/safety/upload-evidence
- * @desc    Upload evidence image (multipart/form-data)
- * @access  Private
- */
-router.post('/upload-evidence', auth, upload.single('image'), async (req, res) => {
+// POST /api/safety/upload-evidence
+router.post('/upload-evidence', upload.single('image'), async (req, res) => {
     try {
         if (!req.file) {
-            return res.status(400).json({
-                success: false,
-                message: 'No image uploaded'
-            });
+            return res.status(400).json({ success: false, message: 'No image uploaded' });
         }
-        
-        // Upload buffer to Cloudinary
+
         const uploadResult = await uploadBuffer(req.file.buffer, 'humrah/safety-evidence');
-        
-        // Return the uploaded image URL
+
         res.json({
-            success: true,
-            message: 'Evidence uploaded successfully',
-            profilePhoto: uploadResult.url // Keep this field name for compatibility
+            success:      true,
+            message:      'Evidence uploaded successfully',
+            profilePhoto: uploadResult.url
         });
-        
     } catch (error) {
         console.error('Evidence upload error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to upload evidence'
-        });
+        res.status(500).json({ success: false, message: 'Failed to upload evidence' });
     }
 });
 
-/**
- * @route   GET /api/safety/my-reports
- * @desc    Get user's own reports
- * @access  Private
- */
-router.get('/my-reports', auth, async (req, res) => {
+// GET /api/safety/my-reports
+router.get('/my-reports', async (req, res) => {
     try {
-        const page = parseInt(req.query.page) || 1;
+        const page  = parseInt(req.query.page)  || 1;
         const limit = parseInt(req.query.limit) || 20;
-        const skip = (page - 1) * limit;
-        
-        const reports = await SafetyReport.find({ reporterId: req.userId })
-            .sort({ createdAt: -1 })
-            .limit(limit)
-            .skip(skip)
-            .populate('reportedUserId', 'firstName lastName profilePhoto')
-            .select('+reporterId'); // Include reporter for own reports
-        
-        const total = await SafetyReport.countDocuments({ reporterId: req.userId });
-        
+        const skip  = (page - 1) * limit;
+
+        const [reports, total] = await Promise.all([
+            SafetyReport.find({ reporterId: req.userId })
+                .sort({ createdAt: -1 })
+                .limit(limit)
+                .skip(skip)
+                .populate('reportedUserId', 'firstName lastName profilePhoto'),
+            SafetyReport.countDocuments({ reporterId: req.userId })
+        ]);
+
         res.json({
             success: true,
             reports,
             pagination: {
-                currentPage: page,
-                totalPages: Math.ceil(total / limit),
+                currentPage:  page,
+                totalPages:   Math.ceil(total / limit),
                 totalReports: total
             }
         });
-        
     } catch (error) {
         console.error('Get my reports error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to load reports'
-        });
+        res.status(500).json({ success: false, message: 'Failed to load reports' });
     }
 });
 
 // ==================== ADMIN ENDPOINTS ====================
-// Note: Add adminOnly middleware when ready
+// All routes below require adminOnly (SAFETY_ADMIN or SUPER_ADMIN role)
 
-/**
- * @route   GET /api/safety/admin/reports
- * @desc    Get all reports (admin only)
- * @access  Private + Admin
- */
-router.get('/admin/reports', auth, async (req, res) => {
+// GET /api/safety/admin/reports
+router.get('/admin/reports', adminOnly, async (req, res) => {
     try {
-        // TODO: Add adminOnly middleware
-        
-        const {
-            status,
-            priority,
-            category,
-            page = 1,
-            limit = 50
-        } = req.query;
-        
-        const skip = (page - 1) * limit;
-        
-        // Build query
+        const { status, priority, category, page = 1, limit = 50 } = req.query;
+        const skip  = (page - 1) * limit;
         const query = {};
-        if (status) query.status = status;
+        if (status)   query.status   = status;
         if (priority) query.priority = priority;
         if (category) query.category = category;
-        
-        const reports = await SafetyReport.find(query)
-            .sort({ priority: -1, createdAt: -1 })
-            .limit(parseInt(limit))
-            .skip(skip)
-            .populate('reporterId', 'firstName lastName email')
-            .populate('reportedUserId', 'firstName lastName email profilePhoto')
-            .populate('reviewedBy', 'firstName lastName')
-            .select('+reporterId +contactPreference.phoneNumber'); // Include confidential fields for admin
-        
-        const total = await SafetyReport.countDocuments(query);
-        
+
+        const [reports, total] = await Promise.all([
+            SafetyReport.find(query)
+                .sort({ priority: -1, createdAt: -1 })
+                .limit(parseInt(limit))
+                .skip(skip)
+                .populate('reporterId',    'firstName lastName email')
+                .populate('reportedUserId', 'firstName lastName email profilePhoto')
+                .populate('reviewedBy',    'firstName lastName')
+                .select('+reporterId +contactPreference.phoneNumber'),
+            SafetyReport.countDocuments(query)
+        ]);
+
         res.json({
             success: true,
             reports,
             pagination: {
-                currentPage: parseInt(page),
-                totalPages: Math.ceil(total / limit),
+                currentPage:  parseInt(page),
+                totalPages:   Math.ceil(total / limit),
                 totalReports: total
             }
         });
-        
     } catch (error) {
         console.error('Get all reports error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to load reports'
-        });
+        res.status(500).json({ success: false, message: 'Failed to load reports' });
     }
 });
 
-/**
- * @route   GET /api/safety/admin/statistics
- * @desc    Get report statistics
- * @access  Private + Admin
- */
-router.get('/admin/statistics', auth, async (req, res) => {
+// GET /api/safety/admin/statistics
+router.get('/admin/statistics', adminOnly, async (req, res) => {
     try {
-        // TODO: Add adminOnly middleware
-        
         const [
-            totalReports,
-            pendingReports,
-            reviewedReports,
-            actionTakenReports,
-            reportsByCategory,
-            reportsByPriority,
-            topReportedUsers
+            totalReports, pendingReports, reviewedReports, actionTakenReports,
+            reportsByCategory, reportsByPriority, topReportedUsers
         ] = await Promise.all([
             SafetyReport.countDocuments(),
             SafetyReport.countDocuments({ status: 'PENDING' }),
             SafetyReport.countDocuments({ status: 'REVIEWED' }),
             SafetyReport.countDocuments({ status: 'ACTION_TAKEN' }),
-            
-            // Group by category
+            SafetyReport.aggregate([{ $group: { _id: '$category', count: { $sum: 1 } } }]),
+            SafetyReport.aggregate([{ $group: { _id: '$priority',  count: { $sum: 1 } } }]),
             SafetyReport.aggregate([
-                { $group: { _id: '$category', count: { $sum: 1 } } }
-            ]),
-            
-            // Group by priority
-            SafetyReport.aggregate([
-                { $group: { _id: '$priority', count: { $sum: 1 } } }
-            ]),
-            
-            // Top reported users
-            SafetyReport.aggregate([
-                {
-                    $group: {
-                        _id: '$reportedUserId',
-                        count: { $sum: 1 },
-                        latestReport: { $max: '$createdAt' }
-                    }
-                },
+                { $group: { _id: '$reportedUserId', count: { $sum: 1 }, latestReport: { $max: '$createdAt' } } },
                 { $sort: { count: -1 } },
                 { $limit: 10 },
-                {
-                    $lookup: {
-                        from: 'users',
-                        localField: '_id',
-                        foreignField: '_id',
-                        as: 'user'
-                    }
-                },
+                { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'user' } },
                 { $unwind: '$user' },
-                {
-                    $project: {
-                        userId: '$_id',
-                        userName: { $concat: ['$user.firstName', ' ', '$user.lastName'] },
-                        reportCount: '$count',
-                        latestReportDate: '$latestReport'
-                    }
-                }
+                { $project: {
+                    userId:           '$_id',
+                    userName:         { $concat: ['$user.firstName', ' ', '$user.lastName'] },
+                    reportCount:      '$count',
+                    latestReportDate: '$latestReport'
+                }}
             ])
         ]);
-        
-        // Format results
-        const categoryMap = {};
-        reportsByCategory.forEach(item => {
-            categoryMap[item._id] = item.count;
-        });
-        
-        const priorityMap = {};
-        reportsByPriority.forEach(item => {
-            priorityMap[item._id] = item.count;
-        });
-        
+
+        const toMap = (arr) => arr.reduce((acc, i) => { acc[i._id] = i.count; return acc; }, {});
+
         res.json({
-            totalReports,
-            pendingReports,
-            reviewedReports,
-            actionTakenReports,
-            reportsByCategory: categoryMap,
-            reportsByPriority: priorityMap,
+            totalReports, pendingReports, reviewedReports, actionTakenReports,
+            reportsByCategory: toMap(reportsByCategory),
+            reportsByPriority: toMap(reportsByPriority),
             topReportedUsers
         });
-        
     } catch (error) {
         console.error('Get statistics error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to load statistics'
-        });
+        res.status(500).json({ success: false, message: 'Failed to load statistics' });
     }
 });
 
-/**
- * @route   PUT /api/safety/admin/reports/:reportId
- * @desc    Update report status
- * @access  Private + Admin
- */
-router.put('/admin/reports/:reportId', auth, async (req, res) => {
+// PUT /api/safety/admin/reports/:reportId
+router.put('/admin/reports/:reportId', adminOnly, async (req, res) => {
     try {
-        // TODO: Add adminOnly middleware
-        
         const { status, actionNotes } = req.body;
-        
+
         const report = await SafetyReport.findById(req.params.reportId);
-        
-        if (!report) {
-            return res.status(404).json({
-                success: false,
-                message: 'Report not found'
-            });
-        }
-        
-        // Update report
-        if (status) report.status = status;
+        if (!report) return res.status(404).json({ success: false, message: 'Report not found' });
+
+        if (status)      report.status     = status;
         if (actionNotes) report.adminNotes = actionNotes;
-        
+
         if (['REVIEWED', 'ACTION_TAKEN', 'CLOSED'].includes(status)) {
             report.reviewedAt = new Date();
             report.reviewedBy = req.userId;
         }
-        
+
         await report.save();
-        
-        console.log(`🛡️ Report Updated:`, {
-            reportId: report._id,
-            newStatus: report.status,
-            reviewedBy: req.userId
-        });
-        
+
+        console.log(`🛡️ Report Updated:`, { reportId: report._id, newStatus: report.status, reviewedBy: req.userId });
+
         res.json({
-            success: true,
-            message: 'Report updated successfully',
+            success:  true,
+            message:  'Report updated successfully',
             reportId: report._id.toString(),
-            status: report.status
+            status:   report.status
         });
-        
     } catch (error) {
         console.error('Update report error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to update report'
-        });
+        res.status(500).json({ success: false, message: 'Failed to update report' });
     }
 });
 
-/**
- * @route   POST /api/safety/admin/batch-action
- * @desc    Batch action on multiple reports
- * @access  Private + Admin
- */
-router.post('/admin/batch-action', auth, async (req, res) => {
+// POST /api/safety/admin/batch-action
+router.post('/admin/batch-action', adminOnly, async (req, res) => {
     try {
-        // TODO: Add adminOnly middleware
-        
         const { reportIds, action, actionNotes } = req.body;
-        
+
         if (!reportIds || !Array.isArray(reportIds) || reportIds.length === 0) {
-            return res.status(400).json({
-                success: false,
-                message: 'Report IDs are required'
-            });
+            return res.status(400).json({ success: false, message: 'Report IDs are required' });
         }
-        
-        const update = {
-            status: action,
-            reviewedAt: new Date(),
-            reviewedBy: req.userId
-        };
-        
-        if (actionNotes) {
-            update.adminNotes = actionNotes;
-        }
-        
-        await SafetyReport.updateMany(
-            { _id: { $in: reportIds } },
-            { $set: update }
-        );
-        
-        console.log(`🛡️ Batch Action Completed:`, {
-            reportCount: reportIds.length,
-            action: action,
-            adminId: req.userId
-        });
-        
-        res.json({
-            success: true,
-            message: `${reportIds.length} reports updated successfully`
-        });
-        
+
+        const update = { status: action, reviewedAt: new Date(), reviewedBy: req.userId };
+        if (actionNotes) update.adminNotes = actionNotes;
+
+        await SafetyReport.updateMany({ _id: { $in: reportIds } }, { $set: update });
+
+        console.log(`🛡️ Batch Action:`, { reportCount: reportIds.length, action, adminId: req.userId });
+
+        res.json({ success: true, message: `${reportIds.length} reports updated successfully` });
     } catch (error) {
         console.error('Batch action error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to perform batch action'
-        });
+        res.status(500).json({ success: false, message: 'Failed to perform batch action' });
     }
 });
 
-/**
- * @route   GET /api/safety/admin/user/:userId/reports
- * @desc    Get all reports for a specific user
- * @access  Private + Admin
- */
-router.get('/admin/user/:userId/reports', auth, async (req, res) => {
+// GET /api/safety/admin/user/:userId/reports
+router.get('/admin/user/:userId/reports', adminOnly, async (req, res) => {
     try {
-        // TODO: Add adminOnly middleware
-        
         const reports = await SafetyReport.find({ reportedUserId: req.params.userId })
             .sort({ createdAt: -1 })
-            .populate('reporterId', 'firstName lastName email')
+            .populate('reporterId',    'firstName lastName email')
             .populate('reportedUserId', 'firstName lastName email profilePhoto')
             .select('+reporterId +contactPreference.phoneNumber');
-        
-        res.json({
-            success: true,
-            reports
-        });
-        
+
+        res.json({ success: true, reports });
     } catch (error) {
         console.error('Get user reports error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to load user reports'
-        });
+        res.status(500).json({ success: false, message: 'Failed to load user reports' });
     }
 });
 

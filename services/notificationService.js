@@ -188,62 +188,34 @@ async function getNearbyRandomBookings(userId, radiusKm = 50) {
   }
 }
 
+/**
+ * Send a high-priority FCM push to a single user by userId.
+ * Fetches the user's FCM tokens, then delegates to sendDataFcm.
+ * Used by moodRequestController via safePush().
+ *
+ * @param {string} userId  - Recipient MongoDB user ID
+ * @param {string} title   - Notification title (passed as data field for custom handling)
+ * @param {string} body    - Notification body
+ * @param {object} data    - Extra key-value data payload
+ */
+async function sendPushToUser(userId, title, body, data = {}) {
+  try {
+    const { sendDataFcm } = require('../utils/fcmHelper');
+    const user = await User.findById(userId).select('fcmTokens').lean();
+    if (!user?.fcmTokens?.length) return;
+    await sendDataFcm(userId.toString(), user.fcmTokens, {
+      ...data,
+      title:  title  || '',
+      body:   body   || '',
+    });
+  } catch (e) {
+    console.error('[notificationService] sendPushToUser error:', e.message);
+  }
+}
+
 module.exports = {
   findUsersToNotify,
   notifyNearbyUsers,
-  getNearbyRandomBookings
+  getNearbyRandomBookings,
+  sendPushToUser,
 };
-
-// ==========================================
-// USAGE IN RANDOM BOOKING CREATION ROUTE
-// ==========================================
-
-// routes/randomBookings.js
-
-const { notifyNearbyUsers } = require('../services/notificationService');
-
-router.post('/', authenticate, async (req, res) => {
-  try {
-    const { city, date, time, lat, lng } = req.body;
-
-    // Validate required fields
-    if (!city || !date || !time || !lat || !lng) {
-      return res.status(400).json({
-        success: false,
-        message: 'Missing required fields'
-      });
-    }
-
-    // Create random booking
-    const booking = new RandomBooking({
-      userId: req.userId,
-      city,
-      date,
-      time,
-      lat,
-      lng,
-      status: 'ACTIVE'
-    });
-
-    await booking.save();
-
-    // ✅ CRITICAL: Notify nearby users
-    notifyNearbyUsers(booking).catch(err => {
-      console.error('Failed to notify users:', err);
-      // Don't fail the request if notifications fail
-    });
-
-    res.status(201).json({
-      success: true,
-      message: 'Random booking created successfully',
-      booking
-    });
-
-  } catch (error) {
-    console.error('Error creating random booking:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error'
-    });
-  }
-});

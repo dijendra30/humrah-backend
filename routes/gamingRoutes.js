@@ -471,17 +471,22 @@ router.post("/sessions/:id/cancel", async (req, res) => {
       return res.status(400).json({ error: "Session already cancelled" });
 
     // ✅ Cancel is the ONLY action that sets BOTH statuses (hard stop)
-    session.cardStatus = "cancelled";
-    session.chatStatus = "closed";   // chat also closes immediately on cancel
-    session.status     = "cancelled";
+    session.cardStatus = 'cancelled';
+    session.chatStatus = 'closed';   // chat also closes immediately on cancel
+    session.status     = 'cancelled';
     session.messages.push({
       senderId: req.user._id, senderUsername: session.creatorUsername,
-      text: "❌ Session cancelled by host.", isSystemMsg: true,
+      text: '❌ Session cancelled by host.', isSystemMsg: true,
     });
     await session.save();
 
-    const io = req.app.get("io");
+    const io = req.app.get('io');
     if (io) emitSessionCancelled(io, session._id.toString(), session.city);
+
+    // Notify all participants about cancellation
+    const { notifySessionEnd } = require('../jobs/sessionExpiryJob');
+    await notifySessionEnd(io, session, true).catch(console.error);
+
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

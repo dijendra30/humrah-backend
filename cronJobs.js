@@ -1,82 +1,88 @@
-// cronJobs.js - Automated Cleanup Tasks for Random Booking System
-const cron = require('node-cron');
-const RandomBooking = require('./models/RandomBooking');
-const RandomBookingChat = require('./models/RandomBookingChat');
-const EncryptionKey = require('./models/EncryptionKey');
+// cronJobs.js - Automated cleanup + surprise meetup reservation expiry
+'use strict';
 
-/**
- * Run cleanup tasks every hour
- * Cron pattern: '0 * * * *' = Every hour at minute 0
- */
+const cron               = require('node-cron');
+const RandomBooking      = require('./models/RandomBooking');
+const RandomBookingChat  = require('./models/RandomBookingChat');
+const EncryptionKey      = require('./models/EncryptionKey');
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EVERY MINUTE — Surprise Meetup reservation expiry
+//
+// Safety net: if the in-process setTimeout was lost (server restart, crash),
+// this cron advances bookings whose reservedUntil has passed.
+// Low cost: only fetches bookings with status = RESERVED & reservedUntil < now.
+// ══════════════════════════════════════════════════════════════════════════════
+cron.schedule('* * * * *', async () => {
+  try {
+    const { tickReservationExpiry } = require('./utils/surpriseMeetupMatcher');
+    await tickReservationExpiry();
+  } catch (err) {
+    console.error('[CRON] Reservation expiry tick error:', err.message);
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EVERY HOUR — general cleanup
+// ══════════════════════════════════════════════════════════════════════════════
 cron.schedule('0 * * * *', async () => {
-  console.log('🧹 [CRON] Running random booking cleanup tasks...');
-  console.log(`🕐 [CRON] Time: ${new Date().toISOString()}`);
-  
+  console.log(`\n🧹 [CRON] Hourly cleanup — ${new Date().toISOString()}`);
+
   try {
-    // ===== TASK 1: Cleanup Expired Bookings =====
-    console.log('📋 [CRON] Task 1: Marking expired bookings...');
+    // 1. Mark expired bookings (PENDING / SEARCHING / RESERVED past expiresAt)
     const expiredResult = await RandomBooking.cleanupExpired();
-    console.log(`✅ [CRON] Marked ${expiredResult.nModified || 0} bookings as EXPIRED`);
-    
-    // ===== TASK 2: Delete Expired Chats =====
-    console.log('💬 [CRON] Task 2: Deleting expired chats...');
+    console.log(`✅ [CRON] Expired bookings marked: ${expiredResult.modifiedCount || 0}`);
+
+    // 2. Delete expired chats
     const deletedChats = await RandomBookingChat.cleanupExpired();
-    console.log(`✅ [CRON] Deleted ${deletedChats.deleted}/${deletedChats.total} expired chats`);
-    console.log(`ℹ️  [CRON] ${deletedChats.total - deletedChats.deleted} chats preserved (under review or errors)`);
-    
-    // ===== TASK 3: Cleanup Encryption Keys =====
-    console.log('🔐 [CRON] Task 3: Cleaning up encryption keys...');
+    console.log(`✅ [CRON] Chats cleaned: ${deletedChats.deleted}/${deletedChats.total}`);
+
+    // 3. Clean up encryption keys
     const deletedKeys = await EncryptionKey.cleanupExpired();
-    console.log(`✅ [CRON] Cleaned up ${deletedKeys.nModified || 0} encryption keys`);
-    
-    console.log('✨ [CRON] All cleanup tasks completed successfully');
-    console.log('---------------------------------------------------\n');
-    
-  } catch (error) {
-    console.error('❌ [CRON] Cleanup error:', error);
-    console.error('Stack trace:', error.stack);
+    console.log(`✅ [CRON] Encryption keys cleaned: ${deletedKeys.modifiedCount || 0}`);
+
+    // 4. Auto-expire Safety Tickets
+    const { checkExpiry: checkSafetyExpiry } = require('./cronJobs/safetyTicketExpiry');
+    await checkSafetyExpiry();
+
+    console.log('✨ [CRON] Hourly cleanup complete\n');
+  } catch (err) {
+    console.error('❌ [CRON] Hourly cleanup error:', err);
   }
 });
 
-/**
- * Optional: Run stats report every day at midnight
- */
+// ══════════════════════════════════════════════════════════════════════════════
+// DAILY MIDNIGHT — stats report
+// ══════════════════════════════════════════════════════════════════════════════
 cron.schedule('0 0 * * *', async () => {
-  console.log('📊 [CRON] Running daily statistics report...');
-  
+  console.log('📊 [CRON] Daily stats report');
+
   try {
-    const RandomBooking = require('./models/RandomBooking');
     const WeeklyUsage = require('./models/WeeklyUsage');
-    
-    const [
-      totalBookings,
-      activeBookings,
-      matchedToday,
-      weeklyStats
-    ] = await Promise.all([
+    const yesterday   = new Date(Date.now() - 24 * 3600 * 1000);
+
+    const [total, active, matchedToday, surpriseMatchedToday, weeklyStats] = await Promise.all([
       RandomBooking.countDocuments(),
-      RandomBooking.countDocuments({ status: 'PENDING' }),
-      RandomBooking.countDocuments({
-        status: 'MATCHED',
-        matchedAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
-      }),
-      WeeklyUsage.getStatistics()
+      RandomBooking.countDocuments({ status: { $in: ['PENDING', 'SEARCHING', 'RESERVED'] } }),
+      RandomBooking.countDocuments({ status: 'MATCHED',  matchedAt: { $gte: yesterday } }),
+      RandomBooking.countDocuments({ status: 'MATCHED',  activityType: 'CASUAL', matchedAt: { $gte: yesterday } }),
+      WeeklyUsage.getStatistics().catch(() => ({ totalUsers: 'n/a', totalBookings: 'n/a' })),
     ]);
-    
-    console.log('📈 [STATS] Daily Report:');
-    console.log(`   Total Bookings: ${totalBookings}`);
-    console.log(`   Active (Pending): ${activeBookings}`);
-    console.log(`   Matched Today: ${matchedToday}`);
-    console.log(`   Weekly Users: ${weeklyStats.totalUsers}`);
-    console.log(`   Weekly Bookings: ${weeklyStats.totalBookings}`);
+
+    console.log('📈 [STATS]');
+    console.log(`   Total bookings:           ${total}`);
+    console.log(`   Active (searching):        ${active}`);
+    console.log(`   Matched today (all):       ${matchedToday}`);
+    console.log(`   Matched today (surprise):  ${surpriseMatchedToday}`);
+    console.log(`   Weekly users:              ${weeklyStats.totalUsers}`);
+    console.log(`   Weekly bookings:           ${weeklyStats.totalBookings}`);
     console.log('---------------------------------------------------\n');
-    
-  } catch (error) {
-    console.error('❌ [CRON] Stats report error:', error);
+  } catch (err) {
+    console.error('❌ [CRON] Stats error:', err);
   }
 });
 
-console.log('🤖 Random Booking Cron Jobs Initialized');
-console.log('⏰ Cleanup Task: Every hour');
-console.log('📊 Stats Report: Daily at midnight');
-console.log('---------------------------------------------------\n');
+console.log('🤖 Cron jobs initialised');
+console.log('   • Reservation expiry tick: every minute');
+console.log('   • General cleanup:         every hour');
+console.log('   • Stats report:            daily at midnight\n');

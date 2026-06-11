@@ -1,21 +1,23 @@
 // routes/matchingMood.js
+// Mounted in server.js as: app.use('/api/matching-mood', authenticate, enforceLegalAcceptance, matchingMoodRoutes)
+// authenticate + enforceLegalAcceptance already applied — do NOT add them here again.
 'use strict';
 
 const express = require('express');
 const router  = express.Router();
-const { authenticate } = require('../middleware/auth');
-const ctrl = require('../controllers/matchingMoodController');
+const ctrl    = require('../controllers/matchingMoodController');
+const { nearbyMoodLimiter } = require('../middleware/rateLimitMiddleware');
 
-// POST /api/matching-mood/app-open   → resolve location + nearby cache
-router.post('/app-open', authenticate, ctrl.appOpen);
+// POST /api/matching-mood/app-open   — resolve nearby cache on app open (polling-heavy)
+router.post('/app-open', nearbyMoodLimiter, ctrl.appOpen);
 
-// PUT  /api/matching-mood/go-live    → set mood visible
-router.put('/go-live', authenticate, ctrl.goLive);
+// PUT  /api/matching-mood/go-live    — set mood + visibility (no nearby fetch)
+router.put('/go-live', ctrl.goLive);
 
-// PUT  /api/matching-mood/go-offline → hide from feed
-router.put('/go-offline', authenticate, ctrl.goOffline);
+// PUT  /api/matching-mood/go-offline — hide from feed
+router.put('/go-offline', ctrl.goOffline);
 
-// GET  /api/matching-mood/state      → current mood + nearbyData
-router.get('/state', authenticate, ctrl.getState);
+// GET  /api/matching-mood/state      — current mood state only (polling-heavy)
+router.get('/state', nearbyMoodLimiter, ctrl.getState);
 
 module.exports = router;

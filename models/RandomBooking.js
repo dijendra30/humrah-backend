@@ -1,44 +1,36 @@
-// models/RandomBooking.js - GPS-BASED MODEL
+// models/RandomBooking.js
+'use strict';
 const mongoose = require('mongoose');
 
+const candidateEntrySchema = new mongoose.Schema({
+  userId:      { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  score:       { type: Number, required: true },
+  distance:    { type: Number, required: true },        // km
+  stage:       { type: Number, default: 1 },            // 1 | 2 | 3 escalation stage
+  sentAt:      { type: Date, default: null },
+  response:    { type: String, enum: ['PENDING', 'ACCEPTED', 'REJECTED', 'TIMED_OUT', 'REVIEWING'], default: 'PENDING' },
+  respondedAt: { type: Date, default: null }
+}, { _id: false });
+
 const randomBookingSchema = new mongoose.Schema({
-  // Creator
-  initiatorId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User',
-    required: true,
-    index: true   // standalone — not in any compound, keep it
-  },
+  initiatorId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  acceptorId:  { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null, index: true },
 
-  // Acceptor (set when matched)
-  acceptorId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User',
-    default: null,
-    index: true   // standalone — not in any compound, keep it
-  },
+  city: { type: String, required: true },
+  lat:  { type: Number, required: true, min: -90,  max: 90  },
+  lng:  { type: Number, required: true, min: -180, max: 180 },
 
-  // Location (GPS-based)
-  city: {
-    type: String,
-    required: true,
-    // ✅ FIX: index:true removed — covered by compound index({ city, status, expiresAt }) below
-  },
-
-  lat: {
-    type: Number,
-    required: true,
-    min: -90,
-    max: 90,
-    // ✅ FIX: index:true removed — covered by compound index({ lat, lng }) below
-  },
-
-  lng: {
-    type: Number,
-    required: true,
-    min: -180,
-    max: 180,
-    // ✅ FIX: index:true removed — covered by compound index({ lat, lng }) below
+  // ── Frozen match-search location ────────────────────────────────────────────
+  // Captured at booking creation time from the user's liveLocation.
+  // Used for all candidate matching/search so that the initiator moving later
+  // does NOT affect an active meetup request's search area.
+  // This is the single source of truth for "where was the user when they posted".
+  matchSearchLocation: {
+    lat:         { type: Number, default: null },
+    lng:         { type: Number, default: null },
+    city:        { type: String, default: null },
+    state:       { type: String, default: null },
+    capturedAt:  { type: Date,   default: null },
   },
 
   locationCategory: {
@@ -46,119 +38,122 @@ const randomBookingSchema = new mongoose.Schema({
     enum: ['Park', 'Mall', 'Cafe', 'Event Venue', 'Public Place'],
     default: 'Public Place'
   },
-
-  // Activity
   activityType: {
     type: String,
-    enum: ['WALK', 'FOOD', 'EVENT', 'EXPLORE'],
+    enum: ['WALK', 'FOOD', 'EVENT', 'EXPLORE', 'CASUAL'],
     required: true
   },
 
-  // Time
-  startTime: {
-    type: Date,
-    required: true,
-    // ✅ FIX: index:true removed — covered by compound index({ status, startTime }) below
+  meetupEnergy: {
+    type: [String],
+    enum: ['QUIET', 'CHILL', 'DEEP_TALK', 'FUN', 'STUDY_BUDDY', 'CREATIVE_VIBES', 'SOCIAL_RECHARGE', 'LOW_ENERGY'],
+    default: []
   },
+  blurProfileUntilAccepted: { type: Boolean, default: false },
 
-  endTime: {
-    type: Date,
-    required: true
-  },
+  // ── Matchmaking mode ───────────────────────────────────────────────────────
+  // STANDARD — meetup planned > 30 min ahead; deep compatibility, slower cadence
+  // FAST     — meetup < 30 min away; prioritize online/nearby, shorter reserve window
+  matchMode: { type: String, enum: ['STANDARD', 'FAST'], default: 'STANDARD' },
 
-  // Status
+  // current escalation stage (1 = strict, 2 = wider radius, 3 = broadest)
+  matchStage: { type: Number, default: 1, min: 1, max: 3 },
+
+  candidateQueue:        { type: [candidateEntrySchema], default: [] },
+  currentCandidateIndex: { type: Number, default: -1 },
+  reservedUntil:         { type: Date, default: null },
+
+  // set when a candidate taps "Review Meetup" — holds the booking for them briefly
+  reviewingUntil:  { type: Date, default: null },
+  reviewingUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+
+  startTime: { type: Date, required: true },
+  endTime:   { type: Date, required: true },
+
   status: {
     type: String,
-    enum: ['PENDING', 'MATCHED', 'CANCELLED', 'COMPLETED', 'EXPIRED'],
+    enum: ['PENDING', 'SEARCHING', 'RESERVED', 'REVIEWING', 'MATCHED', 'CANCELLED', 'COMPLETED', 'EXPIRED'],
     default: 'PENDING',
-    required: true,
-    // ✅ FIX: index:true removed — covered by compound indexes below
+    required: true
   },
 
-  // Timestamps
-  createdAt: {
-    type: Date,
-    default: Date.now,
-    required: true,
-    index: true   // standalone createdAt index — keep (not duplicated in any compound)
-  },
-
+  createdAt:          { type: Date, default: Date.now, required: true, index: true },
   matchedAt:          { type: Date, default: null },
   cancelledAt:        { type: Date, default: null },
   cancellationReason: { type: String, default: null },
   completedAt:        { type: Date, default: null },
   expiredAt:          { type: Date, default: null },
+  expiresAt:          { type: Date, required: true },
 
-  expiresAt: {
-    type: Date,
-    required: true,
-    // ✅ FIX: index:true removed — covered by compound index({ city, status, expiresAt }) below
-  },
+  chatId: { type: mongoose.Schema.Types.ObjectId, ref: 'RandomBookingChat', default: null }
+}, { timestamps: true });
 
-  // Chat reference
-  chatId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'RandomBookingChat',
-    default: null
-  }
-}, {
-  timestamps: true
-});
-
-// =============================================
-// ✅ INDEXES — single source of truth
-// =============================================
+// ── Indexes ────────────────────────────────────────────────────────────────────
 randomBookingSchema.index({ lat: 1, lng: 1 });
+randomBookingSchema.index({ 'matchSearchLocation.lat': 1, 'matchSearchLocation.lng': 1 });
 randomBookingSchema.index({ city: 1, status: 1, expiresAt: 1 });
 randomBookingSchema.index({ status: 1, startTime: 1 });
+randomBookingSchema.index({ status: 1, reservedUntil: 1 });
+randomBookingSchema.index({ status: 1, reviewingUntil: 1 });
 
-// =============================================
-// INSTANCE METHODS
-// =============================================
-randomBookingSchema.methods.isExpired = function() {
+// ── Instance helpers ───────────────────────────────────────────────────────────
+randomBookingSchema.methods.isExpired = function () {
   return this.expiresAt < new Date() || this.status === 'EXPIRED';
 };
-
-randomBookingSchema.methods.cancel = function(reason) {
-  this.status = 'CANCELLED';
-  this.cancelledAt = new Date();
-  this.cancellationReason = reason || 'User cancelled';
+randomBookingSchema.methods.cancel = function (reason) {
+  this.status = 'CANCELLED'; this.cancelledAt = new Date(); this.cancellationReason = reason || 'User cancelled';
   return this.save();
 };
-
-randomBookingSchema.methods.complete = function() {
-  this.status = 'COMPLETED';
-  this.completedAt = new Date();
-  return this.save();
+randomBookingSchema.methods.complete = function () {
+  this.status = 'COMPLETED'; this.completedAt = new Date(); return this.save();
+};
+randomBookingSchema.methods.getCurrentCandidate = function () {
+  if (this.currentCandidateIndex < 0 || this.currentCandidateIndex >= this.candidateQueue.length) return null;
+  return this.candidateQueue[this.currentCandidateIndex];
 };
 
-// =============================================
-// STATIC METHODS
-// =============================================
-randomBookingSchema.statics.findNearby = async function(lat, lng, maxDistance = 15) {
-  const { calculateDistance } = require('../utils/progressiveMatching');
-
-  const allBookings = await this.find({
-    status: 'PENDING',
-    expiresAt: { $gt: new Date() },
-    startTime: { $gte: new Date() }
-  })
-  .populate('initiatorId', 'firstName lastName profilePhoto isVerified')
-  .lean();
-
-  return allBookings
-    .map(booking => {
-      const distance = calculateDistance(lat, lng, booking.lat, booking.lng);
-      return { ...booking, distance };
-    })
-    .filter(booking => booking.distance <= maxDistance)
-    .sort((a, b) => a.distance - b.distance);
+// Advance queue pointer; window varies by matchMode
+randomBookingSchema.methods.advanceToNextCandidate = function () {
+  const next = this.currentCandidateIndex + 1;
+  if (next >= this.candidateQueue.length) return null;
+  this.currentCandidateIndex = next;
+  const windowSec = this.matchMode === 'FAST' ? 45 : 90;   // 45s fast, 90s standard
+  this.reservedUntil = new Date(Date.now() + windowSec * 1000);
+  this.status = 'RESERVED';
+  this.candidateQueue[next].sentAt = new Date();
+  return this.candidateQueue[next];
 };
 
-randomBookingSchema.statics.cleanupExpired = async function() {
+/**
+ * Returns the effective lat/lng to use for matchmaking searches.
+ * Prefers the frozen matchSearchLocation (set at creation) so that
+ * the initiator moving later doesn't shift an active search radius.
+ * Falls back to the booking's own lat/lng.
+ */
+randomBookingSchema.methods.getMatchingCoords = function () {
+  const msl = this.matchSearchLocation;
+  if (msl && msl.lat != null && msl.lng != null) {
+    return { lat: msl.lat, lng: msl.lng };
+  }
+  return { lat: this.lat, lng: this.lng };
+};
+
+// ── Statics ────────────────────────────────────────────────────────────────────
+randomBookingSchema.statics.cleanupExpired = async function () {
+  const now = new Date();
+  // RESERVED/REVIEWING bookings: only expire if booking's startTime has passed
+  // (not just expiresAt) — prevents killing active candidate windows mid-review.
+  // PENDING/SEARCHING: expire normally when expiresAt passes.
   return this.updateMany(
-    { status: 'PENDING', expiresAt: { $lt: new Date() } },
-    { status: 'EXPIRED', expiredAt: new Date() }
+    {
+      $or: [
+        // Safe to expire: no active candidate window
+        { status: { $in: ['PENDING', 'SEARCHING'] }, expiresAt: { $lt: now } },
+        // Only expire RESERVED/REVIEWING if startTime itself has passed
+        { status: { $in: ['RESERVED', 'REVIEWING'] }, startTime: { $lt: now } },
+      ]
+    },
+    { status: 'EXPIRED', expiredAt: now }
   );
 };
 

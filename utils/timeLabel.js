@@ -30,14 +30,16 @@ function getNextShowTime(offsetMinutes) {
   if (offsetMinutes === undefined) offsetMinutes = 30;
 
   const now         = new Date();
-  const currentHour = now.getHours();
+  // IMPORTANT: Render runs UTC. Always use _istHour()/_istMinute() — NEVER now.getHours().
+  // now.getHours() returns UTC hour (e.g. 14 instead of 19:30 IST at 8 PM IST).
+  const currentHour = _istHour();
 
-  // Rule 1: at or after 8 PM
+  // Rule 1: at or after 8 PM IST
   if (currentHour >= END_HOUR) {
     return _tomorrowAt(TOMORROW_HOUR, 0);
   }
 
-  // Rule 2: before 9 AM
+  // Rule 2: before 9 AM IST
   if (currentHour < START_HOUR) {
     return _todayAt(START_HOUR, 0);
   }
@@ -45,8 +47,9 @@ function getNextShowTime(offsetMinutes) {
   // Rule 3: normal hours — apply offset
   const candidate = new Date(now.getTime() + offsetMinutes * 60_000);
 
-  // Rule 4: offset pushed us to or past 8 PM
-  if (candidate.getHours() >= END_HOUR) {
+  // Rule 4: offset pushed us to or past 8 PM IST
+  const candidateISTHour = new Date(candidate.getTime() + 5.5 * 60 * 60 * 1000).getUTCHours();
+  if (candidateISTHour >= END_HOUR) {
     return _tomorrowAt(TOMORROW_HOUR, 0);
   }
 

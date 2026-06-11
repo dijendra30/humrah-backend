@@ -1,81 +1,79 @@
 // controllers/matchingMoodController.js
-// Single collection: MatchingTodayMood
-// appOpen  → updates locationHash + nearbyData (cache check first)
-// goLive   → updates mood/visible/vibeLevel/intention only
-// goOffline→ sets visible = false
-// getState → returns current doc
 'use strict';
 
-const MatchingTodayMood = require('../models/MatchingTodayMood');
-const { toLocationHash, fetchNearbyFromOverpass, CACHE_TTL_MS } = require('../services/nearbyPlaceService');
+const MatchingTodayMood  = require('../models/MatchingTodayMood');
+const { toLocationHash, getAreaNearby, toLegacyShape } = require('../services/nearbyPlaceService');
 
-const VALID_MOODS = new Set(['Cafe Mood','Food Mood','Walk Mood','Talk Mood','Study Mood','Explore Mood','Chill Mood','Drive Mood','Photo Mood','Shop Mood','Night Mood','Fitness Mood']);
-const VALID_VIBE  = new Set(['lowkey','normal','social']);
+const VALID_MOODS = new Set([
+  'Cafe Mood', 'Food Mood', 'Walk Mood', 'Talk Mood', 'Study Mood',
+  'Explore Mood', 'Chill Mood', 'Photo Mood', 'Shop Mood',
+  'Night Mood', 'Fitness Mood',
+]);
+const VALID_VIBE = new Set(['lowkey', 'normal', 'social']);
 
 // ── 1. APP OPEN ───────────────────────────────────────────────────────────────
-// POST /api/matching-mood/app-open  { lat, lng }
-// - generates locationHash
-// - checks MatchingTodayMood.nearbyData cache
-// - fetches Overpass ONLY if cache missing/stale/area changed
-// - saves nearbyData into the user's doc
-// - returns nearbyData + current mood state
 exports.appOpen = async (req, res) => {
   try {
     const { lat, lng } = req.body;
+
     if (lat === undefined || lng === undefined)
       return res.status(400).json({ success: false, message: 'lat and lng are required' });
     if (lat < -90 || lat > 90 || lng < -180 || lng > 180)
       return res.status(400).json({ success: false, message: 'Invalid coordinates' });
 
-    const locationHash = toLocationHash(lat, lng);
-    const now          = new Date();
+    // Get from shared area cache (cache-first, bg-refresh if stale)
+    const { locationHash, moods, globalPlaces, fromCache, stale } = await getAreaNearby(lat, lng);
 
-    // Find existing doc (no upsert yet — check cache first)
-    let doc = await MatchingTodayMood.findOne({ userId: req.userId });
+    const now = new Date();
+    let doc = null; // populated by Promise.all below
 
-    // Cache validity check
-    const cacheAge    = doc?.updatedAt ? now - doc.updatedAt : Infinity;
-    const hashChanged = doc?.locationHash !== locationHash;
-    const hasCache    = doc?.nearbyData?.count > 0;
-    const cacheValid  = hasCache && !hashChanged && cacheAge < CACHE_TTL_MS;
+    // Update user's locationHash on MatchingTodayMood
+    // Also write liveLocation to User doc so /eligible and /nearby have fresh coords.
+    // This is the primary location sync on every app open.
+    const FIFTEEN_MIN_MS = 15 * 60 * 1000;
+    const User = require('mongoose').model('User');
 
-    let nearbyData = doc?.nearbyData || { count: 0, places: [] };
-    let fromCache  = cacheValid;
+    // Run in parallel: mood doc update + user liveLocation update
+    await Promise.all([
+      MatchingTodayMood.findOneAndUpdate(
+        { userId: req.userId },
+        { $set: { locationHash, updatedAt: now } },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      ).then(d => { doc = d; }),
+      // Only write liveLocation if it's stale (> 15 min) — avoids hammering DB
+      User.findById(req.userId).select('liveLocation').lean().then(async u => {
+        if (!u) return;
+        const lastUpd = u.liveLocation?.updatedAt ? new Date(u.liveLocation.updatedAt).getTime() : 0;
+        const age = now.getTime() - lastUpd;
+        const latDiff = Math.abs((u.liveLocation?.lat || 0) - lat);
+        const lngDiff = Math.abs((u.liveLocation?.lng || 0) - lng);
+        if (age >= FIFTEEN_MIN_MS || latDiff > 0.001 || lngDiff > 0.001) {
+          await User.findByIdAndUpdate(req.userId, {
+            $set: {
+              'liveLocation.lat':       Number(lat),
+              'liveLocation.lng':       Number(lng),
+              'liveLocation.updatedAt': now,
+              last_known_lat:           Number(lat),
+              last_known_lng:           Number(lng),
+              last_location_updated_at: now,
+            }
+          });
+          console.log(`[appOpen] liveLocation updated for ${req.userId}: (${lat}, ${lng})`);
+        }
+      })
+    ]);
 
-    if (!cacheValid) {
-      // Fetch from Overpass
-      nearbyData = await fetchNearbyFromOverpass(lat, lng);
-
-      if (doc) {
-        doc.locationHash = locationHash;
-        doc.nearbyData   = nearbyData;
-        doc.updatedAt    = now;
-        await doc.save();
-      } else {
-        doc = await MatchingTodayMood.create({
-          userId: req.userId,
-          locationHash,
-          nearbyData,
-          updatedAt: now,
-        });
-      }
-    }
-
-    // Mood active check
-    const moodActive = doc.visible && doc.expiresAt && doc.expiresAt > now;
+    const moodActive = !!(doc?.visible && doc?.expiresAt && doc.expiresAt > now);
 
     return res.json({
-      success: true,
+      success:      true,
       locationHash,
       fromCache,
-      nearbyData,
+      stale:        stale ?? false,
+      nearbyData:   toLegacyShape(moods, globalPlaces),
       moodState: moodActive ? {
-        mood:      doc.mood,
-        vibeLevel: doc.vibeLevel,
-        intention: doc.intention,
-        visible:   doc.visible,
-        expiresAt: doc.expiresAt,
-        isActive:  true,
+        mood: doc.mood, vibeLevel: doc.vibeLevel, intention: doc.intention,
+        visible: doc.visible, expiresAt: doc.expiresAt, isActive: true,
       } : null,
     });
 
@@ -86,23 +84,22 @@ exports.appOpen = async (req, res) => {
 };
 
 // ── 2. GO LIVE ────────────────────────────────────────────────────────────────
-// PUT /api/matching-mood/go-live  { mood, vibeLevel?, intention? }
-// - updates ONLY mood state fields
-// - nearby data stays untouched
 exports.goLive = async (req, res) => {
   try {
-    const { mood, vibeLevel = 'normal', intention = null } = req.body;
+    const { mood, vibeLevel = 'normal', intention = null, visible = true } = req.body;
 
     if (!mood)                      return res.status(400).json({ success: false, message: 'mood is required' });
     if (!VALID_MOODS.has(mood))     return res.status(400).json({ success: false, message: 'Invalid mood' });
     if (!VALID_VIBE.has(vibeLevel)) return res.status(400).json({ success: false, message: 'vibeLevel must be lowkey | normal | social' });
+    if (intention && intention.length > 100)
+      return res.status(400).json({ success: false, message: 'intention too long (max 100 chars)' });
 
     const now       = new Date();
-    const expiresAt = new Date(now.getTime() + 4 * 60 * 60 * 1000); // 4h
+    const expiresAt = new Date(now.getTime() + 4 * 60 * 60 * 1000);
 
     const doc = await MatchingTodayMood.findOneAndUpdate(
       { userId: req.userId },
-      { $set: { mood, vibeLevel, intention, visible: true, expiresAt, updatedAt: now } },
+      { $set: { mood, vibeLevel, intention, visible, expiresAt, updatedAt: now } },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
 
@@ -110,7 +107,6 @@ exports.goLive = async (req, res) => {
       success:   true,
       message:   '✨ You are now live',
       moodState: { mood: doc.mood, vibeLevel: doc.vibeLevel, intention: doc.intention, visible: doc.visible, expiresAt: doc.expiresAt, isActive: true },
-      nearbyData: doc.nearbyData, // already cached — return for immediate UI use
     });
 
   } catch (err) {
@@ -120,12 +116,11 @@ exports.goLive = async (req, res) => {
 };
 
 // ── 3. GO OFFLINE ─────────────────────────────────────────────────────────────
-// PUT /api/matching-mood/go-offline
 exports.goOffline = async (req, res) => {
   try {
     await MatchingTodayMood.findOneAndUpdate(
       { userId: req.userId },
-      { $set: { visible: false, updatedAt: new Date() } }
+      { $set: { visible: false, mood: null, expiresAt: null, updatedAt: new Date() } }
     );
     return res.json({ success: true, message: 'Hidden from feed' });
   } catch (err) {
@@ -135,28 +130,25 @@ exports.goOffline = async (req, res) => {
 };
 
 // ── 4. GET STATE ──────────────────────────────────────────────────────────────
-// GET /api/matching-mood/state
 exports.getState = async (req, res) => {
   try {
     const doc = await MatchingTodayMood.findOne({ userId: req.userId }).lean();
-    if (!doc) return res.json({ success: true, isActive: false, moodState: null, nearbyData: { count: 0, places: [] } });
+
+    if (!doc) {
+      return res.json({ success: true, isActive: false, moodState: null, nearbyData: null });
+    }
 
     const now      = new Date();
-    const isActive = doc.visible && doc.expiresAt && new Date(doc.expiresAt) > now;
+    const isActive = !!(doc.visible && doc.expiresAt && new Date(doc.expiresAt) > now);
 
     return res.json({
-      success:  true,
-      isActive: !!isActive,
+      success:      true,
+      isActive,
       moodState: isActive ? {
-        mood:         doc.mood,
-        vibeLevel:    doc.vibeLevel,
-        intention:    doc.intention,
-        visible:      doc.visible,
-        locationHash: doc.locationHash,
-        expiresAt:    doc.expiresAt,
-        isActive:     true,
+        mood: doc.mood, vibeLevel: doc.vibeLevel, intention: doc.intention,
+        visible: doc.visible, locationHash: doc.locationHash,
+        expiresAt: doc.expiresAt, isActive: true,
       } : null,
-      nearbyData:   doc.nearbyData || { count: 0, places: [] },
       locationHash: doc.locationHash,
     });
 

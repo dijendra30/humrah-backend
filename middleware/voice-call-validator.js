@@ -60,11 +60,11 @@ async function validateCallEligibility(callerId, receiverId, bookingId) {
   // ==================== 5. VALIDATE PARTICIPANTS ====================
   const isCallerParticipant = 
     booking.initiatorId.toString() === callerId.toString() ||
-    booking.acceptedUserId?.toString() === callerId.toString();
+    booking.acceptorId?.toString() === callerId.toString();
   
   const isReceiverParticipant =
     booking.initiatorId.toString() === receiverId.toString() ||
-    booking.acceptedUserId?.toString() === receiverId.toString();
+    booking.acceptorId?.toString() === receiverId.toString();
   
   if (!isCallerParticipant) {
     errors.push({

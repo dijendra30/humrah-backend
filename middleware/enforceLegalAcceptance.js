@@ -6,6 +6,10 @@ const LegalVersion = require('../models/LegalVersion');
 // These paths bypass all legal/community checks.
 // They are the routes users use to GET into compliance,
 // so we must never block them.
+//
+// NOTE: When this middleware is mounted via app.use('/api/users', ...),
+// req.path is the path AFTER the mount point (e.g. "/me" for /api/users/me).
+// EXEMPT_PATHS below also checks req.originalUrl for catch-all safety.
 // =============================================
 const EXEMPT_PATHS = new Set([
   '/api/legal/versions',
@@ -15,6 +19,15 @@ const EXEMPT_PATHS = new Set([
   '/api/legal/my-acceptances',
   '/api/auth/logout'
 ]);
+
+// Google Play compliance: DELETE /api/users/me must always be reachable.
+// A user who has not re-accepted updated legal terms must still be able to
+// delete their account. Blocking deletion behind a legal gate would violate
+// Play Store policy and potentially consumer-protection regulations.
+// We check BOTH the relative path (after mount) AND originalUrl.
+const isAccountDeletionRequest = (req) =>
+  req.method === 'DELETE' &&
+  (req.path === '/me' || req.originalUrl === '/api/users/me');
 
 // =============================================
 // ✅ MIDDLEWARE 1: enforceLegalAcceptance
@@ -30,7 +43,15 @@ const EXEMPT_PATHS = new Set([
 // =============================================
 const enforceLegalAcceptance = async (req, res, next) => {
   try {
-    if (EXEMPT_PATHS.has(req.path)) {
+    // Always allow: routes used to achieve compliance
+    if (EXEMPT_PATHS.has(req.path) || EXEMPT_PATHS.has(req.originalUrl)) {
+      return next();
+    }
+
+    // ✅ Google Play compliance: account deletion is ALWAYS permitted.
+    // Users must not be locked out of deleting their own data by a
+    // legal-acceptance gate — regardless of pending T&C re-acceptance.
+    if (isAccountDeletionRequest(req)) {
       return next();
     }
 
@@ -100,7 +121,12 @@ const enforceLegalAcceptance = async (req, res, next) => {
 // =============================================
 const enforceCommunityAcceptance = (req, res, next) => {
   try {
-    if (EXEMPT_PATHS.has(req.path)) {
+    if (EXEMPT_PATHS.has(req.path) || EXEMPT_PATHS.has(req.originalUrl)) {
+      return next();
+    }
+
+    // Same Google Play exemption: community acceptance must not block deletion.
+    if (isAccountDeletionRequest(req)) {
       return next();
     }
 

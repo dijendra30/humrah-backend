@@ -29,8 +29,15 @@ const messageSchema = new mongoose.Schema({
   
   messageType: {
     type: String,
-    enum: ['TEXT', 'IMAGE', 'FILE'],
+    enum: ['TEXT', 'IMAGE', 'FILE', 'CALL_LOG'],
     default: 'TEXT'
+  },
+
+  // For CALL_LOG messages only
+  callLogData: {
+    event:           { type: String, enum: ['started', 'ended', 'missed', 'rejected', 'cancelled'], default: null },
+    durationSeconds: { type: Number, default: 0 },
+    callId:          { type: String, default: null }
   },
   
   timestamp: {

@@ -2,6 +2,7 @@
 const express = require('express');
 const router = express.Router();
 const { auth } = require('../middleware/auth');
+const { chatMessageLimiter } = require('../middleware/rateLimitMiddleware');
 const Message = require('../models/Message');
 const User = require('../models/User');
 
@@ -59,6 +60,33 @@ router.get('/conversations', auth, async (req, res) => {
   }
 });
 
+// @route   GET /api/messages/presence/:userId
+// @desc    Check if a user is currently online (presence query)
+// @access  Private
+// ✅ FIX: Android chat screen calls this on open to get initial online status,
+//    since socket user-online events only fire for *future* connections.
+router.get('/presence/:userId', auth, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const isOnline = typeof global.isUserOnline === 'function'
+      ? global.isUserOnline(userId)
+      : false;
+    const lastSeen = typeof global.getUserLastSeen === 'function'
+      ? global.getUserLastSeen(userId)
+      : null;
+
+    res.json({
+      success: true,
+      userId,
+      isOnline,
+      lastSeen: lastSeen ? lastSeen.toISOString() : null
+    });
+  } catch (error) {
+    console.error('Presence check error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 // @route   GET /api/messages/:userId
 // @desc    Get messages with a specific user
 // @access  Private
@@ -97,7 +125,7 @@ router.get('/:userId', auth, async (req, res) => {
 // @route   POST /api/messages
 // @desc    Send a message
 // @access  Private
-router.post('/', auth, async (req, res) => {
+router.post('/', auth, chatMessageLimiter, async (req, res) => {
   try {
     const { receiverId, content } = req.body;
 

@@ -32,13 +32,13 @@ RUN rm -rf .git .gitignore .env.example nodemon.json \
 # Switch to non-root
 USER humrah
 
-EXPOSE 3000
+EXPOSE 10000
 
 ENV NODE_ENV=production
-ENV PORT=3000
+ENV PORT=10000
 
 # Healthcheck — Coolify will use this
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-  CMD wget -qO- http://localhost:3000/api/health || exit 1
+  CMD wget -qO- "http://127.0.0.1:${PORT:-10000}/api/health" || exit 1
 
 CMD ["node", "server.js"]

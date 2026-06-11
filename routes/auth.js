@@ -13,6 +13,7 @@ const {
   verifyOtpLimiter,
   loginLimiter,
   registerLimiter,
+  publicApiLimiter,
 } = require('../middleware/rateLimitMiddleware');
 const { verifyGoogleIdToken } = require('../services/googleAuthService');
 
@@ -477,7 +478,7 @@ router.post('/login', loginLimiter, async (req, res) => {
  *
  * @access  Public
  */
-router.post('/google-auth', async (req, res) => {
+router.post('/google-auth', publicApiLimiter, async (req, res) => {
   try {
     const { idToken, isRegister } = req.body;
 
@@ -522,7 +523,7 @@ router.post('/google-auth', async (req, res) => {
     // ════════════════════════════════════════════════════════════════════════
     if (!isRegister) {
       if (!user) {
-        console.log(`🔍 Google login: no account for ${verifiedEmail}`);  // FIX: was normalizedEmail (undefined at this scope)
+        console.log(`🔍 Google login: no account for ${verifiedEmail}`);
         return res.status(404).json({
           success: false,
           message: 'No account found. Please register first.'
@@ -686,7 +687,7 @@ function buildUserResponse(user) {
  * @desc    Check if email already exists (used before registration OTP step)
  * @access  Public
  */
-router.post('/check-email', async (req, res) => {
+router.post('/check-email', publicApiLimiter, async (req, res) => {
   try {
     const { email } = req.body;
     if (!email) {
@@ -924,21 +925,9 @@ router.post('/create-admin', authenticate, async (req, res) => {
 /**
  * @route   POST /api/auth/facebook-auth
  * @desc    Unified Facebook Sign-In for Login and Register flows
- *
- * LOGIN  (isRegister = false):
- *   - User MUST already exist  → return token → 200
- *   - User does NOT exist      → 404
- *
- * REGISTER (isRegister = true):
- *   - User does NOT exist → create account → isNewUser: true → 201
- *   - User already exists → return token  → isNewUser: false → 200
- *
- * Security: accessToken is verified against Facebook Graph API before
- * any account lookup or creation.
- *
  * @access  Public
  */
-router.post('/facebook-auth', async (req, res) => {
+router.post('/facebook-auth', publicApiLimiter, async (req, res) => {
   try {
     const { email, name, facebookId, accessToken, isRegister } = req.body;
 
@@ -958,7 +947,6 @@ router.post('/facebook-auth', async (req, res) => {
     }
 
     // ── Verify Facebook accessToken via Graph API ─────────────────────────
-    // This is the critical security step — never skip it.
     const fetch = require('node-fetch');
     const graphUrl = `https://graph.facebook.com/me?fields=id,name,email&access_token=${accessToken}`;
     let graphData;
@@ -981,7 +969,6 @@ router.post('/facebook-auth', async (req, res) => {
       });
     }
 
-    // facebookId sent by client must match the token's actual owner
     if (graphData.id !== facebookId) {
       console.warn(`Facebook ID mismatch: client=${facebookId} graph=${graphData.id}`);
       return res.status(401).json({
@@ -1007,7 +994,6 @@ router.post('/facebook-auth', async (req, res) => {
         });
       }
 
-      // Account status checks (mirrors google-auth)
       if (user.status && user.status !== 'ACTIVE') {
         if (user.status === 'SUSPENDED') {
           const until = user.suspensionInfo?.suspendedUntil;
@@ -1074,7 +1060,6 @@ router.post('/facebook-auth', async (req, res) => {
       });
     }
 
-    // Create new user
     const nameParts  = name.trim().split(' ');
     const firstName  = nameParts[0] || 'User';
     const lastName   = nameParts.slice(1).join(' ') || '';
@@ -1134,7 +1119,6 @@ router.post('/facebook-auth', async (req, res) => {
 /**
  * @route   POST /api/auth/logout-all
  * @desc    Invalidate ALL active JWTs for this user by incrementing tokenVersion.
- *          Any token issued before this call will fail the tv check in auth middleware.
  * @access  Private
  */
 router.post('/logout-all', authenticate, async (req, res) => {

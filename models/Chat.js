@@ -113,7 +113,7 @@ const chatSchema = new mongoose.Schema({
 // =============================================
 chatSchema.index({ chatType: 1, status: 1 });
 chatSchema.index({ 'participants.userId': 1 });
-chatSchema.index({ linkedReportId: 1 });
+// linkedReportId has index:true in the field definition — no schema.index() needed
 chatSchema.index({ lastMessageAt: -1 });
 
 // =============================================
