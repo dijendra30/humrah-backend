@@ -4,6 +4,7 @@ const router = express.Router();
 const User = require('../models/User');
 const SafetyReport = require('../models/SafetyReport');
 const SafetyTicket = require('../models/SafetyTicket');
+const SafetyMessage = require('../models/SafetyMessage');
 const UserReport = require('../models/UserReport');
 const AuditLog = require('../models/AuditLog');
 const Post = require('../models/Post');
@@ -291,6 +292,133 @@ router.post('/reports/:type/:id/status', authenticate, adminOnly, async (req, re
   } catch (error) {
     console.error('Update status error:', error);
     res.status(500).json({ success: false, message: 'Failed to update status' });
+  }
+});
+// ============================================================================
+// ADMIN SAFETY CHAT OPERATIONS
+// ============================================================================
+
+// 1. Connect to Safety Chat
+router.post('/reports/safety-ticket/:id/connect', authenticate, adminOnly, async (req, res) => {
+  try {
+    const ticket = await SafetyTicket.findById(req.params.id);
+    if (!ticket) return res.status(404).json({ success: false, message: 'Ticket not found' });
+
+    if (ticket.status !== 'SAFETY_TEAM_CONNECTED') {
+      ticket.status = 'SAFETY_TEAM_CONNECTED';
+      ticket.connectedBy = req.user._id;
+      ticket.connectedAt = new Date();
+      await ticket.save();
+
+      // Send system message
+      await SafetyMessage.create({
+        ticketId: ticket._id,
+        content: 'Humrah Safety Team has joined this conversation and is reviewing your report.',
+        isFromTeam: true,
+        isSystem: true
+      });
+
+      // Audit Log
+      if (AuditLog && AuditLog.logAction) {
+        await AuditLog.logAction({
+          actorId: req.user._id,
+          actorRole: req.user.role || 'SUPER_ADMIN',
+          actorEmail: req.user.email,
+          action: 'CONNECTED_TO_CHAT',
+          targetType: 'REPORT',
+          targetId: ticket._id,
+          details: { ticketId: ticket.ticketId },
+          ipAddress: req.ip
+        });
+      }
+    }
+
+    res.json({ success: true, message: 'Connected to chat' });
+  } catch (error) {
+    console.error('Connect chat error:', error);
+    res.status(500).json({ success: false, message: 'Failed to connect to chat' });
+  }
+});
+
+// 2. Fetch Chat Messages & Internal Notes
+router.get('/reports/safety-ticket/:id/messages', authenticate, adminOnly, async (req, res) => {
+  try {
+    const ticket = await SafetyTicket.findById(req.params.id).lean();
+    if (!ticket) return res.status(404).json({ success: false, message: 'Ticket not found' });
+
+    const messages = await SafetyMessage.find({ ticketId: ticket._id }).sort({ createdAt: 1 }).lean();
+    
+    res.json({ 
+      success: true, 
+      messages,
+      internalNotes: ticket.internalNotes || []
+    });
+  } catch (error) {
+    console.error('Fetch messages error:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch messages' });
+  }
+});
+
+// 3. Send Message to User
+router.post('/reports/safety-ticket/:id/messages', authenticate, adminOnly, async (req, res) => {
+  try {
+    const { content } = req.body;
+    if (!content || !content.trim()) return res.status(400).json({ success: false, message: 'Message content required' });
+
+    const ticket = await SafetyTicket.findById(req.params.id);
+    if (!ticket) return res.status(404).json({ success: false, message: 'Ticket not found' });
+
+    const msg = await SafetyMessage.create({
+      ticketId: ticket._id,
+      senderId: req.user._id,
+      content: content.trim(),
+      isFromTeam: true,
+      isSystem: false
+    });
+
+    // Audit Log
+    if (AuditLog && AuditLog.logAction) {
+      await AuditLog.logAction({
+        actorId: req.user._id,
+        actorRole: req.user.role || 'SUPER_ADMIN',
+        actorEmail: req.user.email,
+        action: 'SENT_MESSAGE',
+        targetType: 'REPORT',
+        targetId: ticket._id,
+        details: { ticketId: ticket.ticketId },
+        ipAddress: req.ip
+      });
+    }
+
+    res.json({ success: true, message: msg });
+  } catch (error) {
+    console.error('Send message error:', error);
+    res.status(500).json({ success: false, message: 'Failed to send message' });
+  }
+});
+
+// 4. Add Internal Note
+router.post('/reports/safety-ticket/:id/internal-notes', authenticate, adminOnly, async (req, res) => {
+  try {
+    const { note } = req.body;
+    if (!note || !note.trim()) return res.status(400).json({ success: false, message: 'Note content required' });
+
+    const ticket = await SafetyTicket.findById(req.params.id);
+    if (!ticket) return res.status(404).json({ success: false, message: 'Ticket not found' });
+
+    ticket.internalNotes.push({
+      adminId: req.user._id,
+      adminName: req.user.firstName + (req.user.lastName ? ' ' + req.user.lastName : ''),
+      note: note.trim(),
+      createdAt: new Date()
+    });
+
+    await ticket.save();
+
+    res.json({ success: true, internalNotes: ticket.internalNotes });
+  } catch (error) {
+    console.error('Add internal note error:', error);
+    res.status(500).json({ success: false, message: 'Failed to add internal note' });
   }
 });
 

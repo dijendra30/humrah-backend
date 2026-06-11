@@ -62,7 +62,7 @@ exports.checkActiveTicket = async (req, res) => {
         const ticket = await SafetyTicket.findOne({
             reporterId:     req.userId,
             reportedUserId: reportedUserId,
-            status:         { $in: ['OPEN', 'UNDER_REVIEW', 'ASSISTANCE_REQUESTED'] }
+            status:         { $in: ['OPEN', 'WAITING_FOR_SAFETY_TEAM', 'SAFETY_TEAM_CONNECTED', 'UNDER_REVIEW', 'ESCALATED', 'ASSISTANCE_REQUESTED'] }
         }).lean();
 
         if (ticket) {
@@ -154,7 +154,7 @@ exports.submitConcern = async (req, res) => {
             const existingTicket = await SafetyTicket.findOne({
                 reporterId:     req.userId,
                 reportedUserId: reportedUserId,
-                status:         { $in: ['OPEN', 'UNDER_REVIEW', 'ASSISTANCE_REQUESTED'] }
+                status:         { $in: ['OPEN', 'WAITING_FOR_SAFETY_TEAM', 'SAFETY_TEAM_CONNECTED', 'UNDER_REVIEW', 'ESCALATED', 'ASSISTANCE_REQUESTED'] }
             }).lean();
 
             if (existingTicket) {
@@ -409,7 +409,7 @@ exports.requestAssistance = async (req, res) => {
     try {
         const ticket = await assertOwner(req.params.ticketId, req.userId);
 
-        ticket.status    = 'ASSISTANCE_REQUESTED';
+        ticket.status    = 'WAITING_FOR_SAFETY_TEAM';
         ticket.updatedAt = new Date();
         await ticket.save();
 
@@ -430,7 +430,7 @@ exports.requestAssistance = async (req, res) => {
             if (msgId) SafetyTicket.updateOne({ _id: ticket._id }, { emergencyNotified: true }).exec();
         }).catch(err => console.error('[Telegram] Emergency notify failed:', err.message));
 
-        return res.json({ success: true, status: 'ASSISTANCE_REQUESTED', message: 'Assistance requested.' });
+        return res.json({ success: true, status: 'WAITING_FOR_SAFETY_TEAM', message: 'Assistance requested.' });
     } catch (err) {
         if (err.status) return res.status(err.status).json({ success: false, message: err.message });
         console.error('[SafetyTicket] requestAssistance error:', err);

@@ -109,38 +109,68 @@ const safetyTicketSchema = new Schema(
         // RESOLVED_BY_TEAM     → safety team resolved
         // AUTO_RESOLVED        → automatically resolved due to inactivity
         // CLOSED               → admin/auto-closed
+        // ── Status & Resolution ───────────────────────────────────────────────
         status: {
             type:    String,
-            enum:    ['OPEN', 'PENDING', 'UNDER_REVIEW', 'ASSISTANCE_REQUESTED', 'ESCALATED', 'RESOLVED', 'CLOSED', 'RESOLVED_BY_USER', 'RESOLVED_BY_ADMIN', 'AUTO_RESOLVED', 'RESOLVED_BY_TEAM'],
+            enum:    ['OPEN', 'WAITING_FOR_SAFETY_TEAM', 'SAFETY_TEAM_CONNECTED', 'UNDER_REVIEW', 'ESCALATED', 'RESOLVED_BY_ADMIN', 'RESOLVED_BY_USER', 'CLOSED', 'ASSISTANCE_REQUESTED', 'RESOLVED', 'AUTO_RESOLVED', 'RESOLVED_BY_TEAM'],
             default: 'OPEN',
             index:   true
         },
+        
+        // ── Admin Connections ────────────────────────────────────────────────
+        connectedBy: {
+            type:    Schema.Types.ObjectId,
+            ref:     'User',
+            default: null
+        },
+        connectedAt: {
+            type:    Date,
+            default: null
+        },
+        
+        // ── Internal Admin Notes ─────────────────────────────────────────────
+        internalNotes: [{
+            adminId:   { type: Schema.Types.ObjectId, ref: 'User' },
+            adminName: { type: String },
+            note:      { type: String },
+            createdAt: { type: Date, default: Date.now }
+        }],
 
-        // ── Admin Resolution ──────────────────────────────────────────────────
+        // ── Resolution ───────────────────────────────────────────────────────
         resolvedBy: {
-            type: Schema.Types.ObjectId,
-            ref: 'User',
+            type:    Schema.Types.ObjectId,
+            ref:     'User',
             default: null
         },
         resolvedAt: {
-            type: Date,
+            type:    Date,
             default: null
         },
         resolutionNotes: {
-            type: String,
-            default: ''
+            type:    String,
+            default: '',
+            trim:    true
         },
 
-        // ── Telegram ──────────────────────────────────────────────────────────
-        telegramNotified:  { type: Boolean, default: false },
-        telegramMessageId: { type: String,  default: null  },
-        emergencyNotified: { type: Boolean, default: false },
+        // Tracking
+        telegramNotified: {
+            type:    Boolean,
+            default: false
+        },
+        emergencyNotified: {
+            type:    Boolean,
+            default: false
+        },
+        telegramMessageId: {
+            type:    Number,
+            default: null
+        },
 
-        // ── Location share ────────────────────────────────────────────────────
+        // Emergency Location
         sharedLocation: {
-            latitude:  { type: Number, default: null },
-            longitude: { type: Number, default: null },
-            sharedAt:  { type: Date,   default: null }
+            latitude:  { type: Number },
+            longitude: { type: Number },
+            sharedAt:  { type: Date }
         },
 
         // ── Auto Expiry ───────────────────────────────────────────────────────
@@ -150,8 +180,8 @@ const safetyTicketSchema = new Schema(
 );
 
 // ── Compound indexes ──────────────────────────────────────────────────────────
-safetyTicketSchema.index({ reporterId: 1, createdAt: -1 });
-safetyTicketSchema.index({ status: 1, riskLevel: 1 });
+safetyTicketSchema.index({ reporterId: 1, reportedUserId: 1 });
+safetyTicketSchema.index({ createdAt: -1 });
 
 // ── Ticket-ID generator (static) ─────────────────────────────────────────────
 safetyTicketSchema.statics.generateId = function () {
