@@ -38,8 +38,10 @@ const auditLogSchema = new mongoose.Schema({
       
       // Chat Actions
       'INITIATE_SUPPORT_CHAT',
+      'CONNECTED_TO_CHAT',
       'VIEW_CHAT',
       'SEND_CHAT_MESSAGE',
+      'SENT_MESSAGE',
       'CLOSE_CHAT',
       'REOPEN_CHAT',
       'ADD_CHAT_NOTE',

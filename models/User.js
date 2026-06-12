@@ -63,6 +63,18 @@ const questionnaireSchema = new mongoose.Schema({
 }, { _id: false });
 
 const userSchema = new mongoose.Schema({
+  // =============================================
+  // MODERATION TRACKING
+  // =============================================
+  moderationStatus: {
+    type: String,
+    enum: ['clean', 'pending_review', 'flagged'],
+    default: 'clean'
+  },
+  flaggedFields: [{
+    type: String
+  }],
+
   // Basic Information
   firstName: {
     type: String,
@@ -469,7 +481,7 @@ userSchema.methods.isCompanion = function() { return this.userType === 'COMPANIO
 userSchema.methods.isMember    = function() { return this.userType === 'MEMBER'; };
 
 userSchema.methods.getPublicProfile = function() {
-  return {
+  const profile = {
     _id: this._id,
     firstName: this.firstName,
     lastName: this.lastName,
@@ -494,6 +506,24 @@ userSchema.methods.getPublicProfile = function() {
     },
     ...(this.userType === 'COMPANION' && { ratingStats: this.ratingStats })
   };
+
+  // Mask flagged fields from public view
+  if (this.flaggedFields && this.flaggedFields.length > 0) {
+    for (const fieldPath of this.flaggedFields) {
+      if (fieldPath.startsWith('questionnaire.')) {
+        const key = fieldPath.split('.')[1];
+        if (profile.questionnaire && profile.questionnaire[key] !== undefined) {
+          profile.questionnaire[key] = '[Hidden pending review]';
+        }
+      } else {
+        if (profile[fieldPath] !== undefined) {
+          profile[fieldPath] = '[Hidden pending review]';
+        }
+      }
+    }
+  }
+
+  return profile;
 };
 
 userSchema.methods.getPrivateProfile = function() {
@@ -510,6 +540,8 @@ userSchema.methods.getPrivateProfile = function() {
     role: this.role,
     userType: this.userType,
     hostActive: this.hostActive,
+    moderationStatus: this.moderationStatus,
+    flaggedFields: this.flaggedFields,
     verificationPhoto: this.verificationPhoto,
     verificationPhotoPublicId: this.verificationPhotoPublicId,
     photoVerificationStatus: this.photoVerificationStatus,

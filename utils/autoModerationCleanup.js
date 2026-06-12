@@ -13,7 +13,7 @@
 
 const cron = require('node-cron');
 const User = require('../models/User');
-const { moderateQuestionnaire, applyStrikesAndEnforce, LEVEL } = require('../middleware/moderation');
+const { moderateQuestionnaireSync, applyStrikesAndEnforce, LEVEL } = require('../middleware/moderation');
 
 let startupCleanupDone = false;
 
@@ -51,7 +51,7 @@ async function runCleanup(label = 'MANUAL') {
     for (const user of users) {
       const q = user.questionnaire?.toObject?.() || user.questionnaire || {};
 
-      const { cleanedQuestionnaire, violations, errors } = await moderateQuestionnaire(q);
+      const { cleanedQuestionnaire, violations, errors } = moderateQuestionnaireSync(q);
 
       if (violations.length === 0) continue;
 

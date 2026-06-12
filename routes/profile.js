@@ -230,7 +230,7 @@ async function checkWithOpenAI(fieldTexts) {
 
   const response = await axios.post(
     'https://api.openai.com/v1/moderations',
-    { input: combinedInput },
+    { input: combinedInput, model: 'omni-moderation-latest' },
     {
       headers: {
         Authorization: `Bearer ${apiKey}`,
@@ -288,7 +288,7 @@ function getAIBlockMessage(flaggedCategories) {
  * cleanedFields: object with safe, cleaned values (only MODERATED_TEXT_FIELDS)
  * errors: per-field array for structured 422 response
  */
-async function runModerationPipeline(questionnaire) {
+function runModerationPipelineSync(questionnaire) {
   const cleanedFields = {};
   const errors = [];
 
@@ -329,34 +329,7 @@ async function runModerationPipeline(questionnaire) {
     cleanedFields[field] = cleanedText;
   }
 
-  // ── STEP 5: Single batched OpenAI call for all surviving fields ──
-  if (Object.keys(textsForAI).length > 0) {
-    try {
-      const aiResult = await checkWithOpenAI(textsForAI);
-
-      if (!aiResult.safe) {
-        // OpenAI flagged the combined content — we attribute the error
-        // to each field that was in the AI batch (conservative approach)
-        const message = getAIBlockMessage(aiResult.flaggedCategories);
-        for (const field of Object.keys(textsForAI)) {
-          // Remove from cleanedFields since it's flagged
-          delete cleanedFields[field];
-          errors.push({
-            field,
-            code: 'AI_FLAGGED',
-            categories: aiResult.flaggedCategories,
-            message,
-          });
-        }
-      }
-    } catch (aiError) {
-      // Log the failure but DON'T block the user (fail-open for API downtime)
-      // Swap to fail-closed by pushing to errors[] if you prefer strict safety
-      console.error('[MODERATION] OpenAI API call failed:', aiError.message);
-    }
-  }
-
-  return { cleanedFields, errors };
+  return { cleanedFields, errors, textsForAI };
 }
 
 // =============================================
@@ -431,8 +404,12 @@ router.put('/me', auth, async (req, res) => {
       }
     }
 
+    let textsForAI = null;
     if (Object.keys(textFieldUpdates).length > 0) {
-      const { cleanedFields, errors } = await runModerationPipeline(textFieldUpdates);
+      const result = runModerationPipelineSync(textFieldUpdates);
+      const cleanedFields = result.cleanedFields;
+      const errors = result.errors;
+      textsForAI = result.textsForAI;
 
       // If any text field was rejected, return immediately with structured errors
       if (errors.length > 0) {
@@ -494,6 +471,27 @@ router.put('/me', auth, async (req, res) => {
 
     // Save (markModified needed for nested Mongoose objects)
     if (updatedFields.length > 0) {
+      // ── Async AI Moderation Queue (Diffing) ──────────
+      const changedFields = [];
+      if (typeof textsForAI !== 'undefined' && textsForAI) {
+        for (const [field, text] of Object.entries(textsForAI)) {
+          // If the field was updated, we queue it
+          if (updatedFields.includes(field)) {
+            changedFields.push({ path: `questionnaire.${field}`, value: text });
+          }
+        }
+      }
+
+      if (changedFields.length > 0) {
+        user.moderationStatus = 'pending_review';
+        const ModerationTask = require('../models/ModerationTask');
+        await ModerationTask.create({
+          userId: user._id,
+          documentType: 'profile',
+          fields: changedFields
+        });
+      }
+
       user.markModified('questionnaire');
       await user.save();
     }

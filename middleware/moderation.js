@@ -66,12 +66,12 @@ const L4_IMMEDIATE = Object.freeze({
   confirmed: { action: 'ban',     restrictions: [],                                                 durationHours: null, message: 'Your account has been permanently banned for a severe zero-tolerance violation.' },
 });
 
-// ── OpenAI category → violation level ─────────────────────────────────────────
 const AI_CATEGORY_LEVEL = {
   'sexual/minors':          LEVEL.ZERO_TOL,
   'hate':                   LEVEL.ZERO_TOL,
   'hate/threatening':       LEVEL.ZERO_TOL,
   'violence/graphic':       LEVEL.ZERO_TOL,
+  'illicit/violent':        LEVEL.ZERO_TOL,
   'harassment/threatening': LEVEL.HARASSMENT,
   'harassment':             LEVEL.HARASSMENT,
   'self-harm/intent':       LEVEL.HARASSMENT,
@@ -79,6 +79,7 @@ const AI_CATEGORY_LEVEL = {
   'sexual':                 LEVEL.POLICY,
   'self-harm':              LEVEL.POLICY,
   'violence':               LEVEL.POLICY,
+  'illicit':                LEVEL.POLICY,
 };
 
 const OPENAI_THRESHOLDS = {
@@ -93,6 +94,8 @@ const OPENAI_THRESHOLDS = {
   'self-harm':               0.30,
   'self-harm/intent':        0.10,
   'self-harm/instructions':  0.10,
+  'illicit':                 0.40,
+  'illicit/violent':         0.15,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -246,7 +249,8 @@ let   _openAiRunning = false;
 
 function _enqueueOpenAI(fn) {
   return new Promise((resolve, reject) => {
-    _openAiQueue.push({ fn, resolve, reject });
+    const expiresAt = Date.now() + 5000;
+    _openAiQueue.push({ fn, resolve, reject, expiresAt });
     if (!_openAiRunning) _drainOpenAIQueue();
   });
 }
@@ -254,7 +258,13 @@ function _enqueueOpenAI(fn) {
 async function _drainOpenAIQueue() {
   _openAiRunning = true;
   while (_openAiQueue.length > 0) {
-    const { fn, resolve, reject } = _openAiQueue.shift();
+    const { fn, resolve, reject, expiresAt } = _openAiQueue.shift();
+    
+    if (Date.now() > expiresAt) {
+      reject(new Error('TIMEOUT_ZOMBIE'));
+      continue;
+    }
+
     try { resolve(await fn()); } catch (e) { reject(e); }
     if (_openAiQueue.length > 0) {
       // 21 s gap ≈ ~2.8 calls/min, safely under the free-tier 3 RPM cap
@@ -264,24 +274,16 @@ async function _drainOpenAIQueue() {
   _openAiRunning = false;
 }
 
-async function _callOpenAI(input, apiKey, attempt = 1) {
+async function _callOpenAI(input) {
   try {
     const res = await axios.post(
       'https://api.openai.com/v1/moderations',
-      { input },
-      { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 10000 }
+      { input, model: 'omni-moderation-latest' },
+      { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` || '', 'Content-Type': 'application/json' }, timeout: 5000 }
     );
     return res;
   } catch (err) {
-    const status = err.response?.status;
-    // Retry up to 3 times on 429 with exponential backoff
-    if (status === 429 && attempt <= 3) {
-      const waitMs = attempt * 22000; // 22s, 44s, 66s
-      console.warn(`[MODERATION] OpenAI rate limit — retry ${attempt}/3 in ${waitMs / 1000}s`);
-      await new Promise(r => setTimeout(r, waitMs));
-      return _callOpenAI(input, apiKey, attempt + 1);
-    }
-    throw err;
+    throw err; // Fail immediately on 429 or any other error so the queue worker isn't blocked
   }
 }
 
@@ -297,7 +299,7 @@ async function checkWithOpenAI(fieldTexts) {
 
   return _enqueueOpenAI(async () => {
     try {
-      const res    = await _callOpenAI(input, apiKey);
+      const res    = await _callOpenAI(input);
       const scores = res.data.results[0].category_scores;
       const flagged = [];
       let maxLevel  = LEVEL.CLEAN;
@@ -312,6 +314,8 @@ async function checkWithOpenAI(fieldTexts) {
       return { safe: flagged.length === 0, flaggedCategories: flagged, maxLevel };
 
     } catch (err) {
+      if (err.message === 'TIMEOUT_ZOMBIE') return { safe: true, flaggedCategories: [], maxLevel: LEVEL.CLEAN };
+
       const status = err.response?.status;
       if (status === 401) console.error('[MODERATION] Invalid OPENAI_API_KEY — check your key');
       else if (status === 429) console.warn('[MODERATION] OpenAI rate limit exhausted after retries — skipping AI layer');
@@ -427,10 +431,10 @@ function resolveEnforcement(violationLevel, { newL2Count, newL3Count, newL4Count
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// PIPELINE: moderateQuestionnaire
+// PIPELINE: moderateQuestionnaireSync (Regex Only)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-async function moderateQuestionnaire(questionnaire) {
+function moderateQuestionnaireSync(questionnaire) {
   const errors            = [];
   const violations        = [];
   const autoCleanedFields = [];
@@ -475,20 +479,7 @@ async function moderateQuestionnaire(questionnaire) {
     }
   }
 
-  if (Object.keys(textsForAI).length > 0) {
-    const ai = await checkWithOpenAI(textsForAI);
-    if (!ai.safe) {
-      if (ai.maxLevel > maxLevel) maxLevel = ai.maxLevel;
-      const msg = getUserMessage(ai.maxLevel, 'ai_flagged', ai.flaggedCategories);
-      for (const field of Object.keys(textsForAI)) {
-        cleaned[field] = '';
-        violations.push({ field, level: ai.maxLevel, reason: 'ai_flagged', categories: ai.flaggedCategories, originalValue: questionnaire[field]?.trim() || '' });
-        errors.push({ field, code: getAndroidCode(ai.maxLevel), level: ai.maxLevel, categories: ai.flaggedCategories, message: msg });
-      }
-    }
-  }
-
-  return { cleanedQuestionnaire: cleaned, violations, errors, maxLevel, autoCleanedFields };
+  return { cleanedQuestionnaire: cleaned, violations, errors, maxLevel, autoCleanedFields, textsForAI };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -704,7 +695,8 @@ function buildAutoCleanSuccessResponse(autoCleanedFields) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 module.exports = {
-  moderateQuestionnaire,
+  checkWithOpenAI,
+  moderateQuestionnaireSync,
   moderateChatMessage,
   applyStrikesAndEnforce,
   getOffenseCounts,

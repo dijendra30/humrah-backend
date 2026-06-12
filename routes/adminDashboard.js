@@ -24,6 +24,12 @@ router.get('/dashboard/stats', authenticate, adminOnly, async (req, res) => {
       pendingVerifications,
       totalCompanions,
       activeBookings,
+      waitingForSafetyTeam,
+      connected,
+      underReview,
+      escalated,
+      resolvedToday,
+      closedToday,
       openSafetyCases,
       communityPostsToday
     ] = await Promise.all([
@@ -33,6 +39,12 @@ router.get('/dashboard/stats', authenticate, adminOnly, async (req, res) => {
       User.countDocuments({ role: 'USER', 'verificationInfo.status': 'PENDING' }), // Assuming this field exists
       User.countDocuments({ role: 'COMPANION' }), // Assuming role COMPANION or similar exists
       Booking ? Booking.countDocuments({ status: 'CONFIRMED' }) : 0,
+      SafetyTicket.countDocuments({ status: 'WAITING_FOR_SAFETY_TEAM' }),
+      SafetyTicket.countDocuments({ status: 'SAFETY_TEAM_CONNECTED' }),
+      SafetyTicket.countDocuments({ status: 'UNDER_REVIEW' }),
+      SafetyTicket.countDocuments({ status: 'ESCALATED' }),
+      SafetyTicket.countDocuments({ status: { $in: ['RESOLVED_BY_ADMIN', 'RESOLVED_BY_USER', 'AUTO_RESOLVED', 'RESOLVED_BY_TEAM', 'RESOLVED'] }, updatedAt: { $gte: today } }),
+      SafetyTicket.countDocuments({ status: 'CLOSED', updatedAt: { $gte: today } }),
       SafetyReport.countDocuments({ status: { $in: ['PENDING', 'UNDER_REVIEW'] } }),
       Post.countDocuments({ createdAt: { $gte: today } })
     ]);
@@ -47,7 +59,15 @@ router.get('/dashboard/stats', authenticate, adminOnly, async (req, res) => {
         totalCompanions,
         activeBookings,
         openSafetyCases,
-        communityPostsToday
+        communityPostsToday,
+        safetyDashboard: {
+          waitingForSafetyTeam,
+          connected,
+          underReview,
+          escalated,
+          resolvedToday,
+          closedToday
+        }
       }
     });
   } catch (error) {
@@ -259,12 +279,15 @@ router.post('/reports/:type/:id/status', authenticate, adminOnly, async (req, re
       const ticket = await SafetyTicket.findById(id);
       if (!ticket) return res.status(404).json({ success: false, message: 'Ticket not found' });
       
-      ticket.status = status;
       if (['RESOLVED_BY_ADMIN', 'CLOSED'].includes(status)) {
+        if (!resolutionNotes || !resolutionNotes.trim()) {
+          return res.status(400).json({ success: false, message: 'Resolution notes are required when resolving or closing a ticket.' });
+        }
         ticket.resolvedBy = req.user._id;
         ticket.resolvedAt = new Date();
-        ticket.resolutionNotes = resolutionNotes || '';
+        ticket.resolutionNotes = resolutionNotes.trim();
       }
+      ticket.status = status;
       await ticket.save();
 
       // Log safely
@@ -343,15 +366,40 @@ router.post('/reports/safety-ticket/:id/connect', authenticate, adminOnly, async
 // 2. Fetch Chat Messages & Internal Notes
 router.get('/reports/safety-ticket/:id/messages', authenticate, adminOnly, async (req, res) => {
   try {
-    const ticket = await SafetyTicket.findById(req.params.id).lean();
+    const ticket = await SafetyTicket.findById(req.params.id)
+      .populate('reporterId', 'firstName lastName email lastActive isOnline')
+      .populate('connectedBy', 'firstName lastName')
+      .populate('resolvedBy', 'firstName lastName')
+      .lean();
     if (!ticket) return res.status(404).json({ success: false, message: 'Ticket not found' });
 
     const messages = await SafetyMessage.find({ ticketId: ticket._id }).sort({ createdAt: 1 }).lean();
     
+    // Get last message time from user
+    const lastUserMessage = messages.filter(m => !m.isFromTeam).pop();
+    const lastMessageTime = lastUserMessage ? lastUserMessage.createdAt : null;
+
     res.json({ 
       success: true, 
       messages,
-      internalNotes: ticket.internalNotes || []
+      internalNotes: ticket.internalNotes || [],
+      ticketDetails: {
+        ticketId: ticket.ticketId,
+        riskLevel: ticket.riskLevel,
+        status: ticket.status,
+        createdTime: ticket.createdAt,
+        connectedTime: ticket.connectedAt,
+        assignedAdmin: ticket.connectedBy ? `${ticket.connectedBy.firstName} ${ticket.connectedBy.lastName}` : null,
+        resolvedBy: ticket.resolvedBy ? `${ticket.resolvedBy.firstName} ${ticket.resolvedBy.lastName}` : null,
+        resolutionNotes: ticket.resolutionNotes
+      },
+      userPresence: {
+        userName: ticket.reporterId ? `${ticket.reporterId.firstName} ${ticket.reporterId.lastName}` : 'Unknown',
+        isOnline: ticket.reporterId ? ticket.reporterId.isOnline : false,
+        lastSeen: ticket.reporterId ? ticket.reporterId.lastActive : null,
+        lastMessageTime: lastMessageTime,
+        sharedLocation: ticket.sharedLocation || null
+      }
     });
   } catch (error) {
     console.error('Fetch messages error:', error);

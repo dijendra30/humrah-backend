@@ -11,7 +11,7 @@ const { uploadLimiter } = require('../middleware/rateLimitMiddleware');
 const User            = require('../models/User');
 const MatchingTodayMood = require('../models/MatchingTodayMood');
 const { upload, uploadBuffer, uploadBase64, deleteImage } = require('../config/cloudinary');
-const { moderateQuestionnaire, applyStrikesAndEnforce, buildModerationResponse, buildAutoCleanSuccessResponse } = require('../middleware/moderation');
+const { moderateQuestionnaireSync, applyStrikesAndEnforce, buildModerationResponse, buildAutoCleanSuccessResponse } = require('../middleware/moderation');
 const userActivityCtrl = require('../controllers/userActivityController');
 
 // Mood controller — used for /me/mood + /me/daily-mood (now unified)
@@ -54,20 +54,43 @@ router.put('/me', authenticate, async (req, res) => {
     });
 
     if (filteredUpdates.questionnaire && typeof filteredUpdates.questionnaire === 'object') {
-      const { cleanedQuestionnaire, violations, errors } = await moderateQuestionnaire(filteredUpdates.questionnaire);
+      const { cleanedQuestionnaire, violations, errors, textsForAI } = moderateQuestionnaireSync(filteredUpdates.questionnaire);
       if (violations.length > 0) {
         const user = await User.findById(req.userId);
-        if (user) await user.addModerationStrike(violations, 'PUT /api/users/me');
+        if (user) await applyStrikesAndEnforce(user, violations, 'PUT /api/users/me');
       }
       if (errors.length > 0) {
         return res.status(422).json({ success: false, code: 'MODERATION_FAILED', message: "Some fields contain content that isn't allowed.", errors });
       }
       filteredUpdates.questionnaire = cleanedQuestionnaire;
+      
+      const user = await User.findById(req.userId);
+      if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+      
+      const changedFields = [];
+      if (textsForAI) {
+        for (const [field, text] of Object.entries(textsForAI)) {
+          const existingText = user.questionnaire?.[field] || '';
+          if (text !== existingText) {
+            changedFields.push({ path: `questionnaire.${field}`, value: text });
+          }
+        }
+      }
+
+      if (changedFields.length > 0) {
+        filteredUpdates.moderationStatus = 'pending_review';
+        const ModerationTask = require('../models/ModerationTask');
+        await ModerationTask.create({
+          userId: user._id,
+          documentType: 'questionnaire',
+          fields: changedFields
+        });
+      }
     }
 
-    const user = await User.findByIdAndUpdate(req.userId, filteredUpdates, { new: true, runValidators: true }).select('-password');
-    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
-    res.json({ success: true, message: 'Profile updated successfully', user });
+    const updatedUser = await User.findByIdAndUpdate(req.userId, filteredUpdates, { new: true, runValidators: true }).select('-password');
+    if (!updatedUser) return res.status(404).json({ success: false, message: 'User not found' });
+    res.json({ success: true, message: 'Profile updated successfully', user: updatedUser });
 
   } catch (error) {
     console.error('Update profile error:', error);
@@ -359,7 +382,7 @@ router.put('/me/questionnaire', authenticate, async (req, res) => {
     const user = await User.findById(req.userId);
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
-    const { cleanedQuestionnaire, violations, errors, autoCleanedFields } = await moderateQuestionnaire(questionnaire);
+    const { cleanedQuestionnaire, violations, errors, autoCleanedFields, textsForAI } = moderateQuestionnaireSync(questionnaire);
 
     // ── Language field backward-compat migration ──────────────────────────────
     // Old clients (pre-update) may send languagePreference: "Hindi" (String).
@@ -382,6 +405,27 @@ router.put('/me/questionnaire', authenticate, async (req, res) => {
     }
     if (errors.length > 0) {
       return res.status(422).json(buildModerationResponse(errors, enforcement, autoCleanedFields));
+    }
+
+    // ── Async AI Moderation Queue (Diffing) ─────────────────────────────
+    const changedFields = [];
+    if (textsForAI) {
+      for (const [field, text] of Object.entries(textsForAI)) {
+        const existingText = user.questionnaire?.[field] || '';
+        if (text !== existingText) {
+          changedFields.push({ path: `questionnaire.${field}`, value: text });
+        }
+      }
+    }
+
+    if (changedFields.length > 0) {
+      user.moderationStatus = 'pending_review';
+      const ModerationTask = require('../models/ModerationTask');
+      await ModerationTask.create({
+        userId: user._id,
+        documentType: 'questionnaire',
+        fields: changedFields
+      });
     }
 
     user.questionnaire = { ...(user.questionnaire?.toObject?.() || user.questionnaire || {}), ...cleanedQuestionnaire };

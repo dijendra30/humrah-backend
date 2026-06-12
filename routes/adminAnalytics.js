@@ -68,8 +68,9 @@ router.get('/demographics', authenticate, adminOnly, async (req, res) => {
     ]);
 
     const languageDist = await User.aggregate([
-      { $match: { "questionnaire.languagePreference": { $exists: true, $ne: null, $ne: "" } } },
-      { $group: { _id: "$questionnaire.languagePreference", count: { $sum: 1 } } },
+      { $match: { "questionnaire.preferredLanguages": { $exists: true, $ne: [], $ne: null } } },
+      { $unwind: "$questionnaire.preferredLanguages" },
+      { $group: { _id: "$questionnaire.preferredLanguages", count: { $sum: 1 } } },
       { $sort: { count: -1 } },
       { $limit: 8 }
     ]);
@@ -85,7 +86,7 @@ router.get('/demographics', authenticate, adminOnly, async (req, res) => {
       success: true,
       data: {
         usersByState: stateDist.map(d => ({ state: d._id, users: d.count })),
-        usersByLanguage: languageDist.map(d => ({ language: d._id, value: d.count })),
+        usersByLanguage: languageDist.map(d => ({ name: d._id, value: d.count })),
         topCities: cityDist.map(d => ({ city: d._id, users: d.count }))
       }
     });

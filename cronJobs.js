@@ -86,3 +86,10 @@ console.log('🤖 Cron jobs initialised');
 console.log('   • Reservation expiry tick: every minute');
 console.log('   • General cleanup:         every hour');
 console.log('   • Stats report:            daily at midnight\n');
+
+// ══════════════════════════════════════════════════════════════════════════════
+// AI Moderation Worker (Runs continuously in background)
+// ══════════════════════════════════════════════════════════════════════════════
+const runModerationWorker = require('./cronJobs/aiModerationWorker');
+runModerationWorker();
+console.log('🤖 AI Moderation Worker initialized');
