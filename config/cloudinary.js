@@ -84,10 +84,6 @@ const uploadVerificationVideo = async (buffer, sessionId) => {
         resource_type: 'video',
         type: 'authenticated', // Private, not public
         invalidate: true,
-        eager: '', // No transformations
-        eager_async: false,
-        backup: false,
-        overwrite: false,
         timeout: 120000 // 2 minute timeout
       },
       (error, result) => {
@@ -95,7 +91,8 @@ const uploadVerificationVideo = async (buffer, sessionId) => {
           console.error(`❌ [Cloudinary] Upload failed:`, error);
           reject(error);
         } else {
-          console.log(`✅ [Cloudinary] Video uploaded successfully: ${result.public_id}`);
+          console.log(`[CLOUDINARY VIDEO UPLOAD RESPONSE]`, result);
+          console.log(`[CLOUDINARY VIDEO PUBLIC ID] ${result.public_id}`);
           resolve({
             url: result.secure_url,
             publicId: result.public_id
@@ -111,11 +108,11 @@ const uploadVerificationVideo = async (buffer, sessionId) => {
 // Helper function to delete image from Cloudinary
 const deleteImage = async (publicId) => {
   try {
-    console.log(`🗑️ [Cloudinary Delete Image] Attempting to delete publicId: ${publicId}`);
-    const result = await cloudinary.uploader.destroy(publicId);
-    console.log(`✅ [Cloudinary Delete Image] Response for ${publicId}:`, result);
+    console.log(`[DELETE IMAGE CALLED]`);
+    const result = await cloudinary.uploader.destroy(publicId, { resource_type: 'image' });
+    console.log(`[CLOUDINARY DELETE RESPONSE]`, result);
     if (result && result.result === 'not found') {
-      console.warn(`⚠️ [Cloudinary Delete Image] Warning: Image ${publicId} was not found on Cloudinary (possibly already deleted).`);
+      console.log(`[CLOUDINARY ASSET NOT FOUND]`);
     }
     return true;
   } catch (error) {
@@ -140,7 +137,7 @@ const deleteVideo = async (publicId) => {
     console.log(`[CLOUDINARY DELETE RESPONSE]`, result);
     
     if (result && result.result === 'not found') {
-      console.warn(`⚠️ [Cloudinary Delete Video] Warning: Video ${publicId} was not found on Cloudinary (possibly already deleted).`);
+      console.log(`[CLOUDINARY ASSET NOT FOUND]`);
     }
     return true;
   } catch (error) {

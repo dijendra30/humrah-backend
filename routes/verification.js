@@ -131,6 +131,7 @@ router.post('/upload-video', auth, upload.single('video'), async (req, res) => {
       });
     }
     
+    console.log(`[VIDEO UPLOAD RECEIVED]`, { sessionId, fileSize: req.file.size, mimeType: req.file.mimetype });
     console.log(`📥 [Upload] Received video for session ${sessionId}`);
     console.log(`📦 [Upload] Video size: ${(req.file.size / 1024 / 1024).toFixed(2)} MB`);
     console.log(`👤 [Upload] User ID: ${req.userId}`);
@@ -169,12 +170,24 @@ router.post('/upload-video', auth, upload.single('video'), async (req, res) => {
     
     console.log(`✅ [Upload] Video uploaded: ${cloudinaryResult.publicId}`);
     
+    // Hard Validation: Verify public_id and secure_url exist
+    if (!cloudinaryResult || !cloudinaryResult.publicId || !cloudinaryResult.url) {
+      console.log(`[VIDEO UPLOAD INVALID]`);
+      console.log(`[VIDEO UPLOAD ABORTED]`);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to retrieve valid video URL from Cloudinary'
+      });
+    }
+
     // Update session with Cloudinary details
     session.cloudinaryPublicId = cloudinaryResult.publicId;
     session.cloudinaryUrl = cloudinaryResult.url;
     session.status = 'PROCESSING';
     console.log(`[Upload Lifecycle] Saving cloudinaryPublicId to VerificationSession in MongoDB for session ${session._id}: ${session.cloudinaryPublicId}`);
     await session.save();
+    console.log(`[SESSION SAVED]`);
+    console.log(`[SESSION ID] ${session._id}`);
     
     // Start processing in background (don't wait)
     // ✅ Pass the app's io instance so background job can emit socket events

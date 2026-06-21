@@ -211,7 +211,7 @@ router.post('/verifications/:userId/:action', authenticate, adminOnly, async (re
         videoUrl: session.videoUrl
       });
     }
-    console.log(`[Admin Review] Successfully cleared media fields from MongoDB for user ${user._id}`);
+    console.log(`[CLEANUP SUCCESS] Successfully cleared media fields from MongoDB for user ${user._id}`);
     
     // Log action safely
     if (AuditLog && AuditLog.logAction) {
@@ -230,6 +230,34 @@ router.post('/verifications/:userId/:action', authenticate, adminOnly, async (re
     }
 
     res.json({ success: true, message: `Verification ${action}d. Verification media securely deleted.` });
+
+    // --- FCM NOTIFICATIONS ---
+    setImmediate(async () => {
+      try {
+        const { sendDataFcm } = require('../utils/fcmHelper');
+        if (!user.fcmTokens || user.fcmTokens.length === 0) {
+          console.log(`[FCM TOKEN MISSING] No FCM tokens found for user ${user._id}`);
+          return;
+        }
+        
+        console.log(`[FCM TOKEN FOUND] ${user.fcmTokens.length} tokens for user ${user._id}`);
+        console.log(`[FCM SEND START] Dispatching ${action} notification to user ${user._id}`);
+
+        const notificationData = {
+          type: action === 'approve' ? 'verification_approved' : 'verification_rejected',
+          title: action === 'approve' ? '🎉 Verification Approved' : 'Verification Update',
+          body: action === 'approve' 
+            ? 'Your photo verification has been approved. You can now access verified member features.'
+            : 'Your verification could not be approved. Please review the requirements and submit again.',
+          userId: user._id.toString()
+        };
+
+        await sendDataFcm(user._id.toString(), user.fcmTokens, notificationData);
+        console.log(`[FCM RESPONSE] Successfully processed FCM dispatch for user ${user._id}`);
+      } catch (fcmError) {
+        console.error(`[FCM ERROR] Failed to send verification FCM to user ${user._id}:`, fcmError.message);
+      }
+    });
 
     // --- ASYNC CLEANUP ---
     setImmediate(async () => {
