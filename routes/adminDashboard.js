@@ -186,6 +186,8 @@ router.post('/verifications/:userId/:action', authenticate, adminOnly, async (re
     // Capture media IDs for async cleanup before clearing them from DB
     const photoIdToDelete = user.verificationPhotoPublicId;
     const videoIdToDelete = session ? session.cloudinaryPublicId : null;
+    console.log(`[Admin Review] Loaded User photoIdToDelete: ${photoIdToDelete}`);
+    console.log(`[Admin Review] Loaded Session videoIdToDelete: ${videoIdToDelete}`);
 
     // Clear DB fields immediately
     if (photoIdToDelete) {
@@ -200,6 +202,7 @@ router.post('/verifications/:userId/:action', authenticate, adminOnly, async (re
 
     await user.save();
     if (session) await session.save();
+    console.log(`[Admin Review] Successfully cleared media fields from MongoDB for user ${user._id}`);
     
     // Log action safely
     if (AuditLog && AuditLog.logAction) {

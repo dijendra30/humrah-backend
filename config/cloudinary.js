@@ -57,8 +57,10 @@ const uploadBuffer = async (buffer, folder = 'humrah') => {
       },
       (error, result) => {
         if (error) {
+          console.error(`❌ [Cloudinary Upload] Buffer upload failed:`, error);
           reject(error);
         } else {
+          console.log(`✅ [Cloudinary Upload] Buffer uploaded successfully: ${result.public_id}`);
           resolve({
             url: result.secure_url,
             publicId: result.public_id
@@ -109,10 +111,15 @@ const uploadVerificationVideo = async (buffer, sessionId) => {
 // Helper function to delete image from Cloudinary
 const deleteImage = async (publicId) => {
   try {
-    await cloudinary.uploader.destroy(publicId);
+    console.log(`🗑️ [Cloudinary Delete Image] Attempting to delete publicId: ${publicId}`);
+    const result = await cloudinary.uploader.destroy(publicId);
+    console.log(`✅ [Cloudinary Delete Image] Response for ${publicId}:`, result);
+    if (result && result.result === 'not found') {
+      console.warn(`⚠️ [Cloudinary Delete Image] Warning: Image ${publicId} was not found on Cloudinary (possibly already deleted).`);
+    }
     return true;
   } catch (error) {
-    console.error('Error deleting image from Cloudinary:', error);
+    console.error(`❌ [Cloudinary Delete Image] Error deleting image ${publicId}:`, error);
     return false;
   }
 };
@@ -120,15 +127,18 @@ const deleteImage = async (publicId) => {
 // Helper function to delete video from Cloudinary
 const deleteVideo = async (publicId) => {
   try {
-    console.log(`🗑️ [Cloudinary] Deleting video: ${publicId}`);
+    console.log(`🗑️ [Cloudinary Delete Video] Attempting to delete video publicId: ${publicId}`);
     const result = await cloudinary.uploader.destroy(publicId, {
       resource_type: 'video',
       invalidate: true
     });
-    console.log(`✅ [Cloudinary] Video deleted: ${publicId}`, result);
+    console.log(`✅ [Cloudinary Delete Video] Response for ${publicId}:`, result);
+    if (result && result.result === 'not found') {
+      console.warn(`⚠️ [Cloudinary Delete Video] Warning: Video ${publicId} was not found on Cloudinary (possibly already deleted).`);
+    }
     return true;
   } catch (error) {
-    console.error('[Cloudinary] Error deleting video:', error);
+    console.error(`❌ [Cloudinary Delete Video] Error deleting video ${publicId}:`, error);
     return false;
   }
 };
@@ -144,12 +154,13 @@ const uploadBase64 = async (base64String, folder = 'humrah') => {
         { quality: 'auto:good' }
       ]
     });
+    console.log(`✅ [Cloudinary Upload] Base64 uploaded successfully: ${result.public_id}`);
     return {
       url: result.secure_url,
       publicId: result.public_id
     };
   } catch (error) {
-    console.error('Error uploading base64 image:', error);
+    console.error(`❌ [Cloudinary Upload] Error uploading base64 image:`, error);
     throw error;
   }
 };

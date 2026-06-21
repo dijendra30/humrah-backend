@@ -173,6 +173,7 @@ router.post('/upload-video', auth, upload.single('video'), async (req, res) => {
     session.cloudinaryPublicId = cloudinaryResult.publicId;
     session.cloudinaryUrl = cloudinaryResult.url;
     session.status = 'PROCESSING';
+    console.log(`[Upload Lifecycle] Saving cloudinaryPublicId to VerificationSession in MongoDB for session ${session._id}: ${session.cloudinaryPublicId}`);
     await session.save();
     
     // Start processing in background (don't wait)

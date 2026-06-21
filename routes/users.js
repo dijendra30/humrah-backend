@@ -399,6 +399,7 @@ router.post('/submit-verification-photo', authenticate, uploadLimiter, upload.si
     user.verificationPhotoPublicId = uploadResult.publicId;
     user.verificationPhotoSubmittedAt = new Date();
     user.photoVerificationStatus = 'pending';
+    console.log(`[Upload Lifecycle] Saving verificationPhotoPublicId to MongoDB for user ${user._id}: ${user.verificationPhotoPublicId}`);
     await user.save();
 
     res.json({ success: true, message: 'Verification photo submitted successfully. Our team will review it soon.', verificationPhoto: user.verificationPhoto, photoVerificationStatus: user.photoVerificationStatus });
@@ -423,6 +424,7 @@ router.post('/submit-verification-photo-base64', authenticate, uploadLimiter, as
     user.verificationPhotoPublicId = uploadResult.publicId;
     user.verificationPhotoSubmittedAt = new Date();
     user.photoVerificationStatus = 'pending';
+    console.log(`[Upload Lifecycle] Saving verificationPhotoPublicId (base64) to MongoDB for user ${user._id}: ${user.verificationPhotoPublicId}`);
     await user.save();
 
     res.json({ success: true, message: 'Verification photo submitted successfully. Our team will review it soon.', verificationPhoto: user.verificationPhoto, photoVerificationStatus: user.photoVerificationStatus });
