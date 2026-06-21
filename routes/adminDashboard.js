@@ -10,6 +10,7 @@ const AuditLog = require('../models/AuditLog');
 const Post = require('../models/Post');
 const Booking = require('../models/Booking'); // Assuming Booking model exists
 const { authenticate, adminOnly } = require('../middleware/auth');
+const { deleteImage, deleteVideo } = require('../config/cloudinary');
 
 // 1. Dashboard Stats
 router.get('/dashboard/stats', authenticate, adminOnly, async (req, res) => {
@@ -148,6 +149,7 @@ router.get('/verifications/pending', authenticate, adminOnly, async (req, res) =
 router.post('/verifications/:userId/:action', authenticate, adminOnly, async (req, res) => {
   try {
     const { userId, action } = req.params;
+    const { reason } = req.body;
     const user = await User.findById(userId);
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
@@ -157,28 +159,47 @@ router.post('/verifications/:userId/:action', authenticate, adminOnly, async (re
     if (action === 'approve') {
       user.verified = true;
       user.photoVerificationStatus = 'approved';
+      user.photoVerifiedAt = new Date();
       if (session) {
         session.status = 'APPROVED';
         session.result = 'APPROVED';
         session.reviewedBy = req.user._id;
         session.reviewedAt = new Date();
-        await session.save();
       }
     } else if (action === 'reject') {
       user.verified = false;
       user.photoVerificationStatus = 'rejected';
+      if (reason) {
+        user.photoRejectionReason = reason;
+        if (session) session.rejectionReason = reason;
+      }
       if (session) {
         session.status = 'REJECTED';
         session.result = 'REJECTED';
         session.reviewedBy = req.user._id;
         session.reviewedAt = new Date();
-        await session.save();
       }
     } else {
       return res.status(400).json({ success: false, message: 'Invalid action' });
     }
 
+    // Capture media IDs for async cleanup before clearing them from DB
+    const photoIdToDelete = user.verificationPhotoPublicId;
+    const videoIdToDelete = session ? session.cloudinaryPublicId : null;
+
+    // Clear DB fields immediately
+    if (photoIdToDelete) {
+      user.verificationPhoto = null;
+      user.verificationPhotoPublicId = null;
+    }
+    if (session && videoIdToDelete) {
+      session.videoUrl = null;
+      session.cloudinaryPublicId = null;
+    }
+    user.verificationMediaDeletedAt = new Date();
+
     await user.save();
+    if (session) await session.save();
     
     // Log action safely
     if (AuditLog && AuditLog.logAction) {
@@ -196,8 +217,36 @@ router.post('/verifications/:userId/:action', authenticate, adminOnly, async (re
       });
     }
 
-    res.json({ success: true, message: `Verification ${action}d` });
+    res.json({ success: true, message: `Verification ${action}d. Verification media securely deleted.` });
+
+    // --- ASYNC CLEANUP ---
+    setImmediate(async () => {
+      const deleteWithRetry = async (deleteFn, publicId, type, retries = 1) => {
+        if (!publicId) return;
+        for (let i = 0; i <= retries; i++) {
+          try {
+            await deleteFn(publicId);
+            console.log(`[Verification Cleanup] Successfully deleted ${type}: ${publicId}`);
+            return;
+          } catch (error) {
+            console.error(`[Verification Cleanup] Failed to delete ${type}: ${publicId} (Attempt ${i + 1}). Error:`, error.message);
+            if (i === retries) {
+              console.error(`[Verification Cleanup] Max retries reached for ${publicId}. Affected User ID: ${userId}`);
+            }
+          }
+        }
+      };
+
+      if (photoIdToDelete) {
+        await deleteWithRetry(deleteImage, photoIdToDelete, 'photo');
+      }
+      if (videoIdToDelete) {
+        await deleteWithRetry(deleteVideo, videoIdToDelete, 'video');
+      }
+    });
+
   } catch (error) {
+    console.error('Verification review error:', error);
     res.status(500).json({ success: false, message: 'Failed to process verification' });
   }
 });

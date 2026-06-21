@@ -172,8 +172,9 @@ const POLICY_PATTERNS_ORIGINAL = [
 ];
 
 const POLICY_PATTERNS_NORMALIZED = [
-  /whatsapp/, /telegram/, /instagram/, /snapchat/,
+  /whatsapp/, /telegram/, /instagram/, /snapchat/, /discord/,
   /[6-9]\d{9}/, /\b\d{10,}\b/,
+  /investment/, /crypto/, /scam/, /guaranteedreturns/, /sendmoney/,
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -243,13 +244,14 @@ const ZERO_TOL_NORMALIZED = [
 // OPENAI MODERATION LAYER
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// ── Token-bucket: max 3 calls/min to respect OpenAI free-tier RPM limit ──────
+// ── OpenAI Concurrency = 1 ──────
 const _openAiQueue = [];
 let   _openAiRunning = false;
 
 function _enqueueOpenAI(fn) {
   return new Promise((resolve, reject) => {
-    const expiresAt = Date.now() + 5000;
+    // Enqueue with a max wait time before it's considered a zombie
+    const expiresAt = Date.now() + 60000; 
     _openAiQueue.push({ fn, resolve, reject, expiresAt });
     if (!_openAiRunning) _drainOpenAIQueue();
   });
@@ -266,10 +268,8 @@ async function _drainOpenAIQueue() {
     }
 
     try { resolve(await fn()); } catch (e) { reject(e); }
-    if (_openAiQueue.length > 0) {
-      // 21 s gap ≈ ~2.8 calls/min, safely under the free-tier 3 RPM cap
-      await new Promise(r => setTimeout(r, 21000));
-    }
+    // No artificial delay between calls here anymore, unless we hit a 429
+    // Concurrency is naturally 1 because of the while loop awaiting `fn()`
   }
   _openAiRunning = false;
 }
@@ -283,9 +283,12 @@ async function _callOpenAI(input) {
     );
     return res;
   } catch (err) {
-    throw err; // Fail immediately on 429 or any other error so the queue worker isn't blocked
+    throw err;
   }
 }
+
+let openAiUnavailableUntil = 0;
+let cloudflareUnavailableUntil = 0;
 
 async function checkWithOpenAI(fieldTexts) {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -293,6 +296,11 @@ async function checkWithOpenAI(fieldTexts) {
     if (process.env.NODE_ENV === 'production')
       console.error('[MODERATION] OPENAI_API_KEY missing — AI layer disabled');
     return { safe: true, flaggedCategories: [], maxLevel: LEVEL.CLEAN };
+  }
+
+  if (Date.now() < openAiUnavailableUntil) {
+    const remaining = Math.round((openAiUnavailableUntil - Date.now()) / 1000);
+    throw new Error(`PROVIDER_COOLDOWN: OpenAI is in cooldown for ${remaining}s`);
   }
 
   const input = Object.entries(fieldTexts).map(([f, t]) => `[${f}]: ${t}`).join('\n---\n');
@@ -314,13 +322,114 @@ async function checkWithOpenAI(fieldTexts) {
       return { safe: flagged.length === 0, flaggedCategories: flagged, maxLevel };
 
     } catch (err) {
-      if (err.message === 'TIMEOUT_ZOMBIE') return { safe: true, flaggedCategories: [], maxLevel: LEVEL.CLEAN };
-
+      if (err.message === 'TIMEOUT_ZOMBIE') throw new Error('OpenAI Request Timeout in Queue');
       const status = err.response?.status;
       if (status === 401) console.error('[MODERATION] Invalid OPENAI_API_KEY — check your key');
-      else if (status === 429) console.warn('[MODERATION] OpenAI rate limit exhausted after retries — skipping AI layer');
-      else console.error('[MODERATION] OpenAI unavailable (fail-open):', err.message);
+      else if (status === 429 || status >= 500) {
+        console.warn(`[MODERATION] OpenAI unavailable (HTTP ${status}) — entering cooldown`);
+        let retryAfter = 5 * 60; // default 5 mins
+        if (err.response?.headers?.['retry-after']) {
+           const ra = parseInt(err.response.headers['retry-after'], 10);
+           if (!isNaN(ra)) retryAfter = ra;
+        }
+        openAiUnavailableUntil = Date.now() + retryAfter * 1000;
+      } else console.error('[MODERATION] OpenAI unavailable:', err.message);
+      
+      // Attach response data to error for logging
+      err.providerModel = 'omni-moderation-latest';
+      err.providerStatusCode = status;
+      err.providerResponseBody = err.response?.data;
+      throw err;
+    }
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CLOUDFLARE LLAMA GUARD LAYER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── Llama Guard Concurrency = 3 ──────
+const _llamaQueue = [];
+let   _llamaRunningCount = 0;
+const MAX_LLAMA_CONCURRENCY = 3;
+
+function _enqueueLlamaGuard(fn) {
+  return new Promise((resolve, reject) => {
+    const expiresAt = Date.now() + 60000;
+    _llamaQueue.push({ fn, resolve, reject, expiresAt });
+    _drainLlamaQueue();
+  });
+}
+
+async function _drainLlamaQueue() {
+  if (_llamaRunningCount >= MAX_LLAMA_CONCURRENCY) return;
+  if (_llamaQueue.length === 0) return;
+
+  _llamaRunningCount++;
+  const { fn, resolve, reject, expiresAt } = _llamaQueue.shift();
+
+  if (Date.now() > expiresAt) {
+    reject(new Error('TIMEOUT_ZOMBIE'));
+    _llamaRunningCount--;
+    _drainLlamaQueue();
+    return;
+  }
+
+  try {
+    resolve(await fn());
+  } catch (e) {
+    reject(e);
+  } finally {
+    _llamaRunningCount--;
+    _drainLlamaQueue();
+  }
+}
+
+async function checkWithLlamaGuard(fieldTexts) {
+  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+  const apiToken = process.env.CLOUDFLARE_API_TOKEN;
+  
+  if (!accountId || !apiToken) {
+    return { safe: true, flaggedCategories: [], maxLevel: LEVEL.CLEAN }; // Graceful bypass
+  }
+
+  if (Date.now() < cloudflareUnavailableUntil) {
+    const remaining = Math.round((cloudflareUnavailableUntil - Date.now()) / 1000);
+    throw new Error(`PROVIDER_COOLDOWN: Cloudflare is in cooldown for ${remaining}s`);
+  }
+
+  const input = Object.entries(fieldTexts).map(([f, t]) => `[${f}]: ${t}`).join('\n---\n');
+  const messages = [
+    { role: 'user', content: input }
+  ];
+
+  return _enqueueLlamaGuard(async () => {
+    try {
+      const res = await axios.post(
+        `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/meta/llama-guard-3-8b`,
+        { messages },
+        { headers: { Authorization: `Bearer ${apiToken}`, 'Content-Type': 'application/json' }, timeout: 5000 }
+      );
+      
+      const responseText = res.data?.result?.response || "";
+      if (responseText.toLowerCase().includes("unsafe")) {
+        return { safe: false, flaggedCategories: ['llama_unsafe'], maxLevel: LEVEL.POLICY };
+      }
       return { safe: true, flaggedCategories: [], maxLevel: LEVEL.CLEAN };
+      
+    } catch (err) {
+      const status = err.response?.status;
+      if (status === 429 || status === 410 || status >= 500) {
+        console.warn(`[MODERATION] Cloudflare unavailable (HTTP ${status}) — entering cooldown`);
+        cloudflareUnavailableUntil = Date.now() + 5 * 60 * 1000;
+      } else {
+        console.error('[MODERATION] Llama Guard unavailable:', err.message);
+      }
+      
+      err.providerModel = '@cf/meta/llama-guard-3-8b';
+      err.providerStatusCode = status;
+      err.providerResponseBody = err.response?.data;
+      throw err;
     }
   });
 }
@@ -696,6 +805,7 @@ function buildAutoCleanSuccessResponse(autoCleanedFields) {
 
 module.exports = {
   checkWithOpenAI,
+  checkWithLlamaGuard,
   moderateQuestionnaireSync,
   moderateChatMessage,
   applyStrikesAndEnforce,

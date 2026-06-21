@@ -2,6 +2,10 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
+const CURRENT_GUIDELINES_VERSION = "1.0";
+
+
+
 // Questionnaire schema (existing, no changes)
 const questionnaireSchema = new mongoose.Schema({
   name: String,
@@ -37,6 +41,17 @@ const questionnaireSchema = new mongoose.Schema({
   openFor: [String],
   availability: String,
   price: String,
+  costSharingPreference: {
+    type: String,
+    enum: [
+      'FREE_ONLY',
+      'SPLIT_FAIRLY',
+      'DEPENDS_ON_ACTIVITY',
+      'HOST_COVERS',
+      'DISCUSS_FIRST'
+    ],
+    default: null
+  },
   tagline: String,
   verifyIdentity: String,
   understandGuidelines: String,
@@ -59,7 +74,16 @@ const questionnaireSchema = new mongoose.Schema({
   connectAndEarn: String,
   profession: String,
   education: String,
-  income: String
+  income: String,
+  // =============================================
+  // ONBOARDING & COMPLIANCE FIELDS
+  // =============================================
+  dateOfBirth: String,
+  age: Number,
+  ageGroup: String,
+  isAdultConfirmed: { type: Boolean, default: false },
+  consentAccepted: { type: Boolean, default: false },
+  consentTimestamp: { type: Date, default: null }
 }, { _id: false });
 
 const userSchema = new mongoose.Schema({
@@ -156,10 +180,21 @@ const userSchema = new mongoose.Schema({
   pendingEmailOTP:        { type: String, default: null, select: false },
   pendingEmailOTPExpires: { type: Date,   default: null, select: false },
 
-  acceptedCommunityVersion: { type: String, default: null },
-  communityAcceptedAt:      { type: Date,   default: null },
-  communityAcceptedDevice:  { type: String, default: null },
-  communityAcceptedIP:      { type: String, default: null },
+  acceptedCommunityVersion: { type: String, default: null }, // Legacy
+  communityAcceptedAt:      { type: Date,   default: null }, // Legacy
+  communityAcceptedDevice:  { type: String, default: null }, // Legacy
+  communityAcceptedIP:      { type: String, default: null }, // Legacy
+
+  guidelinesAccepted: {
+    type: Boolean,
+    default: false
+  },
+  guidelinesAcceptedAt: {
+    type: Date
+  },
+  guidelinesVersion: {
+    type: String
+  },
 
   safetyDisclaimerAcceptances: [{ acceptedAt: Date, bookingId: mongoose.Schema.Types.ObjectId, ipAddress: String }],
   videoVerificationConsents:   [{ acceptedAt: Date, sessionId: String, ipAddress: String }],
@@ -320,6 +355,8 @@ const userSchema = new mongoose.Schema({
     }],
     lastViolationAt:   { type: Date,    default: null },
     autoSuspendedAt:   { type: Date,    default: null },
+    restrictedUntil:   { type: Date,    default: null },
+    restrictionReason: { type: String,  default: null },
     reviewedByAdmin:   { type: Boolean, default: false },
     adminReviewNote:   { type: String,  default: null },
     lastReviewedAt:    { type: Date,    default: null },
@@ -336,6 +373,7 @@ const userSchema = new mongoose.Schema({
   verificationPhotoPublicId:        { type: String, default: null },
   photoVerificationStatus:          { type: String, enum: ['not_submitted', 'pending', 'approved', 'rejected'], default: 'not_submitted' },
   verificationPhotoSubmittedAt:     { type: Date,   default: null },
+  verificationMediaDeletedAt:       { type: Date,   default: null },
   photoVerifiedAt:                  { type: Date,   default: null },
   photoVerifiedBy:                  { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   photoRejectionReason:             { type: String, default: null },
@@ -558,7 +596,10 @@ userSchema.methods.getPrivateProfile = function() {
     liveLocation: this.liveLocation,
     createdAt: this.createdAt,
     updatedAt: this.updatedAt,
-    lastActive: this.lastActive
+    lastActive: this.lastActive,
+    guidelinesAccepted: this.guidelinesAccepted,
+    guidelinesVersion: this.guidelinesVersion,
+    needsGuidelinesAcceptance: !this.guidelinesAccepted || this.guidelinesVersion !== CURRENT_GUIDELINES_VERSION
   };
 };
 
@@ -599,6 +640,15 @@ userSchema.methods.acceptCommunityGuidelines = async function(version, ipAddress
   this.communityAcceptedIP     = ipAddress         || null;
   this.communityAcceptedDevice = deviceFingerprint || null;
   return this.save();
+};
+
+userSchema.methods.ensureGuidelinesMigration = async function() {
+  if (this.acceptedCommunityVersion && !this.guidelinesAccepted) {
+    this.guidelinesAccepted = true;
+    this.guidelinesVersion = this.acceptedCommunityVersion;
+    this.guidelinesAcceptedAt = this.communityAcceptedAt || new Date();
+    await this.save();
+  }
 };
 userSchema.methods.logSafetyDisclaimer = function(bookingId, ipAddress) {
   this.safetyDisclaimerAcceptances.push({ acceptedAt: new Date(), bookingId, ipAddress });

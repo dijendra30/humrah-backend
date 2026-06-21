@@ -469,6 +469,10 @@ const safetyTicketRoutes     = require('./routes/safetyTickets'); // ✅ Phase 2
 // ✅ NEW: Lightweight live location for matchmaking (separate from safety live-location)
 const liveLocationMatchmakingRoutes = require('./routes/liveLocationMatchmaking');
 
+// ✅ App Links routes (must be before /api)
+const appLinksRoutes = require('./routes/appLinksRoutes');
+app.use('/', appLinksRoutes);
+
 // Health check must stay public and before broad authenticated /api routes.
 // ── Public routes ──────────────────────────────────────────────────────────────
 app.get('/api/health', (req, res) => {
@@ -527,6 +531,9 @@ app.use('/api',                   authenticate, enforceLegalAcceptance, require(
 // ✅ NEW: Live location for matchmaking — POST /api/users/matchmaking-location
 //         Separate from safety live-location. Updates liveLocation on User doc.
 app.use('/api/users/matchmaking-location', authenticate, enforceLegalAcceptance, liveLocationMatchmakingRoutes);
+
+// ✅ NEW: App Links / Open Graph Share Routes (accessible without auth)
+app.use('/', require('./routes/shareRoutes'));
 
 require('./cronJobs');
 require('./jobs/moodExpiry');

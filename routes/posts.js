@@ -223,6 +223,41 @@ router.get('/feed', auth, async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────
+//  SINGLE POST
+//  GET /api/posts/:id
+// ─────────────────────────────────────────────────────────────
+
+router.get('/:id', auth, async (req, res) => {
+  try {
+    const post = await Post.findById(req.params.id)
+      .populate('userId', 'firstName lastName profilePhoto');
+
+    if (!post || !post.isActive) {
+      return res.status(404).json({ success: false, message: 'Post not found' });
+    }
+
+    if (post.disappearMode !== 'PERMANENT' && post.expiresAt && new Date() > post.expiresAt) {
+      return res.status(404).json({ success: false, message: 'Post has expired' });
+    }
+
+    // Check if liked by current user
+    const like = await PostLike.findOne({ postId: post._id, userId: req.userId });
+    
+    res.json({
+      success: true,
+      post: {
+        ...post.toObject(),
+        isLikedByMe: !!like
+      }
+    });
+
+  } catch (error) {
+    console.error('Get single post error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
 //  USER POSTS
 //  GET /api/posts/user/:userId
 // ─────────────────────────────────────────────────────────────

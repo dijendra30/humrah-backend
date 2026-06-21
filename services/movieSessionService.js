@@ -347,7 +347,9 @@ async function fetchTrendingMovies() {
   }
 
   try {
-    const BASE = 'https://api.themoviedb.org/3';
+    // Indian ISPs (like Jio) frequently block api.themoviedb.org.
+    // api.tmdb.org is an official alternative domain that bypasses this block.
+    const BASE = process.env.TMDB_BASE_URL || 'https://api.tmdb.org/3';
 
     // ── Parallel fetch from FIVE TMDB sources ────────────────────────────
     // Sources 1+2: now_playing India pages 1 & 2 (confirmed theatrical content)

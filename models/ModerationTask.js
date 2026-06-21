@@ -19,11 +19,12 @@ const moderationTaskSchema = new mongoose.Schema({
   }],
   status: { 
     type: String, 
-    enum: ['pending', 'processing', 'completed', 'failed'], 
+    enum: ['pending', 'processing', 'completed', 'failed', 'failed_permanently'], 
     default: 'pending',
     index: true
   },
   retryCount: { type: Number, default: 0 },
+  nextAttemptAt: { type: Date, default: Date.now, index: true },
   lastError: { type: String, default: null }
 }, { timestamps: true });
 

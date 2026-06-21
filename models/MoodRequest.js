@@ -13,6 +13,13 @@ const moodRequestSchema = new mongoose.Schema({
   vibeLevel: { type: String, enum: ['lowkey', 'normal', 'social'], default: 'normal' },
   message:   { type: String, default: null, maxlength: 120 },
 
+  // Analytics: where the request originated
+  requestSource: {
+    type:    String,
+    enum:    ['mood_match', 'people_nearby', 'community', 'featured_event'],
+    default: 'mood_match',
+  },
+
   status: {
     type:    String,
     enum:    ['pending', 'accepted', 'declined', 'expired'],

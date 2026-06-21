@@ -93,7 +93,7 @@ router.get('/mood-matches', authenticate, async (req, res) => {
 
     // ── Requesting user ───────────────────────────────────────────────────────
     const me = await User.findById(req.userId)
-      .select('last_known_lat last_known_lng last_location_updated_at questionnaire blockedUsers status')
+      .select('last_known_lat last_known_lng last_location_updated_at questionnaire blockedUsers status liveLocation tagline bio interests hobbies vibeWords availableTimes languagePreference language price city state availability comfortZones')
       .lean();
     if (!me) return res.status(404).json({ success: false, message: 'User not found' });
 
@@ -143,7 +143,7 @@ router.get('/mood-matches', authenticate, async (req, res) => {
       last_location_updated_at: { $gte: new Date(now - 86400000) },
       last_known_lat:           { $gte: me.last_known_lat - dLat, $lte: me.last_known_lat + dLat },
       last_known_lng:           { $gte: me.last_known_lng - dLng, $lte: me.last_known_lng + dLng },
-    }).select('firstName profilePhoto verified photoVerificationStatus last_known_lat last_known_lng questionnaire').lean();
+    }).select('firstName profilePhoto verified photoVerificationStatus last_known_lat last_known_lng questionnaire liveLocation tagline bio interests hobbies vibeWords availableTimes languagePreference language price city state availability comfortZones').lean();
 
     // Attach MTM doc to each candidate
     const mtmByUser = {};
@@ -157,6 +157,18 @@ router.get('/mood-matches', authenticate, async (req, res) => {
       const distKm = haversineKm(me.last_known_lat, me.last_known_lng, c.last_known_lat, c.last_known_lng);
       if (distKm > MAX_KM) continue;
 
+      // Build profilePreview from questionnaire or root fields for the Review sheet
+      const q = c.questionnaire || {};
+      const theirInterests = (q.hangoutPreferences || [])
+        .concat(q.interests || [])
+        .concat(c.interests || [])
+        .concat(c.hobbies || []);
+
+      const myInterests = (me.questionnaire?.hangoutPreferences || [])
+        .concat(me.questionnaire?.interests || [])
+        .concat(me.interests || [])
+        .concat(me.hobbies || []);
+
       results.push({
         _id:                     c._id,
         firstName:               c.firstName,
@@ -168,6 +180,22 @@ router.get('/mood-matches', authenticate, async (req, res) => {
         mood:                    c._mtm.mood,
         vibeLevel:               c._mtm.vibeLevel,
         intention:               c._mtm.intention || null,
+        // Profile preview fields for Review sheet
+        profilePreview: {
+          bio:                q.bio || c.bio || null,
+          tagline:            q.tagline || c.tagline || null,
+          vibeWords:          q.vibeWords || c.vibeWords || null,
+          sharedHangouts:     theirInterests.length > 0 ? theirInterests : null,
+          overlapCount:       myInterests.filter(i => theirInterests.includes(i)).length,
+          availableTimes:     q.availableTimes || c.availableTimes || null,
+          languagePreference: q.languagePreference || c.language || c.languagePreference || null,
+          costSharing:        q.price || c.price || null,
+          costSharingPreference: q.costSharingPreference || null,
+          city:               c.liveLocation?.city || q.city || c.city || null,
+          state:              c.liveLocation?.state || q.state || c.state || null,
+          availability:       q.availability || c.availability || null,
+          comfortZones:       q.comfortZones || c.comfortZones || null,
+        },
       });
     }
 

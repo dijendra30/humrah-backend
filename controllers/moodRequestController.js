@@ -24,7 +24,7 @@ async function safePush(userId, title, body, data = {}) {
 exports.sendRequest = async (req, res) => {
   try {
     const senderId   = req.userId;
-    const { receiverId, message } = req.body;
+    const { receiverId, message, requestSource } = req.body;
 
     if (!receiverId) return res.status(400).json({ success: false, message: 'receiverId required' });
     if (receiverId === senderId) return res.status(400).json({ success: false, message: 'Cannot request yourself' });
@@ -47,10 +47,11 @@ exports.sendRequest = async (req, res) => {
     const req_ = await MoodRequest.create({
       senderId,
       receiverId,
-      mood:      senderMood.mood,
-      vibeLevel: senderMood.vibeLevel,
-      message:   message?.trim().slice(0, 120) || null,
-      expiresAt: senderMood.expiresAt,
+      mood:          senderMood.mood,
+      vibeLevel:     senderMood.vibeLevel,
+      message:       message?.trim().slice(0, 120) || null,
+      requestSource: requestSource || 'mood_match',
+      expiresAt:     senderMood.expiresAt,
     });
 
     // Realtime push to receiver
@@ -58,8 +59,8 @@ exports.sendRequest = async (req, res) => {
     const moodLabel = senderMood.mood ?? 'Vibe';
     await safePush(
       receiverId,
-      `Someone nearby wants to connect safely ☕`,
-      `${moodLabel} • ${senderMood.vibeLevel ?? 'Relaxed'} vibe`,
+      'New Mood Match Request',
+      `${sender?.firstName ?? 'Someone'} wants to connect with you.`,
       {
         type:       'MOOD_REQUEST',
         requestId:  req_._id.toString(),

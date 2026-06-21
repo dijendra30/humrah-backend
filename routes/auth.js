@@ -190,6 +190,57 @@ router.post('/register', registerLimiter, async (req, res) => {
       lastLegalAcceptanceDate: new Date()
     });
 
+    // --- ONBOARDING COMPLIANCE: Age & Consent Validation ---
+    if (questionnaire) {
+      const reqDob = questionnaire.dateOfBirth;
+      const reqIsAdult = questionnaire.isAdultConfirmed;
+      const reqConsent = questionnaire.consentAccepted;
+
+      if (reqDob || reqIsAdult !== undefined || reqConsent !== undefined) {
+          if (reqDob) {
+            let normalizedDob = reqDob;
+            // Fix for Android sending DD/MM/YYYY format
+            if (/^\d{2}\/\d{2}\/\d{4}$/.test(reqDob)) {
+              const parts = reqDob.split('/');
+              normalizedDob = `${parts[2]}-${parts[1]}-${parts[0]}`;
+            }
+
+          const birthDate = new Date(normalizedDob);
+          if (!isNaN(birthDate.getTime())) {
+            let age = new Date().getFullYear() - birthDate.getFullYear();
+            const m = new Date().getMonth() - birthDate.getMonth();
+            if (m < 0 || (m === 0 && new Date().getDate() < birthDate.getDate())) {
+              age--;
+            }
+            if (age < 18) {
+              return res.status(400).json({ success: false, message: "Humrah is available only for users aged 18 and above." });
+            }
+
+            // Compute ageGroup on backend just in case Android failed to send it
+            let ageGroup = null;
+            if (age >= 18 && age <= 24) ageGroup = "18-24";
+            else if (age >= 25 && age <= 34) ageGroup = "25-34";
+            else if (age >= 35 && age <= 44) ageGroup = "35-44";
+            else if (age >= 45 && age <= 54) ageGroup = "45-54";
+            else if (age >= 55) ageGroup = "55+";
+
+            user.questionnaire.dateOfBirth = normalizedDob; // String
+            user.questionnaire.age = age; // Number
+            if (ageGroup) user.questionnaire.ageGroup = ageGroup;
+          }
+        }
+
+        if (reqIsAdult !== true || reqConsent !== true) {
+          return res.status(400).json({ success: false, message: "Consent and adult confirmation are required." });
+        }
+
+        user.questionnaire.isAdultConfirmed = true;
+        user.questionnaire.consentAccepted = true;
+        user.questionnaire.consentTimestamp = new Date();
+      }
+    }
+    // --- END ONBOARDING COMPLIANCE ---
+
     await user.save();
 
     // ✅ LOG LEGAL ACCEPTANCE
@@ -222,6 +273,13 @@ router.post('/register', registerLimiter, async (req, res) => {
 
     console.log(`✅ New user registered: ${user.email}`);
 
+    console.log(`[GUIDELINES]
+userId=${user._id}
+guidelinesAccepted=${user.guidelinesAccepted || false}
+guidelinesVersion=${user.guidelinesVersion || null}
+acceptedCommunityVersion=${user.acceptedCommunityVersion || null}
+needsGuidelinesAcceptance=${user.needsGuidelinesAcceptance !== undefined ? user.needsGuidelinesAcceptance : (!user.guidelinesAccepted || user.guidelinesVersion !== "1.0")}`);
+
     res.status(201).json({
       success: true,
       message: 'Registration successful',
@@ -232,7 +290,11 @@ router.post('/register', registerLimiter, async (req, res) => {
         lastName: user.lastName,
         email: user.email,
         role: user.role || 'USER',
-        emailVerified: user.emailVerified
+        emailVerified: user.emailVerified,
+        guidelinesAccepted: user.guidelinesAccepted || false,
+        guidelinesVersion: user.guidelinesVersion || null,
+        acceptedCommunityVersion: user.acceptedCommunityVersion || null,
+        needsGuidelinesAcceptance: user.needsGuidelinesAcceptance !== undefined ? user.needsGuidelinesAcceptance : (!user.guidelinesAccepted || user.guidelinesVersion !== "1.0")
       }
     });
 
@@ -374,6 +436,8 @@ router.post('/login', loginLimiter, async (req, res) => {
     const userRole = user.role || 'USER';
 
     // Generate token (includes role + tokenVersion for revocation support)
+    if (user.ensureGuidelinesMigration) await user.ensureGuidelinesMigration();
+
     const token = generateToken(user._id, userRole, user.tokenVersion ?? 0);
 
     console.log(`✅ Login successful: ${user.email} (${userRole})`);
@@ -569,6 +633,8 @@ router.post('/google-auth', publicApiLimiter, async (req, res) => {
       user.lastActive = new Date();
       await user.save();
 
+      if (user.ensureGuidelinesMigration) await user.ensureGuidelinesMigration();
+
       const token = generateToken(user._id, user.role || 'USER', user.tokenVersion ?? 0);
       console.log(`✅ Google login success: ${user.email}`);
 
@@ -589,6 +655,8 @@ router.post('/google-auth', publicApiLimiter, async (req, res) => {
       if (!user.googleId) user.googleId = verifiedGoogleId;
       user.lastActive = new Date();
       await user.save();
+
+      if (user.ensureGuidelinesMigration) await user.ensureGuidelinesMigration();
 
       const token = generateToken(user._id, user.role || 'USER', user.tokenVersion ?? 0);
 
@@ -659,6 +727,18 @@ router.post('/google-auth', publicApiLimiter, async (req, res) => {
 
 // ── Helper: build safe user object ────────────────────────────────────────────
 function buildUserResponse(user) {
+  // Use the virtual property getter
+  const CURRENT_GUIDELINES_VERSION = "1.0"; // fallback if virtual not applied
+  
+  const needsGuidelines = user.needsGuidelinesAcceptance !== undefined ? user.needsGuidelinesAcceptance : (!user.guidelinesAccepted || user.guidelinesVersion !== "1.0");
+
+  console.log(`[GUIDELINES]
+userId=${user._id}
+guidelinesAccepted=${user.guidelinesAccepted || false}
+guidelinesVersion=${user.guidelinesVersion || null}
+acceptedCommunityVersion=${user.acceptedCommunityVersion || null}
+needsGuidelinesAcceptance=${needsGuidelines}`);
+
   return {
     _id:                     user._id,
     firstName:               user.firstName,
@@ -676,6 +756,9 @@ function buildUserResponse(user) {
     profileCompleteness:     user.profileCompleteness || null,
     acceptedCommunityVersion:user.acceptedCommunityVersion || null,
     communityAcceptedAt:     user.communityAcceptedAt || null,
+    guidelinesAccepted:      user.guidelinesAccepted || false,
+    guidelinesVersion:       user.guidelinesVersion || null,
+    needsGuidelinesAcceptance: needsGuidelines,
     lastActive:              user.lastActive || null,
     createdAt:               user.createdAt || null,
     status:                  user.status || 'ACTIVE'
@@ -718,6 +801,7 @@ router.post('/send-otp-registration', sendOtpLimiter, async (req, res) => {
     // Always return generic success — attacker learns nothing from the response.
     const existingUser = await User.findOne({ email: normalizedEmail }).select('_id');
     if (existingUser) {
+      if (existingUser.ensureGuidelinesMigration) await existingUser.ensureGuidelinesMigration();
       return res.json({ success: true, message: 'If this email is valid, an OTP has been sent.' });
     }
 
@@ -791,9 +875,21 @@ router.post('/verify-otp-registration', verifyOtpLimiter, async (req, res) => {
  */
 router.get('/me', authenticate, async (req, res) => {
   try {
+    const user = req.user;
+    if (user.ensureGuidelinesMigration) {
+      await user.ensureGuidelinesMigration();
+    }
+    // Convert to plain object to include virtuals via getPrivateProfile if not already lean, or just use buildUserResponse
+    // Wait, the existing code just returned req.user. Let's return it but ensure virtuals are sent
+    // and let's use buildUserResponse to maintain consistency, or keep it as req.user
+    // Usually /me returns the full private profile via getPrivateProfile(). Actually, wait, auth /me just returned req.user
+    
+    // To ensure the fields are there:
+    const userData = user.toObject ? user.toObject({ virtuals: true }) : user;
+    
     res.json({
       success: true,
-      user: req.user
+      user: userData
     });
   } catch (error) {
     console.error('Get me error:', error);
@@ -1029,6 +1125,8 @@ router.post('/facebook-auth', publicApiLimiter, async (req, res) => {
       user.lastActive = new Date();
       await user.save();
 
+      if (user.ensureGuidelinesMigration) await user.ensureGuidelinesMigration();
+
       const token = generateToken(user._id, user.role || 'USER', user.tokenVersion ?? 0);
       console.log(`✅ Facebook login success: ${user.email}`);
 
@@ -1047,6 +1145,8 @@ router.post('/facebook-auth', publicApiLimiter, async (req, res) => {
       if (!user.facebookId) user.facebookId = facebookId;
       user.lastActive = new Date();
       await user.save();
+
+      if (user.ensureGuidelinesMigration) await user.ensureGuidelinesMigration();
 
       const token = generateToken(user._id, user.role || 'USER', user.tokenVersion ?? 0);
       console.log(`ℹ️ Facebook register: existing account ${user.email} → isNewUser=false`);

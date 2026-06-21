@@ -369,7 +369,7 @@ router.get('/me/private', auth, async (req, res) => {
     const privateProfile = user.getPrivateProfile();
 
     const editableFields = {};
-    const fields = ['profilePhoto', 'bio', 'ageGroup', 'state', 'area', 'price', 'tagline'];
+    const fields = ['profilePhoto', 'bio', 'ageGroup', 'state', 'area', 'price', 'costSharingPreference', 'tagline'];
     for (const field of fields) {
       editableFields[field] = await ProfileEditLog.checkRateLimit(req.userId, field);
     }
