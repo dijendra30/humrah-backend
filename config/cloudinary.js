@@ -127,12 +127,18 @@ const deleteImage = async (publicId) => {
 // Helper function to delete video from Cloudinary
 const deleteVideo = async (publicId) => {
   try {
-    console.log(`🗑️ [Cloudinary Delete Video] Attempting to delete video publicId: ${publicId}`);
+    console.log(`[DELETE VIDEO CALLED]`);
+    console.log(`[VIDEO PUBLIC ID] ${publicId}`);
+    
+    // NOTE: Added type: 'authenticated' because verification videos are uploaded as authenticated
     const result = await cloudinary.uploader.destroy(publicId, {
       resource_type: 'video',
+      type: 'authenticated',
       invalidate: true
     });
-    console.log(`✅ [Cloudinary Delete Video] Response for ${publicId}:`, result);
+    
+    console.log(`[CLOUDINARY DELETE RESPONSE]`, result);
+    
     if (result && result.result === 'not found') {
       console.warn(`⚠️ [Cloudinary Delete Video] Warning: Video ${publicId} was not found on Cloudinary (possibly already deleted).`);
     }

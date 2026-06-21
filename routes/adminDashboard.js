@@ -195,13 +195,22 @@ router.post('/verifications/:userId/:action', authenticate, adminOnly, async (re
       user.verificationPhotoPublicId = null;
     }
     if (session && videoIdToDelete) {
+      console.log(`[BEFORE CLEANUP] session.cloudinaryPublicId = ${session.cloudinaryPublicId}`);
       session.videoUrl = null;
       session.cloudinaryPublicId = null;
     }
     user.verificationMediaDeletedAt = new Date();
 
     await user.save();
-    if (session) await session.save();
+    if (session) {
+      await session.save();
+      console.log(`[SESSION AFTER CLEANUP]`, {
+        sessionId: session._id,
+        status: session.status,
+        cloudinaryPublicId: session.cloudinaryPublicId,
+        videoUrl: session.videoUrl
+      });
+    }
     console.log(`[Admin Review] Successfully cleared media fields from MongoDB for user ${user._id}`);
     
     // Log action safely
