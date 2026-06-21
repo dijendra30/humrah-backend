@@ -124,13 +124,19 @@ router.post('/upload-video', auth, upload.single('video'), async (req, res) => {
   try {
     const { sessionId } = req.body;
     
+    // Debug logger
+    const fs = require('fs');
+    const logToFile = (msg) => fs.appendFileSync('cloudinary_debug.log', `[${new Date().toISOString()}] ${msg}\n`);
+    
     if (!req.file) {
+      logToFile(`Upload attempt for session ${sessionId} failed: No video file provided`);
       return res.status(400).json({ 
         success: false, 
         message: 'No video file provided' 
       });
     }
     
+    logToFile(`[VIDEO UPLOAD RECEIVED] sessionId: ${sessionId}, fileSize: ${req.file.size}, mimeType: ${req.file.mimetype}`);
     console.log(`[VIDEO UPLOAD RECEIVED]`, { sessionId, fileSize: req.file.size, mimeType: req.file.mimetype });
     console.log(`📥 [Upload] Received video for session ${sessionId}`);
     console.log(`📦 [Upload] Video size: ${(req.file.size / 1024 / 1024).toFixed(2)} MB`);
@@ -163,17 +169,20 @@ router.post('/upload-video', auth, upload.single('video'), async (req, res) => {
     
     // Upload video buffer to Cloudinary
     console.log(`☁️ [Upload] Uploading to Cloudinary...`);
+    logToFile(`Starting cloudinary upload...`);
     const cloudinaryResult = await uploadVerificationVideo(
       req.file.buffer,
       sessionId
     );
     
     console.log(`✅ [Upload] Video uploaded: ${cloudinaryResult.publicId}`);
+    logToFile(`Upload success. PublicID: ${cloudinaryResult.publicId}, URL: ${cloudinaryResult.url}`);
     
     // Hard Validation: Verify public_id and secure_url exist
     if (!cloudinaryResult || !cloudinaryResult.publicId || !cloudinaryResult.url) {
       console.log(`[VIDEO UPLOAD INVALID]`);
       console.log(`[VIDEO UPLOAD ABORTED]`);
+      logToFile(`[VIDEO UPLOAD INVALID] - Aborting`);
       return res.status(500).json({
         success: false,
         message: 'Failed to retrieve valid video URL from Cloudinary'
@@ -188,6 +197,7 @@ router.post('/upload-video', auth, upload.single('video'), async (req, res) => {
     await session.save();
     console.log(`[SESSION SAVED]`);
     console.log(`[SESSION ID] ${session._id}`);
+    logToFile(`[SESSION SAVED] ID: ${session._id}`);
     
     // Start processing in background (don't wait)
     // ✅ Pass the app's io instance so background job can emit socket events
@@ -203,6 +213,8 @@ router.post('/upload-video', auth, upload.single('video'), async (req, res) => {
     
   } catch (error) {
     console.error('❌ [Upload] Error:', error);
+    const fs = require('fs');
+    fs.appendFileSync('cloudinary_debug.log', `[${new Date().toISOString()}] [Upload Error] ${error.message}\n${error.stack}\n`);
     res.status(500).json({
       success: false,
       message: 'Failed to upload video',
