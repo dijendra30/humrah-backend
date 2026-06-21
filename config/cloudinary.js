@@ -83,7 +83,12 @@ const uploadVerificationVideo = async (buffer, sessionId) => {
         folder: `verification-temp/${sessionId}`,
         resource_type: 'video',
         type: 'authenticated', // Private, not public
+        format: 'mp4',
         invalidate: true,
+        eager: '', // No transformations
+        eager_async: false,
+        backup: false,
+        overwrite: false,
         timeout: 120000 // 2 minute timeout
       },
       (error, result) => {
