@@ -36,7 +36,7 @@ router.get('/dashboard/stats', authenticate, adminOnly, async (req, res) => {
     ] = await Promise.all([
       User.countDocuments({ role: 'USER' }),
       User.countDocuments({ role: 'USER', lastActive: { $gte: today } }),
-      User.countDocuments({ role: 'USER', verified: true }),
+      User.countDocuments({ role: 'USER', photoVerificationStatus: 'approved' }),
       User.countDocuments({ role: 'USER', 'verificationInfo.status': 'PENDING' }), // Assuming this field exists
       User.countDocuments({ role: 'COMPANION' }), // Assuming role COMPANION or similar exists
       Booking ? Booking.countDocuments({ status: 'CONFIRMED' }) : 0,
@@ -644,16 +644,20 @@ router.post('/broadcast/profile-completion', authenticate, adminOnly, async (req
     
     let filter = { role: 'USER' };
     
-    if (targetType === 'VERIFIED_USERS') {
-      filter.$or = [{ verified: true }, { photoVerificationStatus: 'approved' }];
-    } else if (targetType === 'UNVERIFIED_USERS') {
-      filter.$and = [{ verified: { $ne: true } }, { photoVerificationStatus: { $ne: 'approved' } }];
-    } else if (targetType === 'EXACT_PERCENTAGE') {
-      // Create a small range for EXACT to handle rounding if necessary, but we'll use exact match since we rounded
+    if (targetType === 'EXACT_PERCENTAGE') {
       filter.profileCompletion = percentage;
+    } else if (targetType === 'GREATER_THAN_OR_EQUAL') {
+      filter.profileCompletion = { $gte: percentage };
+    } else if (targetType === 'LESS_THAN') {
+      filter.profileCompletion = { $lt: percentage };
     } else if (targetType === 'RANGE') {
       filter.profileCompletion = { $gte: minCompletion, $lte: maxCompletion };
+    } else if (targetType === 'COMPLETE_USERS') {
+      filter.profileCompletion = 100;
+    } else if (targetType === 'INCOMPLETE_USERS') {
+      filter.profileCompletion = { $lt: 100 };
     }
+    // ALL_USERS just uses the default { role: 'USER' } filter
     
     const users = await User.find(filter, '_id');
     const recipientCount = users.length;
