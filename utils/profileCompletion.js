@@ -1,103 +1,88 @@
 /**
- * Utility to calculate user profile completion percentage.
- * Initial weights:
- * - Profile Photo -> 20%
- * - Basic Information (Name, Age/DOB, Gender) -> 15%
- * - Bio/About -> 10%
- * - Questionnaire -> 25%
- * - Trust & Safety Preferences -> 10%
- * - Photo Verification -> 20%
+ * calculateProfileCompletion(user)
+ * ONE SINGLE SOURCE OF TRUTH FOR PROFILE COMPLETION.
+ *
+ * This exact function drives the profile completeness percentage across the
+ * entire Humrah platform (Android UI, Admin Dashboard, Analytics, Broadcasts).
+ *
+ * It uses ONLY fields collected in the Android App during onboarding
+ * or within the Questionnaire screens.
  */
 
 const calculateProfileCompletion = (user) => {
-  let score = 0;
-  const breakdown = {
-    basicInfo: false,
-    profilePhoto: false,
-    bio: false,
-    questionnaire: false,
-    trustSafety: false,
-    photoVerification: false
-  };
+  if (!user) return 0;
+  let completeness = 0;
 
   const q = user.questionnaire || {};
 
-  // 1. Profile Photo (20%)
-  if (user.profilePhoto && user.profilePhoto.trim() !== '') {
-    score += 20;
-    breakdown.profilePhoto = true;
+  const isNullOrBlank = (str) => !str || str.trim().length === 0;
+  const isNullOrEmpty = (arr) => !arr || arr.length === 0;
+
+  // ==========================================
+  // 1. PHOTOS & VERIFICATION (30%)
+  // ==========================================
+  if (!isNullOrBlank(user.profilePhoto)) {
+    completeness += 15;
+  }
+  if (user.photoVerificationStatus === 'approved') {
+    completeness += 15;
   }
 
-  // 2. Basic Information (15%)
-  // Needs firstName, lastName, and (age/ageGroup or DOB), and gender
-  const hasName = user.firstName && user.lastName;
-  const hasAgeOrDob = user.age || q.ageGroup || q.dateOfBirth || user.dateOfBirth;
-  const hasGender = q.gender;
+  // ==========================================
+  // 2. BASIC ONBOARDING INFO (20%)
+  // ==========================================
+  // Location & Age (5%)
+  if (!isNullOrBlank(q.city) && !isNullOrBlank(q.ageGroup)) {
+    completeness += 5;
+  }
+
+  // Preferences (5%)
+  if (!isNullOrEmpty(q.preferredLanguages) && !isNullOrBlank(q.meetupPreference)) {
+    completeness += 5;
+  }
+
+  // Vibe (10%)
+  if (!isNullOrEmpty(q.lookingForOnHumrah) && !isNullOrEmpty(q.vibeWords)) {
+    completeness += 10;
+  }
+
+  // ==========================================
+  // 3. DETAILED QUESTIONNAIRE (50%)
+  // ==========================================
   
-  if (hasName && hasAgeOrDob && hasGender) {
-    score += 15;
-    breakdown.basicInfo = true;
-  } else if (hasName || hasAgeOrDob || hasGender) {
-    // Partial credit
-    score += 7;
+  // About You (10%)
+  if (!isNullOrBlank(q.bio) || !isNullOrBlank(q.goodMeetupMeaning) || !isNullOrBlank(q.vibeQuote)) {
+    completeness += 10;
   }
 
-  // 3. Bio/About (10%)
-  if (q.bio && q.bio.trim() !== '') {
-    score += 10;
-    breakdown.bio = true;
+  // Lifestyle (10%)
+  if (!isNullOrEmpty(q.comfortActivity) || !isNullOrEmpty(q.relaxActivity) || !isNullOrEmpty(q.musicPreference)) {
+    completeness += 10;
   }
 
-  // 4. Questionnaire (25%)
-  // Check a few key questionnaire fields to determine if filled
-  const qFields = [
-    q.lookingForOnHumrah,
-    q.interests,
-    q.hobbies,
-    q.musicPreference,
-    q.favoriteFood,
-    q.profession,
-    q.education,
-    q.lookingFor,
-    q.relationshipStatus,
-    q.smokingStatus,
-    q.drinkingStatus
-  ];
-  
-  // Count how many of these arrays/strings have values
-  const filledQFields = qFields.filter(f => {
-    if (Array.isArray(f)) return f.length > 0;
-    return f && f.trim() !== '';
-  }).length;
-
-  if (filledQFields >= 4) { // Consider questionnaire "complete" if at least 4 key fields are filled
-    score += 25;
-    breakdown.questionnaire = true;
-  } else if (filledQFields > 0) {
-    // Partial credit: up to 15% based on how many are filled
-    score += Math.min(15, filledQFields * 5);
+  // Hangout Preferences (10%)
+  if (!isNullOrBlank(q.budgetComfort) || !isNullOrEmpty(q.comfortZones) || !isNullOrBlank(q.hangoutFrequency)) {
+    completeness += 10;
   }
 
-  // 5. Trust & Safety Preferences (10%)
-  const hasGuidelines = user.guidelinesAccepted || q.understandGuidelines;
-  if (hasGuidelines) {
-    score += 10;
-    breakdown.trustSafety = true;
+  // Companion Mode (10%)
+  if (!isNullOrBlank(q.becomeCompanion)) {
+    if (q.becomeCompanion === "Yes, I'm interested") {
+      if (!isNullOrBlank(q.tagline) || !isNullOrEmpty(q.openFor)) {
+        completeness += 10;
+      }
+    } else {
+      completeness += 10;
+    }
   }
 
-  // 6. Photo Verification (20%)
-  if (user.verified || user.photoVerificationStatus === 'approved') {
-    score += 20;
-    breakdown.photoVerification = true;
+  // Trust & Guidelines (10%)
+  if (!isNullOrBlank(q.verifyIdentity) || !isNullOrBlank(q.understandGuidelines)) {
+    completeness += 10;
   }
 
-  // Ensure score doesn't exceed 100
-  score = Math.min(100, Math.round(score));
-
-  return {
-    completionPercentage: score,
-    breakdown
-  };
+  // Ensure bounds
+  return Math.min(Math.max(completeness, 0), 100);
 };
 
 module.exports = { calculateProfileCompletion };

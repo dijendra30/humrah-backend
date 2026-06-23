@@ -460,6 +460,13 @@ userSchema.index({ last_location_updated_at: 1 });
 userSchema.index({ 'bookingRefs.bookingId': 1 });
 userSchema.index({ 'bookingRefs.status': 1 });
 
+// Calculate Profile Completion before saving
+const { calculateProfileCompletion } = require('../utils/profileCompletion');
+userSchema.pre('save', function (next) {
+  this.profileCompletion = calculateProfileCompletion(this);
+  next();
+});
+
 // =============================================
 // METHODS
 // =============================================
@@ -489,17 +496,10 @@ userSchema.methods.markVerifiedViaVideo = async function(embedding) {
   return await this.save();
 };
 
-const { calculateProfileCompletion } = require('../utils/profileCompletion');
-
 userSchema.pre('save', function(next) {
   if (this.questionnaire && this.questionnaire.becomeCompanion) {
     this.userType = this.questionnaire.becomeCompanion === "Yes, I'm interested" ? 'COMPANION' : 'MEMBER';
   }
-
-  // Recalculate profile completion
-  const completionData = calculateProfileCompletion(this);
-  this.profileCompletion = completionData.completionPercentage;
-  this.profileCompletionBreakdown = completionData.breakdown;
 
   next();
 });
