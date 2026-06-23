@@ -407,6 +407,24 @@ const userSchema = new mongoose.Schema({
   moodRequestsSent: { type: Map, of: Date, default: {} },
 
   // =============================================
+  // PROFILE COMPLETION
+  // =============================================
+  profileCompletion: {
+    type: Number,
+    default: 0,
+    min: 0,
+    max: 100
+  },
+  profileCompletionBreakdown: {
+    basicInfo: { type: Boolean, default: false },
+    profilePhoto: { type: Boolean, default: false },
+    bio: { type: Boolean, default: false },
+    questionnaire: { type: Boolean, default: false },
+    trustSafety: { type: Boolean, default: false },
+    photoVerification: { type: Boolean, default: false }
+  },
+
+  // =============================================
   // BOOKING REFERENCES
   // =============================================
   bookingRefs: {
@@ -471,10 +489,18 @@ userSchema.methods.markVerifiedViaVideo = async function(embedding) {
   return await this.save();
 };
 
+const { calculateProfileCompletion } = require('../utils/profileCompletion');
+
 userSchema.pre('save', function(next) {
   if (this.questionnaire && this.questionnaire.becomeCompanion) {
     this.userType = this.questionnaire.becomeCompanion === "Yes, I'm interested" ? 'COMPANION' : 'MEMBER';
   }
+
+  // Recalculate profile completion
+  const completionData = calculateProfileCompletion(this);
+  this.profileCompletion = completionData.completionPercentage;
+  this.profileCompletionBreakdown = completionData.breakdown;
+
   next();
 });
 
