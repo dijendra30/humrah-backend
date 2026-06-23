@@ -574,4 +574,132 @@ router.post('/reports/safety-ticket/:id/internal-notes', authenticate, adminOnly
   }
 });
 
+const Notification = require('../models/Notification');
+const Broadcast = require('../models/Broadcast');
+
+// ==========================================
+// PROFILE COMPLETION ANALYTICS
+// ==========================================
+router.get('/profile-completion/stats', authenticate, adminOnly, async (req, res) => {
+  try {
+    const users = await User.find({ role: 'USER' }, 'profileCompletion firstName lastName email lastActive createdAt profilePhoto');
+    
+    const totalUsers = users.length;
+    let completedUsers = 0;
+    let totalScore = 0;
+    const distribution = {
+      '100': 0, '90': 0, '80': 0, '70': 0, '60': 0, '50': 0, 'below50': 0
+    };
+
+    const usersData = users.map(u => {
+      const p = u.profileCompletion || 0;
+      totalScore += p;
+      if (p === 100) {
+        completedUsers++;
+        distribution['100']++;
+      } else if (p >= 90) distribution['90']++;
+      else if (p >= 80) distribution['80']++;
+      else if (p >= 70) distribution['70']++;
+      else if (p >= 60) distribution['60']++;
+      else if (p >= 50) distribution['50']++;
+      else distribution['below50']++;
+      
+      return {
+        _id: u._id,
+        firstName: u.firstName,
+        lastName: u.lastName,
+        email: u.email,
+        profilePhoto: u.profilePhoto,
+        profileCompletion: p,
+        lastActive: u.lastActive,
+        createdAt: u.createdAt
+      };
+    });
+
+    const averageCompletion = totalUsers > 0 ? Math.round(totalScore / totalUsers) : 0;
+
+    res.json({
+      success: true,
+      stats: {
+        totalUsers,
+        completedUsers,
+        incompleteUsers: totalUsers - completedUsers,
+        averageCompletion,
+        distribution
+      },
+      users: usersData
+    });
+  } catch (error) {
+    console.error('Profile completion stats error:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch stats' });
+  }
+});
+
+// ==========================================
+// IN-APP BROADCAST
+// ==========================================
+router.post('/broadcast/profile-completion', authenticate, adminOnly, async (req, res) => {
+  try {
+    const { targetType, percentage, minCompletion, maxCompletion, title, message } = req.body;
+    
+    let filter = { role: 'USER' };
+    
+    if (targetType === 'VERIFIED_USERS') {
+      filter.$or = [{ verified: true }, { photoVerificationStatus: 'approved' }];
+    } else if (targetType === 'UNVERIFIED_USERS') {
+      filter.$and = [{ verified: { $ne: true } }, { photoVerificationStatus: { $ne: 'approved' } }];
+    } else if (targetType === 'EXACT_PERCENTAGE') {
+      // Create a small range for EXACT to handle rounding if necessary, but we'll use exact match since we rounded
+      filter.profileCompletion = percentage;
+    } else if (targetType === 'RANGE') {
+      filter.profileCompletion = { $gte: minCompletion, $lte: maxCompletion };
+    }
+    
+    const users = await User.find(filter, '_id');
+    const recipientCount = users.length;
+    
+    if (recipientCount === 0) {
+      return res.status(400).json({ success: false, message: 'No users match the selected criteria' });
+    }
+    
+    // Create Broadcast record
+    const adminName = req.user.firstName + (req.user.lastName ? ' ' + req.user.lastName : '');
+    const broadcast = await Broadcast.create({
+      title,
+      message,
+      targetAudience: targetType === 'EXACT_PERCENTAGE' ? `EXACT_${percentage}%` : (targetType === 'RANGE' ? `RANGE_${minCompletion}-${maxCompletion}%` : targetType),
+      recipientCount,
+      sentBy: adminName
+    });
+    
+    // Create Notification records
+    const notifications = users.map(u => ({
+      userId: u._id,
+      title,
+      message,
+      type: 'ADMIN_BROADCAST',
+      broadcastId: broadcast._id,
+      createdBy: 'admin',
+      isRead: false
+    }));
+    
+    // Insert in batches if very large, but insertMany handles large arrays decently well
+    await Notification.insertMany(notifications);
+    
+    res.json({ success: true, message: `Broadcast sent to ${recipientCount} users`, broadcast });
+  } catch (error) {
+    console.error('Broadcast error:', error);
+    res.status(500).json({ success: false, message: 'Failed to send broadcast' });
+  }
+});
+
+router.get('/broadcast/history', authenticate, adminOnly, async (req, res) => {
+  try {
+    const broadcasts = await Broadcast.find().sort({ createdAt: -1 });
+    res.json({ success: true, broadcasts });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Failed to fetch broadcast history' });
+  }
+});
+
 module.exports = router;
