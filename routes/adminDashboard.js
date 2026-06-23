@@ -706,4 +706,62 @@ router.get('/broadcast/history', authenticate, adminOnly, async (req, res) => {
   }
 });
 
+// --- RESTORE PROFILE COMPLETION SCRIPT ENDPOINT ---
+router.post('/restore-profile-completion', auth, isAdmin, async (req, res) => {
+  try {
+    const calculateProfileCompleteness = (questionnaire) => {
+      if (!questionnaire) return 40;
+      let completeness = 40;
+    
+      const isNullOrBlank = (str) => !str || str.trim().length === 0;
+      const isNullOrEmpty = (arr) => !arr || arr.length === 0;
+    
+      if (!isNullOrBlank(questionnaire.ageGroup)) completeness += 10;
+    
+      if (!isNullOrBlank(questionnaire.bio) ||
+          !isNullOrBlank(questionnaire.goodMeetupMeaning) ||
+          !isNullOrBlank(questionnaire.vibeQuote)) completeness += 10;
+    
+      if (!isNullOrEmpty(questionnaire.comfortActivity) ||
+          !isNullOrEmpty(questionnaire.relaxActivity) ||
+          !isNullOrEmpty(questionnaire.musicPreference)) completeness += 10;
+    
+      if (!isNullOrBlank(questionnaire.budgetComfort) ||
+          !isNullOrEmpty(questionnaire.comfortZones) ||
+          !isNullOrBlank(questionnaire.hangoutFrequency)) completeness += 10;
+    
+      if (!isNullOrBlank(questionnaire.becomeCompanion)) {
+          if (questionnaire.becomeCompanion === "Yes, I'm interested") {
+              if (!isNullOrBlank(questionnaire.tagline) || !isNullOrEmpty(questionnaire.openFor)) {
+                  completeness += 10;
+              }
+          } else {
+              completeness += 10;
+          }
+      }
+    
+      if (!isNullOrBlank(questionnaire.verifyIdentity) ||
+          !isNullOrBlank(questionnaire.understandGuidelines)) completeness += 10;
+    
+      return Math.min(Math.max(completeness, 40), 100);
+    };
+
+    const users = await User.find({});
+    let updatedCount = 0;
+    
+    for (const user of users) {
+      const androidCalc = calculateProfileCompleteness(user.questionnaire);
+      if (user.profileCompletion !== androidCalc) {
+        await User.updateOne({ _id: user._id }, { $set: { profileCompletion: androidCalc } });
+        updatedCount++;
+      }
+    }
+
+    res.json({ success: true, message: `Successfully restored profile completion for ${updatedCount} users.` });
+  } catch (error) {
+    console.error('Error during profile completion restoration:', error);
+    res.status(500).json({ success: false, message: 'Server error during restoration' });
+  }
+});
+
 module.exports = router;

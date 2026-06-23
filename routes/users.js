@@ -681,7 +681,13 @@ router.put('/me/questionnaire', authenticate, async (req, res) => {
     user.questionnaire = { ...(user.questionnaire?.toObject?.() || user.questionnaire || {}), ...cleanedQuestionnaire };
     user.markModified('questionnaire');
 
-    if (profileCompletion !== undefined) {
+    // --- PROFILE COMPLETION LOGGING & UPDATE ---
+    console.log("BODY:", req.body);
+    console.log("PROFILE COMPLETION:", req.body.profileCompletion);
+    console.log("OLD COMPLETION:", user.profileCompletion);
+    console.log("NEW COMPLETION:", req.body.profileCompletion);
+
+    if (profileCompletion != null) {
       user.profileCompletion = profileCompletion;
     }
     await user.save();
