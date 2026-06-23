@@ -615,7 +615,9 @@ router.put('/me/questionnaire', authenticate, async (req, res) => {
     const reqIsAdult = req.body.isAdultConfirmed !== undefined ? req.body.isAdultConfirmed : questionnaire.isAdultConfirmed;
     const reqConsent = req.body.consentAccepted !== undefined ? req.body.consentAccepted : questionnaire.consentAccepted;
 
-    if (reqDob || reqIsAdult !== undefined || reqConsent !== undefined) {
+    // Only process this block if we are actually receiving Dob (which means it's Onboarding) 
+    // OR if they are explicitly sending true for the consents.
+    if (reqDob || reqIsAdult === true || reqConsent === true) {
       if (reqDob) {
         let normalizedDob = reqDob;
         // Fix for Android sending DD/MM/YYYY format
@@ -653,15 +655,16 @@ router.put('/me/questionnaire', authenticate, async (req, res) => {
       const finalIsAdult = reqIsAdult === true || user.questionnaire?.isAdultConfirmed === true;
       const finalConsent = reqConsent === true || user.questionnaire?.consentAccepted === true;
 
-      if (!finalIsAdult || !finalConsent) {
-        console.log('[DEBUG] 400 - Consent/Adult confirmation missing. reqIsAdult:', reqIsAdult, 'reqConsent:', reqConsent);
-        // Required by strict onboarding logic
+      // Only strictly block if it's the onboarding flow (determined by sending DOB)
+      if (reqDob && (!finalIsAdult || !finalConsent)) {
+        console.log('[DEBUG] 400 - Consent/Adult confirmation missing during onboarding. reqIsAdult:', reqIsAdult, 'reqConsent:', reqConsent);
         return res.status(400).json({ success: false, message: "Consent and adult confirmation are required." });
       }
 
-      cleanedQuestionnaire.isAdultConfirmed = true;
-      cleanedQuestionnaire.consentAccepted = true;
-      if (!cleanedQuestionnaire.consentTimestamp) {
+      if (finalIsAdult) cleanedQuestionnaire.isAdultConfirmed = true;
+      if (finalConsent) cleanedQuestionnaire.consentAccepted = true;
+      
+      if (finalConsent && !user.questionnaire?.consentTimestamp && !cleanedQuestionnaire.consentTimestamp) {
         cleanedQuestionnaire.consentTimestamp = new Date();
       }
     }
