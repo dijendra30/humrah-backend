@@ -438,7 +438,7 @@ router.post('/submit-verification-photo-base64', authenticate, uploadLimiter, as
 
 router.put('/me/questionnaire', authenticate, async (req, res) => {
   try {
-    const { questionnaire } = req.body;
+    const { questionnaire, profileCompletion } = req.body;
     
     // --- TEMPORARY DEBUG LOGS ---
     console.log('[DEBUG] PUT /me/questionnaire - Received Payload:', JSON.stringify(questionnaire, null, 2));
@@ -672,6 +672,10 @@ router.put('/me/questionnaire', authenticate, async (req, res) => {
 
     user.questionnaire = { ...(user.questionnaire?.toObject?.() || user.questionnaire || {}), ...cleanedQuestionnaire };
     user.markModified('questionnaire');
+
+    if (profileCompletion !== undefined) {
+      user.profileCompletion = profileCompletion;
+    }
     await user.save();
 
     const successResponse = buildAutoCleanSuccessResponse(autoCleanedFields || []);
