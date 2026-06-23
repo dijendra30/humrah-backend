@@ -450,13 +450,16 @@ router.put('/me/questionnaire', authenticate, async (req, res) => {
     }
     // ----------------------------
 
-    if (!questionnaire || typeof questionnaire !== 'object')
+    if (!questionnaire || typeof questionnaire !== 'object') {
+      console.log('[DEBUG] 400 - Questionnaire data is required');
       return res.status(400).json({ success: false, message: 'Questionnaire data is required' });
+    }
 
     // --- COST SHARING PREFERENCE MIGRATION & VALIDATION ---
     const validEnums = ['FREE_ONLY', 'SPLIT_FAIRLY', 'DEPENDS_ON_ACTIVITY', 'HOST_COVERS', 'DISCUSS_FIRST'];
     if (questionnaire.costSharingPreference !== undefined) {
       if (questionnaire.costSharingPreference !== null && !validEnums.includes(questionnaire.costSharingPreference)) {
+        console.log('[DEBUG] 400 - Invalid cost sharing preference:', questionnaire.costSharingPreference);
         return res.status(400).json({ success: false, error: 'Invalid cost sharing preference.' });
       }
     } else if (questionnaire.price) {
@@ -646,7 +649,12 @@ router.put('/me/questionnaire', authenticate, async (req, res) => {
         }
       }
 
-      if (reqIsAdult !== true || reqConsent !== true) {
+      // If the user already has isAdultConfirmed in the DB, or if reqIsAdult evaluates to true
+      const finalIsAdult = reqIsAdult === true || user.questionnaire?.isAdultConfirmed === true;
+      const finalConsent = reqConsent === true || user.questionnaire?.consentAccepted === true;
+
+      if (!finalIsAdult || !finalConsent) {
+        console.log('[DEBUG] 400 - Consent/Adult confirmation missing. reqIsAdult:', reqIsAdult, 'reqConsent:', reqConsent);
         // Required by strict onboarding logic
         return res.status(400).json({ success: false, message: "Consent and adult confirmation are required." });
       }
