@@ -707,7 +707,7 @@ router.get('/broadcast/history', authenticate, adminOnly, async (req, res) => {
 });
 
 // --- RESTORE PROFILE COMPLETION SCRIPT ENDPOINT ---
-router.post('/restore-profile-completion', auth, isAdmin, async (req, res) => {
+router.post('/restore-profile-completion', authenticate, adminOnly, async (req, res) => {
   try {
     const calculateProfileCompleteness = (questionnaire) => {
       if (!questionnaire) return 40;
