@@ -118,18 +118,27 @@ router.get('/verifications/pending', authenticate, adminOnly, async (req, res) =
         console.log("videoUrl:", session.videoUrl);
         console.log("cloudinaryPublicId:", session.cloudinaryPublicId);
 
-        let videoUrl = session.videoUrl;
-        if (!videoUrl && session.cloudinaryPublicId) {
+        // ✅ FIX: Videos are uploaded as type:'authenticated' in Cloudinary, so
+        // session.videoUrl (the raw secure_url) is NOT directly playable in a
+        // browser.  We must ALWAYS generate a signed URL from cloudinaryPublicId.
+        // The old guard `if (!videoUrl && ...)` was dead code because videoUrl
+        // was always set — meaning the signed-URL path was never reached.
+        let videoUrl = null;
+        if (session.cloudinaryPublicId) {
           try {
-            // Generate a signed URL for the private 'authenticated' video
-            // We MUST append .mp4 BEFORE generating the signature, otherwise Cloudinary rejects it as tampered!
-            const publicIdWithExtension = session.cloudinaryPublicId.endsWith('.mp4') 
-              ? session.cloudinaryPublicId 
+            // Must append .mp4 BEFORE signing — Cloudinary treats extension as
+            // part of the signed payload and rejects mismatches.
+            const publicIdWithExtension = session.cloudinaryPublicId.endsWith('.mp4')
+              ? session.cloudinaryPublicId
               : `${session.cloudinaryPublicId}.mp4`;
-              
+
             videoUrl = getAuthenticatedUrl(publicIdWithExtension, 'video');
+            console.log("Generated signed videoUrl:", videoUrl);
           } catch (e) {
             console.error('Failed to generate signed video URL', e);
+            // Fallback to raw stored URL (won't play for authenticated resources,
+            // but better than nothing for debugging)
+            videoUrl = session.videoUrl || null;
           }
         }
 
