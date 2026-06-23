@@ -180,7 +180,7 @@ router.post('/create', authenticate, async (req, res) => {
 router.get('/trial-status', authenticate, async (req, res) => {
   try {
     const user = await User.findById(req.userId).select('random_trial_used verified photoVerificationStatus');
-    const isVerified = user.verified === true || user.photoVerificationStatus === 'approved';
+    const isVerified = user.photoVerificationStatus === 'approved';
     return res.json({
       success: true,
       trialUsed:        user.random_trial_used || false,
@@ -318,7 +318,7 @@ router.get('/nearby', authenticate, async (req, res) => {
           _id:          raw._id,
           firstName:    shouldBlur ? 'Someone nearby' : (raw.firstName || 'Someone'),
           profilePhoto: shouldBlur ? null : raw.profilePhoto,
-          verified:     raw.verified === true || raw.photoVerificationStatus === 'approved',
+          verified:     raw.photoVerificationStatus === 'approved',
           questionnaire: raw.questionnaire || null,
           blurred:      shouldBlur,
         };

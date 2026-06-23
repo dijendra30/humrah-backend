@@ -73,7 +73,7 @@ async function findEligibleUsers(lat, lng, radius, excludeUserId, phase) {
   try {
     const criteria = {
       _id: { $ne: excludeUserId },
-      verified: true,           // ✅ FIXED: was `isVerified` — correct field is `verified`
+      photoVerificationStatus: 'approved',
       status: 'ACTIVE',         // ✅ FIXED: was `account_status` — correct field is `status`
       fcmTokens: { $exists: true, $ne: [] },
       last_known_lat: { $exists: true, $ne: null },

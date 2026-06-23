@@ -173,7 +173,7 @@ router.get('/mood-matches', authenticate, async (req, res) => {
         _id:                     c._id,
         firstName:               c.firstName,
         profilePhoto:            c.profilePhoto,
-        verified:                c.verified,
+        verified:                c.photoVerificationStatus === 'approved',
         photoVerificationStatus: c.photoVerificationStatus || null,
         distanceKm:              Math.round(distKm * 10) / 10,
         compatibilityScore:      calcCompatScore(me, c, MAX_KM),

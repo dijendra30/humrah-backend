@@ -145,7 +145,7 @@ async function buildQueueForStage(booking, initiator, stage) {
 
   const candidates = await User.find({
     _id:                      { $ne: initiatorObjId },
-    $or:                      [{ verified: true }, { photoVerificationStatus: 'approved' }],
+    photoVerificationStatus: 'approved',
     'liveLocation.lat':       { $ne: null },
     'liveLocation.lng':       { $ne: null },
     'liveLocation.updatedAt': { $ne: null },
