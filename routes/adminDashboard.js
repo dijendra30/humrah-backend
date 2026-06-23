@@ -112,6 +112,12 @@ router.get('/verifications/pending', authenticate, adminOnly, async (req, res) =
     const formatted = sessions
       .filter(session => session.userId)
       .map(session => {
+        console.log("Verification session:");
+        console.log(session);
+
+        console.log("videoUrl:", session.videoUrl);
+        console.log("cloudinaryPublicId:", session.cloudinaryPublicId);
+
         let videoUrl = session.videoUrl;
         if (!videoUrl && session.cloudinaryPublicId) {
           try {

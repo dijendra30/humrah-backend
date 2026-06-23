@@ -122,6 +122,18 @@ router.post('/start', auth, async (req, res) => {
 // @access  Private
 router.post('/upload-video', auth, upload.single('video'), async (req, res) => {
   try {
+    console.log("========== VIDEO REQUEST ==========");
+    console.log("sessionId:", req.body.sessionId);
+    console.log("req.file:", req.file);
+    console.log("req.body:", req.body);
+
+    if (req.file) {
+      console.log("size:", req.file.size);
+      console.log("mime:", req.file.mimetype);
+    } else {
+      console.log("NO VIDEO FILE RECEIVED");
+    }
+
     const { sessionId } = req.body;
     
     if (!req.file) {
@@ -181,13 +193,21 @@ router.post('/upload-video', auth, upload.single('video'), async (req, res) => {
     }
 
     // Update session with Cloudinary details
+    session.videoUrl = cloudinaryResult.url;
     session.cloudinaryPublicId = cloudinaryResult.publicId;
     session.cloudinaryUrl = cloudinaryResult.url;
     session.status = 'PROCESSING';
-    console.log(`[Upload Lifecycle] Saving cloudinaryPublicId to VerificationSession in MongoDB for session ${session._id}: ${session.cloudinaryPublicId}`);
+    
+    console.log("Saving session:");
+    console.log({
+       videoUrl: session.videoUrl,
+       cloudinaryPublicId: session.cloudinaryPublicId
+    });
+
     await session.save();
-    console.log(`[SESSION SAVED]`);
-    console.log(`[SESSION ID] ${session._id}`);
+
+    console.log("Saved session:");
+    console.log(session);
     
     // Start processing in background (don't wait)
     // ✅ Pass the app's io instance so background job can emit socket events

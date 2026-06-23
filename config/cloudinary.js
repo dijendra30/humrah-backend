@@ -78,6 +78,7 @@ const uploadVerificationVideo = async (buffer, sessionId) => {
     console.log(`📤 [Cloudinary] Uploading verification video for session ${sessionId}`);
     console.log(`📦 [Cloudinary] Video size: ${(buffer.length / 1024 / 1024).toFixed(2)} MB`);
     
+    console.log("Uploading video to Cloudinary");
     const uploadStream = cloudinary.uploader.upload_stream(
       {
         folder: `verification-temp/${sessionId}`,
@@ -93,11 +94,14 @@ const uploadVerificationVideo = async (buffer, sessionId) => {
       },
       (error, result) => {
         if (error) {
-          console.error(`❌ [Cloudinary] Upload failed:`, error);
+          console.error("CLOUDINARY VIDEO ERROR");
+          console.error(error);
           reject(error);
         } else {
-          console.log(`[CLOUDINARY VIDEO UPLOAD RESPONSE]`, result);
-          console.log(`[CLOUDINARY VIDEO PUBLIC ID] ${result.public_id}`);
+          console.log("FULL CLOUDINARY RESULT");
+          console.log(result);
+          console.log("public_id:", result.public_id);
+          console.log("secure_url:", result.secure_url);
           resolve({
             url: result.secure_url,
             publicId: result.public_id
