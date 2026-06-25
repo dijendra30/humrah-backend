@@ -400,20 +400,13 @@ async function processVerificationInBackground(sessionId, userId, io) {
     // =============================================
     // DELETE VIDEO FROM CLOUDINARY (CRITICAL)
     // =============================================
-    // ✅ FIX: DO NOT delete for MANUAL_REVIEW — admin must be able to watch the
-    // video before approving/rejecting.  The adminDashboard approve/reject
-    // endpoint already handles deletion after the admin acts.
-    if (session.status !== 'MANUAL_REVIEW') {
-      try {
-        await deleteVideo(session.cloudinaryPublicId);
-        session.videoDeletedAt = new Date();
-        await session.save();
-        console.log(`🗑️ [Verification] Video deleted from Cloudinary (status: ${session.status})`);
-      } catch (deleteError) {
-        console.error('⚠️ [Verification] Failed to delete video:', deleteError);
-      }
-    } else {
-      console.log(`🔒 [Verification] Video RETAINED in Cloudinary for admin manual review`);
+    try {
+      await deleteVideo(session.cloudinaryPublicId);
+      session.videoDeletedAt = new Date();
+      await session.save();
+      console.log(`🗑️ [Verification] Video deleted from Cloudinary`);
+    } catch (deleteError) {
+      console.error('⚠️ [Verification] Failed to delete video:', deleteError);
     }
     
     console.log(`\n✅ [Verification] Processing complete for session ${session.sessionId}`);

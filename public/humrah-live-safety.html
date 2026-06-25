@@ -1,0 +1,1031 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Live Safety Tracking · Humrah</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Sora:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  :root {
+    --bg:        #060810;
+    --bg1:       #0b0e1a;
+    --bg2:       #0f1422;
+    --glass:     rgba(15,20,40,0.72);
+    --glass2:    rgba(10,14,28,0.85);
+    --border:    rgba(0,255,230,0.10);
+    --border2:   rgba(0,255,230,0.18);
+    --cyan:      #00ffe6;
+    --cyan2:     #00c8b8;
+    --cyan-dim:  rgba(0,255,230,0.08);
+    --cyan-glow: rgba(0,255,230,0.20);
+    --green:     #00e87a;
+    --green-dim: rgba(0,232,122,0.12);
+    --red:       #ff3b5c;
+    --red-dim:   rgba(255,59,92,0.12);
+    --amber:     #ffb830;
+    --text:      #e8edf8;
+    --text2:     #8899bb;
+    --text3:     #4a5880;
+    --font-mono: 'Space Mono', monospace;
+    --font-body: 'Sora', sans-serif;
+    --r:         14px;
+    --r2:        10px;
+  }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-body);
+    font-size: 14px;
+    line-height: 1.6;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+  body::before {
+    content: '';
+    position: fixed; inset: 0; z-index: 0;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+    background-size: 200px;
+    pointer-events: none;
+    opacity: .5;
+  }
+  body::after {
+    content: '';
+    position: fixed; inset: 0; z-index: 0;
+    background-image:
+      linear-gradient(rgba(0,255,230,.025) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0,255,230,.025) 1px, transparent 1px);
+    background-size: 40px 40px;
+    pointer-events: none;
+  }
+  .page { position: relative; z-index: 1; max-width: 480px; margin: 0 auto; padding: 0 0 40px; }
+
+  @keyframes shimmer {
+    0%   { background-position: -400px 0; }
+    100% { background-position:  400px 0; }
+  }
+  @keyframes pulse-ring {
+    0%   { transform: scale(.85); opacity: .9; }
+    70%  { transform: scale(1.6);  opacity: 0; }
+    100% { transform: scale(.85);  opacity: 0; }
+  }
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: .5; }
+  }
+  @keyframes glow-breathe {
+    0%, 100% { box-shadow: 0 0 8px var(--cyan-glow); }
+    50%       { box-shadow: 0 0 22px var(--cyan-glow), 0 0 6px var(--cyan); }
+  }
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(16px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+  @keyframes blink {
+    0%,100% { opacity:1 } 50% { opacity:.3 }
+  }
+  @keyframes emergency-pulse {
+    0%, 100% { opacity: 1; box-shadow: 0 0 20px rgba(255,59,92,0.4); }
+    50%       { opacity: 0.8; box-shadow: 0 0 40px rgba(255,59,92,0.7); }
+  }
+  @keyframes badge-pop {
+    0%   { transform: scale(0.8); opacity: 0; }
+    60%  { transform: scale(1.1); }
+    100% { transform: scale(1); opacity: 1; }
+  }
+
+  /* ── EMERGENCY BANNER ───────────────────────────────────────────────────── */
+  #emergency-banner {
+    display: none;
+    background: linear-gradient(135deg, rgba(255,59,92,0.18), rgba(180,0,40,0.22));
+    border-bottom: 2px solid rgba(255,59,92,0.5);
+    padding: 14px 20px;
+    animation: emergency-pulse 2s ease-in-out infinite;
+    position: sticky; top: 0; z-index: 200;
+  }
+  #emergency-banner.show { display: flex; align-items: flex-start; gap: 12px; }
+  .emg-icon {
+    font-size: 24px; flex-shrink: 0;
+    animation: blink 1.2s infinite;
+  }
+  .emg-text { flex: 1; }
+  .emg-title {
+    font-family: var(--font-mono); font-size: 12px; font-weight: 700;
+    color: var(--red); text-transform: uppercase; letter-spacing: .12em;
+    margin-bottom: 3px;
+  }
+  .emg-body { font-size: 12px; color: rgba(255,200,200,0.85); line-height: 1.55; }
+
+  /* ── HEADER ─────────────────────────────────────────────────────────────── */
+  .header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 18px 20px 14px;
+    border-bottom: 1px solid var(--border);
+    background: var(--glass2);
+    backdrop-filter: blur(12px);
+    position: sticky; top: 0; z-index: 100;
+    animation: fadeUp .5s ease both;
+  }
+  .header-logo { display: flex; align-items: center; gap: 10px; }
+  .header-logo img { height: 28px; width: auto; filter: brightness(1.1); }
+  .header-logo-text { font-family: var(--font-mono); font-size: 13px; color: var(--text2); letter-spacing: .04em; }
+  .live-badge {
+    display: flex; align-items: center; gap: 6px;
+    background: rgba(0,232,122,.10);
+    border: 1px solid rgba(0,232,122,.25);
+    border-radius: 20px; padding: 4px 10px 4px 8px;
+    font-family: var(--font-mono); font-size: 10px;
+    color: var(--green); letter-spacing: .08em; font-weight: 700;
+  }
+  .live-dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--green); position: relative;
+  }
+  .live-dot::after {
+    content: '';
+    position: absolute; inset: -3px; border-radius: 50%;
+    background: var(--green);
+    animation: pulse-ring 1.5s cubic-bezier(.4,0,.6,1) infinite;
+  }
+
+  .section { padding: 16px 20px; animation: fadeUp .5s ease both; }
+  .section:nth-child(2) { animation-delay: .08s; }
+  .section:nth-child(3) { animation-delay: .14s; }
+  .section:nth-child(4) { animation-delay: .20s; }
+  .section:nth-child(5) { animation-delay: .26s; }
+  .section:nth-child(6) { animation-delay: .32s; }
+
+  /* ── CARD ───────────────────────────────────────────────────────────────── */
+  .card {
+    background: var(--glass);
+    border: 1px solid var(--border);
+    border-radius: var(--r);
+    backdrop-filter: blur(10px);
+    overflow: hidden;
+  }
+  .card-inner { padding: 16px; }
+
+  /* ── STATUS CARD ─────────────────────────────────────────────────────────── */
+  .status-card { padding: 16px; display: flex; gap: 14px; align-items: flex-start; }
+  .avatar-wrap { position: relative; flex-shrink: 0; }
+  .avatar {
+    width: 52px; height: 52px; border-radius: 50%;
+    background: linear-gradient(135deg, var(--bg2), #1a2040);
+    border: 2px solid var(--border2);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 20px;
+    animation: glow-breathe 3s ease-in-out infinite;
+  }
+  .avatar-pulse {
+    position: absolute; bottom: 1px; right: 1px;
+    width: 13px; height: 13px; border-radius: 50%;
+    background: var(--green);
+    border: 2px solid var(--bg);
+    animation: pulse-dot 2s infinite;
+  }
+  .status-info { flex: 1; min-width: 0; }
+  .status-name { font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .status-sub  { font-size: 11px; color: var(--cyan); font-family: var(--font-mono); margin-bottom: 10px; }
+  .status-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 8px; }
+  .stat-chip {
+    background: var(--cyan-dim);
+    border: 1px solid var(--border);
+    border-radius: 8px; padding: 6px 8px; text-align: center;
+  }
+  .stat-chip .val { font-family: var(--font-mono); font-size: 12px; font-weight: 700; color: var(--cyan); }
+  .stat-chip .lbl { font-size: 9px; color: var(--text3); text-transform: uppercase; letter-spacing: .06em; margin-top: 1px; }
+
+  /* ── MAP ─────────────────────────────────────────────────────────────────── */
+  .map-section { padding: 0 20px; }
+  .map-wrap {
+    position: relative; border-radius: var(--r); overflow: hidden;
+    border: 1px solid var(--border2);
+    box-shadow: 0 0 30px rgba(0,255,230,.06);
+  }
+  #map { height: 320px; width: 100%; background: #0a0f1e; }
+  .map-overlay-tl {
+    position: absolute; top: 10px; left: 10px; z-index: 500;
+    background: var(--glass2);
+    border: 1px solid var(--border2);
+    border-radius: 8px; padding: 6px 10px;
+    font-family: var(--font-mono); font-size: 10px; color: var(--cyan);
+    backdrop-filter: blur(8px);
+    display: flex; align-items: center; gap: 6px;
+  }
+  .recenter-btn {
+    position: absolute; bottom: 12px; right: 12px; z-index: 500;
+    width: 38px; height: 38px; border-radius: 10px;
+    background: var(--glass2); border: 1px solid var(--border2);
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; backdrop-filter: blur(8px);
+    transition: all .2s; color: var(--cyan); font-size: 16px;
+  }
+  .recenter-btn:hover { background: var(--cyan-dim); border-color: var(--cyan); }
+  .recenter-btn:active { transform: scale(.92); }
+
+  .leaflet-tile-pane { filter: brightness(.55) saturate(.4) hue-rotate(180deg) invert(1) hue-rotate(180deg); }
+  .leaflet-container { background: #060a14 !important; }
+  .leaflet-control-attribution { background: rgba(6,8,16,.7) !important; color: #445 !important; }
+  .leaflet-control-attribution a { color: #558 !important; }
+
+  /* ── EXPIRED OVERLAY ─────────────────────────────────────────────────────── */
+  #expired-overlay {
+    display: none;
+    position: absolute; inset: 0; z-index: 600;
+    background: rgba(6,8,16,.88); backdrop-filter: blur(6px);
+    align-items: center; justify-content: center;
+    flex-direction: column; gap: 12px;
+    border-radius: var(--r); text-align: center; padding: 24px;
+  }
+  #expired-overlay.show { display: flex; }
+  .expired-badge {
+    background: var(--red-dim); border: 1px solid rgba(255,59,92,.3);
+    border-radius: 20px; padding: 4px 14px;
+    font-family: var(--font-mono); font-size: 10px;
+    color: var(--red); letter-spacing: .1em; text-transform: uppercase;
+  }
+  .expired-title { font-size: 16px; font-weight: 600; color: var(--text); }
+  .expired-sub   { font-size: 12px; color: var(--text2); line-height: 1.6; }
+
+  /* ── ACTIVITY GRID ───────────────────────────────────────────────────────── */
+  .activity-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .activity-item {
+    background: var(--bg1);
+    border: 1px solid var(--border);
+    border-radius: var(--r2); padding: 12px;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .activity-item .ai-label { font-size: 9px; color: var(--text3); text-transform: uppercase; letter-spacing: .07em; }
+  .activity-item .ai-val   { font-family: var(--font-mono); font-size: 14px; color: var(--text); font-weight: 700; }
+  .activity-item .ai-sub   { font-size: 10px; color: var(--text2); }
+  .activity-item.highlight { border-color: var(--border2); background: var(--cyan-dim); }
+  .activity-item.highlight .ai-val { color: var(--cyan); }
+
+  /* ── MOVEMENT BADGE ──────────────────────────────────────────────────────── */
+  .movement-badge {
+    display: inline-flex; align-items: center; gap: 5px;
+    border-radius: 20px; padding: 3px 10px 3px 6px;
+    font-size: 11px; font-weight: 600;
+    animation: badge-pop .35s ease both;
+  }
+  .movement-badge.stationary { background: rgba(74,88,128,0.3); border: 1px solid rgba(74,88,128,0.5); color: var(--text2); }
+  .movement-badge.walking    { background: rgba(0,232,122,0.15); border: 1px solid rgba(0,232,122,0.4); color: var(--green); }
+  .movement-badge.running    { background: rgba(255,184,48,0.15); border: 1px solid rgba(255,184,48,0.4); color: var(--amber); }
+  .movement-badge.driving    { background: rgba(0,255,230,0.12); border: 1px solid rgba(0,255,230,0.3); color: var(--cyan); }
+  .movement-badge .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    animation: pulse-dot 1.8s infinite;
+  }
+  .movement-badge.stationary .dot { background: var(--text3); animation: none; }
+  .movement-badge.walking .dot    { background: var(--green); }
+  .movement-badge.running .dot    { background: var(--amber); }
+  .movement-badge.driving .dot    { background: var(--cyan); }
+
+  /* ── SECTION TITLE ───────────────────────────────────────────────────────── */
+  .sec-title {
+    font-size: 10px; font-family: var(--font-mono);
+    color: var(--text3); text-transform: uppercase; letter-spacing: .1em;
+    margin-bottom: 12px; display: flex; align-items: center; gap: 8px;
+  }
+  .sec-title::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+
+  /* ── SAFETY MESSAGE ──────────────────────────────────────────────────────── */
+  .safety-msg {
+    display: flex; gap: 12px; align-items: flex-start; padding: 14px;
+    background: rgba(0,255,230,.04);
+    border: 1px solid rgba(0,255,230,.14);
+    border-radius: var(--r);
+  }
+  .safety-msg-icon {
+    width: 36px; height: 36px; flex-shrink: 0; border-radius: 10px;
+    background: var(--cyan-dim); border: 1px solid var(--border2);
+    display: flex; align-items: center; justify-content: center; font-size: 16px;
+  }
+  .safety-msg-text { font-size: 12px; color: var(--text2); line-height: 1.65; }
+  .safety-msg-text strong { color: var(--cyan); display: block; margin-bottom: 4px; font-size: 12px; }
+  .safety-msg.emergency {
+    background: rgba(255,59,92,.06);
+    border-color: rgba(255,59,92,.25);
+  }
+  .safety-msg.emergency .safety-msg-icon { background: rgba(255,59,92,.12); border-color: rgba(255,59,92,.3); }
+  .safety-msg.emergency .safety-msg-text strong { color: var(--red); }
+
+  /* ── ACTIONS ─────────────────────────────────────────────────────────────── */
+  .actions-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .action-btn {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 7px; padding: 14px 10px;
+    background: var(--bg1); border: 1px solid var(--border);
+    border-radius: var(--r); cursor: pointer; transition: all .2s;
+    text-decoration: none; color: inherit; position: relative; overflow: hidden;
+  }
+  .action-btn::before {
+    content: ''; position: absolute; inset: 0;
+    background: var(--cyan-dim); opacity: 0; transition: opacity .2s;
+  }
+  .action-btn:hover::before  { opacity: 1; }
+  .action-btn:hover          { border-color: var(--border2); transform: translateY(-1px); }
+  .action-btn:active         { transform: translateY(0) scale(.97); }
+  .action-btn.danger         { border-color: rgba(255,59,92,.22); background: var(--red-dim); }
+  .action-btn.danger::before { background: rgba(255,59,92,.05); }
+  .action-btn.danger:hover   { border-color: rgba(255,59,92,.5); box-shadow: 0 0 14px rgba(255,59,92,.12); }
+  .action-btn .btn-icon { font-size: 20px; position: relative; z-index: 1; }
+  .action-btn .btn-lbl  { font-size: 11px; color: var(--text2); font-weight: 500; text-align: center; position: relative; z-index: 1; }
+  .action-btn.danger .btn-lbl { color: var(--red); }
+
+  /* ── ERROR STATE ─────────────────────────────────────────────────────────── */
+  #error-state {
+    display: none;
+    flex-direction: column; align-items: center; gap: 14px;
+    padding: 32px 20px; text-align: center;
+  }
+  #error-state.show { display: flex; }
+  .error-icon  { font-size: 36px; opacity: .7; }
+  .error-title { font-size: 16px; font-weight: 600; color: var(--text); }
+  .error-sub   { font-size: 12px; color: var(--text2); }
+  .retry-btn {
+    background: var(--cyan-dim); border: 1px solid var(--border2);
+    border-radius: 10px; padding: 10px 24px;
+    color: var(--cyan); font-family: var(--font-mono); font-size: 12px;
+    cursor: pointer; transition: all .2s; letter-spacing: .04em;
+  }
+  .retry-btn:hover { background: rgba(0,255,230,.14); border-color: var(--cyan); }
+
+  /* ── FOOTER ──────────────────────────────────────────────────────────────── */
+  .footer {
+    text-align: center; padding: 20px;
+    font-size: 11px; color: var(--text3);
+    font-family: var(--font-mono); letter-spacing: .05em;
+    border-top: 1px solid var(--border); margin-top: 8px;
+  }
+  .footer span { color: var(--cyan); }
+
+  /* ── LOADING ─────────────────────────────────────────────────────────────── */
+  #loading-screen {
+    position: fixed; inset: 0; z-index: 999;
+    background: var(--bg);
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 20px;
+    transition: opacity .5s;
+  }
+  #loading-screen.hide { opacity: 0; pointer-events: none; }
+  .loader-spinner {
+    width: 36px; height: 36px; border-radius: 50%;
+    border: 3px solid var(--border2);
+    border-top-color: var(--cyan);
+    animation: spin .8s linear infinite;
+  }
+  .loader-text { font-family: var(--font-mono); font-size: 11px; color: var(--text3); letter-spacing: .08em; animation: blink 1.4s infinite; }
+
+  /* ── SESSION ENDED MODAL — full-page blur, non-dismissable ────────────────── */
+  #session-ended-modal {
+    display: none;
+    position: fixed; inset: 0; z-index: 9999;
+    backdrop-filter: blur(14px) brightness(.55) saturate(.7);
+    -webkit-backdrop-filter: blur(14px) brightness(.55) saturate(.7);
+    background: rgba(6,8,16,.55);
+    align-items: center; justify-content: center;
+    padding: 20px;
+  }
+  #session-ended-modal.show { display: flex; }
+  .se-card {
+    background: var(--glass2);
+    border: 1px solid rgba(255,59,92,.28);
+    border-radius: 20px;
+    padding: 32px 24px 28px;
+    max-width: 320px; width: 100%;
+    text-align: center;
+    display: flex; flex-direction: column; align-items: center; gap: 18px;
+    animation: fadeUp .35s ease both;
+    box-shadow: 0 0 40px rgba(255,59,92,.12);
+  }
+  .se-icon {
+    width: 60px; height: 60px; border-radius: 50%;
+    background: rgba(255,59,92,.12);
+    border: 1px solid rgba(255,59,92,.3);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 26px;
+  }
+  .se-title {
+    font-size: 18px; font-weight: 700;
+    color: var(--text); letter-spacing: -.01em;
+  }
+  .se-sub {
+    font-size: 12.5px; color: var(--text2);
+    line-height: 1.65; margin-top: -6px;
+  }
+  .se-close {
+    width: 100%; padding: 13px 0;
+    background: rgba(255,59,92,.13);
+    border: 1px solid rgba(255,59,92,.35);
+    border-radius: 12px;
+    color: var(--red);
+    font-family: var(--font-mono); font-size: 12px;
+    font-weight: 700; letter-spacing: .07em; text-transform: uppercase;
+    cursor: pointer; transition: background .18s, transform .12s;
+  }
+  .se-close:hover  { background: rgba(255,59,92,.22); }
+  .se-close:active { transform: scale(.97); }
+
+  /* ── TOAST ───────────────────────────────────────────────────────────────── */
+  #toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(60px);
+    background: var(--glass2); border: 1px solid var(--border2);
+    border-radius: 10px; padding: 10px 18px;
+    font-size: 12px; color: var(--cyan);
+    font-family: var(--font-mono);
+    z-index: 9999; transition: transform .3s cubic-bezier(.34,1.56,.64,1);
+    white-space: nowrap; backdrop-filter: blur(10px);
+  }
+  #toast.show { transform: translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+
+<!-- Loading Screen -->
+<div id="loading-screen">
+  <img src="https://humrah.in/logo.png" height="38" alt="Humrah" onerror="this.style.display='none'">
+  <div class="loader-spinner"></div>
+  <div class="loader-text">CONNECTING TO SAFETY SESSION…</div>
+</div>
+
+<!-- Toast -->
+<div id="toast">✓ Copied to clipboard</div>
+
+<div class="page" id="main-page" style="opacity:0;transition:opacity .5s;">
+
+  <!-- EMERGENCY BANNER (hidden by default, shown when isEmergency=true) -->
+  <div id="emergency-banner">
+    <div class="emg-icon">🚨</div>
+    <div class="emg-text">
+      <div class="emg-title">Emergency Alert Active</div>
+      <div class="emg-body" id="emg-body">This person may need assistance. Please try contacting them immediately and monitor their location.</div>
+    </div>
+  </div>
+
+  <!-- HEADER -->
+  <header class="header">
+    <div class="header-logo">
+      <img src="https://humrah.in/logo.png" alt="Humrah"
+           onerror="this.outerHTML='<span style=\'font-family:var(--font-mono);font-size:15px;font-weight:700;color:var(--cyan)\'>HUMRAH</span>'">
+      <span class="header-logo-text">Live Safety</span>
+    </div>
+    <div class="live-badge" id="live-badge">
+      <div class="live-dot" id="live-dot"></div>
+      <span id="live-badge-text">LIVE</span>
+    </div>
+  </header>
+
+  <!-- USER STATUS CARD -->
+  <div class="section">
+    <div class="sec-title">Sharing User</div>
+    <div class="card">
+      <div class="status-card">
+        <div class="avatar-wrap">
+          <div class="avatar">👤</div>
+          <div class="avatar-pulse" id="avatar-pulse"></div>
+        </div>
+        <div class="status-info">
+          <div class="status-name" id="user-name">Loading…</div>
+          <div class="status-sub" id="status-sub">● Connecting to session…</div>
+          <div class="status-grid">
+            <div class="stat-chip">
+              <div class="val" id="stat-battery">--</div>
+              <div class="lbl">Battery</div>
+            </div>
+            <div class="stat-chip">
+              <div class="val" id="stat-accuracy">--</div>
+              <div class="lbl">Accuracy</div>
+            </div>
+            <div class="stat-chip">
+              <div class="val" id="stat-signal">--</div>
+              <div class="lbl">Signal</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MAP -->
+  <div class="map-section section" style="padding-left:20px;padding-right:20px;">
+    <div class="sec-title">Live Location</div>
+    <div class="map-wrap">
+      <div id="map"></div>
+      <div class="map-overlay-tl">
+        📍 <span id="coords-display">---, ---</span>
+      </div>
+      <button class="recenter-btn" id="recenter-btn" title="Recenter map">⊕</button>
+      <!-- Expired overlay -->
+      <div id="expired-overlay">
+        <div class="expired-badge">Session Ended</div>
+        <div class="expired-title">Location sharing has ended</div>
+        <div class="expired-sub">This safety session was closed by the user.<br>The last known location is shown above.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- LIVE ACTIVITY -->
+  <div class="section">
+    <div class="sec-title">Live Activity</div>
+    <div class="activity-grid">
+      <div class="activity-item highlight">
+        <span class="ai-label">Last Updated</span>
+        <span class="ai-val" id="last-updated">--</span>
+        <span class="ai-sub">Auto-refreshing</span>
+      </div>
+      <div class="activity-item">
+        <span class="ai-label">Movement</span>
+        <div id="movement-badge-wrap" style="margin-top:2px;"></div>
+        <span class="ai-sub" id="movement-sub">Detecting…</span>
+      </div>
+      <div class="activity-item">
+        <span class="ai-label">Speed</span>
+        <span class="ai-val" id="speed-val">--</span>
+        <span class="ai-sub">Approx.</span>
+      </div>
+      <div class="activity-item">
+        <span class="ai-label">Session</span>
+        <span class="ai-val" id="session-timer">--:--</span>
+        <span class="ai-sub">Time active</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- SAFETY MESSAGE -->
+  <div class="section">
+    <div class="safety-msg" id="safety-msg-block">
+      <div class="safety-msg-icon" id="safety-msg-icon">🛡️</div>
+      <div class="safety-msg-text">
+        <strong id="safety-msg-title">You received this from Humrah Safety System</strong>
+        <span id="safety-msg-body">You are viewing this live location because this session was marked as safety-sensitive. The user chose to share their real-time location with you through Humrah.</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- QUICK ACTIONS -->
+  <div class="section">
+    <div class="sec-title">Quick Actions</div>
+    <div class="actions-grid">
+      <a class="action-btn" id="btn-gmaps" href="#" target="_blank" rel="noopener">
+        <span class="btn-icon">🗺️</span>
+        <span class="btn-lbl">Open in<br>Google Maps</span>
+      </a>
+      <button class="action-btn" id="btn-copy" onclick="copyCoords()">
+        <span class="btn-icon">📋</span>
+        <span class="btn-lbl">Copy<br>Coordinates</span>
+      </button>
+      <button class="action-btn" id="btn-refresh" onclick="refreshLocation()">
+        <span class="btn-icon" id="refresh-icon">🔄</span>
+        <span class="btn-lbl">Refresh<br>Location</span>
+      </button>
+      <a class="action-btn danger" href="tel:112">
+        <span class="btn-icon">📞</span>
+        <span class="btn-lbl">Emergency<br>Call</span>
+      </a>
+    </div>
+  </div>
+
+  <!-- ERROR STATE -->
+  <div id="error-state">
+    <div class="error-icon">⚠️</div>
+    <div class="error-title">Unable to fetch live location</div>
+    <div class="error-sub">Connection lost or session unavailable.<br>Please try again.</div>
+    <button class="retry-btn" onclick="retryConnection()">↺ RETRY</button>
+  </div>
+
+  <!-- FOOTER -->
+  <footer class="footer">
+    Powered by <span>Humrah</span> Safety System &nbsp;·&nbsp; api.humrah.in
+  </footer>
+
+</div><!-- /page -->
+
+<!-- Session Ended Modal — full-page blur overlay, stays until user closes tab -->
+<div id="session-ended-modal" role="alertdialog" aria-modal="true" aria-label="Location sharing ended">
+  <div class="se-card">
+    <div class="se-icon">&#x1F512;</div>
+    <div class="se-title">Location Sharing Ended</div>
+    <div class="se-sub">Live location sharing has been stopped.<br>This tracking session is no longer active.</div>
+    <button class="se-close" onclick="closeSessionPage()">Close</button>
+  </div>
+</div>
+
+<script>
+// =============================================================================
+// SESSION ID — read from clean path /live/:id  OR  legacy ?session= query
+// =============================================================================
+function resolveSessionId() {
+  // 1. Clean path: /live/<sessionId>
+  const pathMatch = window.location.pathname.match(/\/live\/([a-f0-9]{40,})/i);
+  if (pathMatch) return pathMatch[1];
+  // 2. Legacy fallback: ?session=<id>
+  return new URLSearchParams(location.search).get('session') || '';
+}
+
+const SESSION_ID = resolveSessionId();
+const API_BASE   = 'https://api.humrah.in';
+
+const state = {
+  lat:        null,
+  lng:        null,
+  battery:    null,
+  accuracy:   null,
+  speed:      0,
+  sessionSec: 0,
+  isExpired:  false,
+  isEmergency: false,
+  lastUpdate: Date.now(),
+  movement:   'Stationary',
+  startedAt:  null,
+};
+
+// =============================================================================
+// MAP SETUP
+// =============================================================================
+let map, marker, accuracyCircle, mapInited = false;
+
+function initMap(lat, lng) {
+  if (mapInited) return;
+  mapInited = true;
+
+  map = L.map('map', {
+    center: [lat, lng], zoom: 15,
+    zoomControl: false, attributionControl: true,
+  });
+
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap', maxZoom: 19,
+  }).addTo(map);
+
+  const icon = L.divIcon({
+    html: `<div style="
+      width:20px;height:20px;border-radius:50%;
+      background:var(--cyan);
+      border:3px solid white;
+      box-shadow:0 0 14px var(--cyan),0 0 6px var(--cyan);
+      position:relative;
+    "><div style="
+      position:absolute;inset:-6px;border-radius:50%;
+      border:2px solid var(--cyan);
+      animation:pulse-ring 1.8s ease-out infinite;opacity:.6;
+    "></div></div>`,
+    className: '', iconSize: [20, 20], iconAnchor: [10, 10],
+  });
+
+  marker = L.marker([lat, lng], { icon }).addTo(map);
+  accuracyCircle = L.circle([lat, lng], {
+    radius: Math.max((state.accuracy || 10) * 3, 20),
+    color: 'rgba(0,255,230,.6)',
+    fillColor: 'rgba(0,255,230,.06)',
+    fillOpacity: 1, weight: 1.5,
+  }).addTo(map);
+
+  L.control.zoom({ position: 'bottomleft' }).addTo(map);
+}
+
+function moveMarkerSmooth(lat, lng) {
+  if (!marker) return;
+  const steps = 30;
+  const startLat = state.lat || lat;
+  const startLng = state.lng || lng;
+  let i = 0;
+  const iv = setInterval(() => {
+    i++;
+    const t = i / steps;
+    const ease = t < .5 ? 2*t*t : -1+(4-2*t)*t;
+    const cLat = startLat + (lat - startLat) * ease;
+    const cLng = startLng + (lng - startLng) * ease;
+    marker.setLatLng([cLat, cLng]);
+    if (accuracyCircle) accuracyCircle.setLatLng([cLat, cLng]);
+    if (i >= steps) {
+      clearInterval(iv);
+      state.lat = lat; state.lng = lng;
+    }
+  }, 16);
+}
+
+// =============================================================================
+// MOVEMENT BADGE
+// =============================================================================
+const MOVEMENT_META = {
+  'Stationary': { cls: 'stationary', emoji: '⬤',  label: 'Stationary' },
+  'Walking':    { cls: 'walking',    emoji: '🚶',  label: 'Walking'    },
+  'Running':    { cls: 'running',    emoji: '🏃',  label: 'Running'    },
+  'Driving':    { cls: 'driving',    emoji: '🚗',  label: 'Driving'    },
+};
+
+function renderMovementBadge(type) {
+  const meta = MOVEMENT_META[type] || MOVEMENT_META['Stationary'];
+  const wrap = document.getElementById('movement-badge-wrap');
+  wrap.innerHTML = `
+    <span class="movement-badge ${meta.cls}">
+      <span class="dot"></span>
+      ${meta.emoji} ${meta.label}
+    </span>`;
+  document.getElementById('movement-sub').textContent =
+    type === 'Stationary' ? 'No movement' : 'Detected';
+}
+
+// =============================================================================
+// EMERGENCY MODE
+// =============================================================================
+function activateEmergencyMode(userName) {
+  state.isEmergency = true;
+  document.getElementById('emergency-banner').classList.add('show');
+  document.getElementById('emg-body').textContent =
+    `${userName || 'This person'} may need assistance. Their live location has been shared with you. Please try contacting them immediately.`;
+
+  // Red safety message block
+  const block = document.getElementById('safety-msg-block');
+  block.classList.add('emergency');
+  document.getElementById('safety-msg-icon').textContent = '🚨';
+  document.getElementById('safety-msg-title').textContent = '⚠️ Humrah Emergency Alert';
+  document.getElementById('safety-msg-body').textContent =
+    'This is an emergency safety alert. Real-time movement tracking is active. Please check in with this person immediately if you have concerns about their safety.';
+
+  // Red live badge
+  const badge = document.getElementById('live-badge');
+  badge.style.background    = 'rgba(255,59,92,.15)';
+  badge.style.borderColor   = 'rgba(255,59,92,.4)';
+  badge.style.color         = 'var(--red)';
+  document.getElementById('live-dot').style.background = 'var(--red)';
+  document.getElementById('live-badge-text').textContent = 'EMERGENCY';
+}
+
+// =============================================================================
+// API
+// =============================================================================
+async function fetchLiveLocation(sessionId) {
+  if (!sessionId) throw new Error('No session ID');
+  const res = await fetch(`${API_BASE}/api/live-location/${sessionId}`, {
+    method: 'GET',
+    headers: { 'Content-Type': 'application/json' },
+    cache: 'no-store',
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.message || `HTTP ${res.status}`);
+  }
+  const json = await res.json();
+  if (!json.success) throw new Error(json.message || 'API error');
+  const d = json.data;
+  return {
+    name:         d.name,
+    profilePhoto: d.profilePhoto || null,
+    lat:          d.lat,
+    lng:         d.lng,
+    battery:     d.batteryLevel,
+    accuracy:    d.accuracy,
+    speed:       d.speed  ?? 0,
+    movement:    d.movementType || 'Stationary',
+    isEmergency: d.isEmergency  || false,
+    startedAt:   d.startedAt ? new Date(d.startedAt) : null,
+    updatedAt:   d.updatedAt ? new Date(d.updatedAt) : null,
+    isExpired:   d.isExpired,
+  };
+}
+
+// =============================================================================
+// UI UPDATERS
+// =============================================================================
+function updateUI(data) {
+  if (!data || data.lat == null) return;
+
+  if (data.name) document.getElementById('user-name').textContent = data.name;
+
+  // Profile photo — set once, skip on subsequent updates
+  if (data.profilePhoto) {
+    const av = document.querySelector('.avatar');
+    if (av && !av.querySelector('img')) {
+      av.textContent = '';
+      const img = document.createElement('img');
+      img.src = data.profilePhoto;
+      img.style.cssText = 'width:100%;height:100%;border-radius:50%;object-fit:cover;';
+      img.onerror = function() { this.parentElement.textContent = '\uD83D\uDC64'; };
+      av.appendChild(img);
+    }
+  }
+  document.getElementById('status-sub').textContent = '● Currently sharing live location';
+
+  const coordStr = `${data.lat.toFixed(5)}, ${data.lng.toFixed(5)}`;
+  document.getElementById('coords-display').textContent = coordStr;
+  document.getElementById('btn-gmaps').href = `https://maps.google.com/?q=${data.lat},${data.lng}`;
+
+  if (data.battery != null) {
+    const batEl = document.getElementById('stat-battery');
+    batEl.textContent  = `${data.battery}%`;
+    batEl.style.color  = data.battery < 20 ? 'var(--red)' : data.battery < 40 ? 'var(--amber)' : 'var(--cyan)';
+  } else {
+    document.getElementById('stat-battery').textContent = '--';
+  }
+
+  if (data.accuracy != null) {
+    document.getElementById('stat-accuracy').textContent = `±${Math.round(data.accuracy)}m`;
+    document.getElementById('stat-signal').textContent   =
+      data.accuracy < 6 ? 'Good' : data.accuracy < 15 ? 'Fair' : 'Weak';
+  }
+
+  document.getElementById('last-updated').textContent = 'Just now';
+  renderMovementBadge(data.movement);
+  document.getElementById('speed-val').textContent = `${(data.speed ?? 0).toFixed(1)} km/h`;
+
+  if (data.startedAt && state.startedAt === null) {
+    state.startedAt  = data.startedAt;
+    state.sessionSec = Math.floor((Date.now() - data.startedAt.getTime()) / 1000);
+  }
+
+  state.lat      = data.lat;
+  state.lng      = data.lng;
+  state.battery  = data.battery;
+  state.movement = data.movement;
+  state.lastUpdate = Date.now();
+
+  // One-time emergency mode activation
+  if (data.isEmergency && !state.isEmergency) {
+    activateEmergencyMode(data.name);
+  }
+}
+
+// Last-updated counter
+let secondsSinceUpdate = 0;
+setInterval(() => {
+  if (state.isExpired) return;
+  secondsSinceUpdate++;
+  const el = document.getElementById('last-updated');
+  if (el) {
+    el.textContent = secondsSinceUpdate < 5  ? 'Just now'
+      : secondsSinceUpdate < 60 ? `${secondsSinceUpdate}s ago`
+      : `${Math.floor(secondsSinceUpdate/60)}m ago`;
+  }
+}, 1000);
+
+// Session timer
+setInterval(() => {
+  if (state.isExpired) return;
+  state.sessionSec++;
+  const m = String(Math.floor(state.sessionSec / 60)).padStart(2,'0');
+  const s = String(state.sessionSec % 60).padStart(2,'0');
+  const el = document.getElementById('session-timer');
+  if (el) el.textContent = `${m}:${s}`;
+}, 1000);
+
+// =============================================================================
+// EXPIRE
+// =============================================================================
+function markSessionExpired() {
+  state.isExpired = true;
+
+  // Show the full-page blur modal — this is the ONLY thing the user needs to see.
+  // The modal sits on top of everything; the blurred page content stays underneath
+  // but is not interactive.
+  document.getElementById('session-ended-modal').classList.add('show');
+
+  // Keep the live-badge updated in the background (visible through blur)
+  const badge = document.getElementById('live-badge');
+  if (badge) {
+    badge.style.background  = 'rgba(255,59,92,.10)';
+    badge.style.borderColor = 'rgba(255,59,92,.25)';
+    badge.style.color       = 'var(--red)';
+  }
+  const dot = document.getElementById('live-dot');
+  if (dot) dot.style.background = 'var(--red)';
+  const pulse = document.getElementById('avatar-pulse');
+  if (pulse) pulse.style.display = 'none';
+}
+
+// =============================================================================
+// CLOSE SESSION PAGE
+// Tries window.close() first (works when the tab was opened by a script or
+// deep-link). If the browser blocks it, falls back to humrah.in home page.
+// =============================================================================
+function closeSessionPage() {
+  // Attempt native close
+  window.close();
+  // Some browsers block window.close() for tabs the user opened directly.
+  // After 400 ms, if we're still here, navigate away instead.
+  setTimeout(function() {
+    try { window.location.replace('https://humrah.in'); }
+    catch(e) { window.location.href = 'https://humrah.in'; }
+  }, 400);
+}
+
+// =============================================================================
+// POLLING — every 20 seconds
+// =============================================================================
+const POLL_INTERVAL_MS = 5_000;   // 5 s — fast enough to detect stop within one cycle
+
+async function trackingTick() {
+  if (state.isExpired) return;
+  try {
+    const data = await fetchLiveLocation(SESSION_ID);
+    if (data.isExpired) { markSessionExpired(); return; }
+    if (data.lat != null) {
+      if (!mapInited) initMap(data.lat, data.lng);
+      moveMarkerSmooth(data.lat, data.lng);
+      if (accuracyCircle && data.accuracy != null) {
+        accuracyCircle.setRadius(Math.max(data.accuracy * 3, 20));
+      }
+    }
+    updateUI(data);
+    secondsSinceUpdate = 0;
+    document.getElementById('error-state').classList.remove('show');
+  } catch(e) {
+    console.warn('Location fetch error:', e);
+  }
+}
+
+// =============================================================================
+// BUTTON ACTIONS
+// =============================================================================
+function copyCoords() {
+  if (state.lat == null) return;
+  const str = `${state.lat.toFixed(6)}, ${state.lng.toFixed(6)}`;
+  navigator.clipboard?.writeText(str).catch(() => {});
+  showToast('✓ Coordinates copied');
+}
+
+function refreshLocation() {
+  const icon = document.getElementById('refresh-icon');
+  icon.style.animation = 'spin .6s linear 2';
+  setTimeout(() => { icon.style.animation = ''; }, 1200);
+  trackingTick();
+}
+
+function retryConnection() {
+  document.getElementById('error-state').classList.remove('show');
+  init();
+}
+
+document.getElementById('recenter-btn').addEventListener('click', () => {
+  if (state.lat != null) map?.flyTo([state.lat, state.lng], 15, { duration: 1.2 });
+});
+
+// =============================================================================
+// TOAST
+// =============================================================================
+let toastTimer;
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 2200);
+}
+
+// =============================================================================
+// INIT
+// =============================================================================
+async function init() {
+  if (!SESSION_ID) {
+    document.getElementById('error-state').classList.add('show');
+    document.querySelector('.error-title').textContent = 'Invalid tracking link';
+    document.querySelector('.error-sub').textContent   = 'No session ID was found in the URL.';
+    return;
+  }
+  try {
+    const data = await fetchLiveLocation(SESSION_ID);
+    if (data.lat != null) initMap(data.lat, data.lng);
+
+    if (data.isExpired) {
+      updateUI(data);
+      markSessionExpired();
+      return;
+    }
+
+    if (data.lat != null) moveMarkerSmooth(data.lat, data.lng);
+    updateUI(data);
+    setInterval(trackingTick, POLL_INTERVAL_MS);
+  } catch(e) {
+    console.error('Init error:', e);
+    document.getElementById('error-state').classList.add('show');
+  }
+}
+
+// Boot
+window.addEventListener('load', () => {
+  setTimeout(() => {
+    const ls = document.getElementById('loading-screen');
+    const pg = document.getElementById('main-page');
+    ls.classList.add('hide');
+    setTimeout(() => { ls.style.display = 'none'; }, 500);
+    pg.style.opacity = '1';
+    init();
+  }, 1200);
+});
+
+// Dev shortcut: press E → expired, M → emergency toggle
+document.addEventListener('keydown', e => {
+  if (e.key === 'e' || e.key === 'E') markSessionExpired();
+  if (e.key === 'm' || e.key === 'M') activateEmergencyMode('Test User');
+});
+</script>
+</body>
+</html>

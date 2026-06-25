@@ -527,6 +527,7 @@ app.use('/api/safety-tools',      authenticate, enforceLegalAcceptance, safetyTo
 app.use('/api/safety-tickets',    authenticate, enforceLegalAcceptance, safetyTicketRoutes); // ✅ Phase 2
 app.use('/api/live-location',     authenticate, enforceLegalAcceptance, require('./routes/liveLocationRoutes'));
 app.use('/api',                   authenticate, enforceLegalAcceptance, require('./routes/moderation_route'));
+app.use('/api/official-events',   authenticate, enforceLegalAcceptance, require('./routes/officialEvents')); // ✅ Official Events Management System
 
 // ✅ NEW: Live location for matchmaking — POST /api/users/matchmaking-location
 //         Separate from safety live-location. Updates liveLocation on User doc.
