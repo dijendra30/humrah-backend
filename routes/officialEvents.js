@@ -109,6 +109,135 @@ router.get('/feed', auth, async (req, res) => {
   }
 });
 
+router.get('/explore', auth, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId).lean();
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    const now = new Date();
+    const searchQuery = req.query.q ? req.query.q.trim() : null;
+
+    // Base query for active, published events
+    let query = {
+      status: 'Published',
+      $or: [
+        { expiresAt: { $exists: false } },
+        { expiresAt: null },
+        { expiresAt: { $gt: now } }
+      ]
+    };
+
+    if (searchQuery) {
+      query.$and = query.$and || [];
+      query.$and.push({
+        $or: [
+          { title: { $regex: searchQuery, $options: 'i' } },
+          { category: { $regex: searchQuery, $options: 'i' } },
+          { description: { $regex: searchQuery, $options: 'i' } },
+          { venueName: { $regex: searchQuery, $options: 'i' } }
+        ]
+      });
+    }
+
+    // --- ENFORCE VISIBILITY ---
+    if (user.photoVerificationStatus !== 'approved') {
+      query.visibility = 'All Users';
+    }
+
+    // --- ENFORCE AUDIENCE ---
+    let audienceConditions = [{ targetAudience: 'All Users' }];
+    
+    if (user.photoVerificationStatus === 'approved') {
+      audienceConditions.push({ targetAudience: 'Verified Users Only' });
+      if (user.isCompanion || user.companionStatus === 'approved') {
+        audienceConditions.push({ targetAudience: 'Hosts Only' });
+      }
+    }
+
+    const customFilterCondition = {
+      targetAudience: 'Custom Filter',
+      'customFilters.minProfileCompletion': { $lte: user.profileCompletion || 0 }
+    };
+    
+    if (user.questionnaire?.age) {
+      const age = user.questionnaire.age;
+      let ageMatch = [];
+      if (age >= 18 && age <= 24) ageMatch.push('18-24');
+      if (age >= 25 && age <= 30) ageMatch.push('25-30');
+      if (age > 30) ageMatch.push('30+');
+      ageMatch.push('Any');
+      customFilterCondition['customFilters.ageRange'] = { $in: ageMatch };
+    }
+
+    if (user.questionnaire?.gender) {
+      customFilterCondition['customFilters.gender'] = { $in: [user.questionnaire.gender, 'Everyone'] };
+    }
+
+    audienceConditions.push(customFilterCondition);
+    query.$or = [{ $or: query.$or }, { $or: audienceConditions }];
+
+    // --- ENFORCE GEOGRAPHY ---
+    const userState = user.questionnaire?.state || user.state;
+    const userCity = user.questionnaire?.city || user.city;
+    
+    query['$and'] = query['$and'] || [];
+    query['$and'].push(
+      { $or: query.$or.shift() }, // The expiresAt constraint
+      { $or: query.$or.shift() }, // The audience constraint
+      {
+        $or: [
+          { 'geographicTargeting.level': 'Entire India' },
+          { 
+            'geographicTargeting.level': 'State', 
+            'geographicTargeting.state': userState 
+          },
+          { 
+            'geographicTargeting.level': 'District', 
+            'geographicTargeting.state': userState,
+            'geographicTargeting.district': userCity 
+          }
+        ]
+      }
+    );
+    delete query.$or;
+
+    // Fetch all allowed events
+    const allAllowedEvents = await OfficialEvent.find(query).lean();
+
+    // Grouping
+    const featured = [];
+    const trending = [];
+    const nearYou = [];
+    const upcoming = [];
+    const allEvents = [];
+
+    // Separate loop for organizing to avoid multiple DB hits
+    const sortedByDate = [...allAllowedEvents].sort((a, b) => new Date(a.date) - new Date(b.date));
+    const sortedByPopularity = [...allAllowedEvents].sort((a, b) => (b.joinedCount + b.viewsCount) - (a.joinedCount + a.viewsCount));
+
+    allAllowedEvents.forEach(evt => {
+      allEvents.push(evt);
+      if (evt.featureOnExplore) featured.push(evt);
+      
+      const isLocal = evt.geographicTargeting?.level === 'State' && evt.geographicTargeting?.state === userState ||
+                      evt.geographicTargeting?.level === 'District' && evt.geographicTargeting?.district === userCity;
+      if (isLocal) nearYou.push(evt);
+    });
+
+    res.json({
+      success: true,
+      featured: featured.slice(0, 10),
+      trending: sortedByPopularity.slice(0, 15),
+      nearYou: nearYou.slice(0, 15),
+      upcoming: sortedByDate.slice(0, 20),
+      allEvents: allEvents // Could be paginated later, limit 50 for now
+    });
+  } catch (error) {
+    console.error('Fetch explore error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 router.post('/:id/view', auth, async (req, res) => {
   try {
     await OfficialEvent.findByIdAndUpdate(req.params.id, { $inc: { viewsCount: 1 } });
