@@ -33,7 +33,7 @@ router.get('/autocomplete', async (req, res) => {
     const cached = getFromCache(autocompleteCache, cacheKey);
     if (cached) return res.json(cached);
 
-    const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+    const apiKey = process.env.GOOGLE_PLACES_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
     if (!apiKey) return res.status(500).json({ error: 'Google API key not configured' });
 
     const url = `https://maps.googleapis.com/maps/api/place/autocomplete/json`;
@@ -45,6 +45,11 @@ router.get('/autocomplete', async (req, res) => {
         types: 'establishment|geocode'
       }
     });
+
+    if (response.data.status !== 'OK' && response.data.status !== 'ZERO_RESULTS') {
+      console.error('Google Places API Error:', response.data.status, response.data.error_message);
+      return res.status(500).json({ error: response.data.error_message || 'Google API Error' });
+    }
 
     const results = (response.data.predictions || []).map(p => ({
       placeId: p.place_id,
@@ -68,7 +73,7 @@ router.get('/details', async (req, res) => {
     const cached = getFromCache(detailsCache, placeId);
     if (cached) return res.json(cached);
 
-    const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+    const apiKey = process.env.GOOGLE_PLACES_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
     if (!apiKey) return res.status(500).json({ error: 'Google API key not configured' });
 
     const url = `https://maps.googleapis.com/maps/api/place/details/json`;
@@ -79,6 +84,11 @@ router.get('/details', async (req, res) => {
         fields: 'name,formatted_address,geometry,address_components'
       }
     });
+
+    if (response.data.status !== 'OK' && response.data.status !== 'ZERO_RESULTS') {
+      console.error('Google Places API Error:', response.data.status, response.data.error_message);
+      return res.status(500).json({ error: response.data.error_message || 'Google API Error' });
+    }
 
     const result = response.data.result;
     if (!result) return res.status(404).json({ error: 'Place not found' });
