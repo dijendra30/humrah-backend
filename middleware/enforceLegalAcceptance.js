@@ -62,6 +62,11 @@ const enforceLegalAcceptance = async (req, res, next) => {
       });
     }
 
+    // Admins are exempt from user-facing legal acceptance checks
+    if (['SUPER_ADMIN', 'ADMIN', 'SAFETY_ADMIN', 'admin', 'moderator'].includes(req.user.role)) {
+      return next();
+    }
+
     const hasAccepted = await req.user.hasAcceptedCurrentLegal();
 
     if (!hasAccepted) {
@@ -135,6 +140,11 @@ const enforceCommunityAcceptance = (req, res, next) => {
         success: false,
         message: 'Authentication required'
       });
+    }
+
+    // Admins are exempt from user-facing community acceptance checks
+    if (['SUPER_ADMIN', 'ADMIN', 'SAFETY_ADMIN', 'admin', 'moderator'].includes(req.user.role)) {
+      return next();
     }
 
     const currentVersion = process.env.COMMUNITY_GUIDELINES_VERSION || '1.0';
