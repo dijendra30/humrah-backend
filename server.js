@@ -513,6 +513,7 @@ app.use('/api/admin',             authenticate, require('./routes/admin'));
 app.use('/api/admin-dashboard',   authenticate, require('./routes/adminDashboard'));
 app.use('/api/admin-analytics',   authenticate, require('./routes/adminAnalytics'));
 app.use('/api/moderation',        authenticate, adminOnly, moderationRoutes);
+app.use('/api/admin/places',      authenticate, adminOnly, require('./routes/adminPlaces')); // ✅ Google Places API
 app.use('/api/agora',             authenticate, enforceLegalAcceptance, require('./routes/agora'));
 app.use('/api/voice-call',        authenticate, enforceLegalAcceptance, require('./routes/voice-call'));
 app.use('/api/activity',          authenticate, enforceLegalAcceptance, activityRoutes);
@@ -527,7 +528,6 @@ app.use('/api/safety-tools',      authenticate, enforceLegalAcceptance, safetyTo
 app.use('/api/safety-tickets',    authenticate, enforceLegalAcceptance, safetyTicketRoutes); // ✅ Phase 2
 app.use('/api/live-location',     authenticate, enforceLegalAcceptance, require('./routes/liveLocationRoutes'));
 app.use('/api',                   authenticate, enforceLegalAcceptance, require('./routes/moderation_route'));
-app.use('/api/admin/places',      authenticate, adminOnly, require('./routes/adminPlaces')); // ✅ Google Places API
 app.use('/api/official-events',   authenticate, enforceLegalAcceptance, require('./routes/officialEvents')); // ✅ Official Events Management System
 
 // ✅ NEW: Live location for matchmaking — POST /api/users/matchmaking-location
