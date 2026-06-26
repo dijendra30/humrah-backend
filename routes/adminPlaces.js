@@ -27,39 +27,41 @@ function setToCache(cache, key, data, ttl) {
 router.get('/autocomplete', async (req, res) => {
   try {
     const query = req.query.q?.trim();
-    if (!query) return res.json([]);
+    console.log("[Places Autocomplete] Query:", query);
+    
+    if (!query) return res.json({ predictions: [] });
 
     const cacheKey = query.toLowerCase();
     const cached = getFromCache(autocompleteCache, cacheKey);
     if (cached) return res.json(cached);
 
-    const apiKey = process.env.ADMIN_PLACE_API || process.env.GOOGLE_PLACES_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: 'Google API key not configured' });
+    const GOOGLE_API_KEY = process.env.ADMIN_PLACE_API;
+    console.log("[Places Autocomplete] API key exists:", !!GOOGLE_API_KEY);
+    
+    if (!GOOGLE_API_KEY) return res.status(500).json({ error: 'Google API key not configured' });
 
-    const url = `https://maps.googleapis.com/maps/api/place/autocomplete/json`;
-    const response = await axios.get(url, {
-      params: {
-        input: query,
-        key: apiKey,
-        components: 'country:in',
-        types: 'establishment|geocode'
+    const url = `https://places.googleapis.com/v1/places:autocomplete`;
+    const response = await axios.post(url, {
+      input: query,
+      includedRegionCodes: ["in"]
+    }, {
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': GOOGLE_API_KEY
       }
     });
 
-    if (response.data.status !== 'OK' && response.data.status !== 'ZERO_RESULTS') {
-      console.error('Google Places API Error:', response.data.status, response.data.error_message);
-      return res.status(500).json({ error: response.data.error_message || 'Google API Error' });
-    }
+    const suggestions = response.data.suggestions || [];
+    const predictions = suggestions.map(s => ({
+      placeId: s.placePrediction?.placeId,
+      description: s.placePrediction?.text?.text
+    })).filter(p => p.placeId);
 
-    const results = (response.data.predictions || []).map(p => ({
-      placeId: p.place_id,
-      description: p.description
-    }));
-
-    setToCache(autocompleteCache, cacheKey, results, AUTOCOMPLETE_TTL);
-    res.json(results);
+    const resultPayload = { predictions };
+    setToCache(autocompleteCache, cacheKey, resultPayload, AUTOCOMPLETE_TTL);
+    res.json(resultPayload);
   } catch (error) {
-    console.error('Places Autocomplete Error:', error.message);
+    console.error("[Places Autocomplete]", error.response?.data || error);
     res.status(500).json({ error: 'Failed to fetch places autocomplete' });
   }
 });
@@ -73,28 +75,23 @@ router.get('/details', async (req, res) => {
     const cached = getFromCache(detailsCache, placeId);
     if (cached) return res.json(cached);
 
-    const apiKey = process.env.ADMIN_PLACE_API || process.env.GOOGLE_PLACES_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: 'Google API key not configured' });
+    const GOOGLE_API_KEY = process.env.ADMIN_PLACE_API;
+    console.log("[Place Details] API key exists:", !!GOOGLE_API_KEY);
+    if (!GOOGLE_API_KEY) return res.status(500).json({ error: 'Google API key not configured' });
 
-    const url = `https://maps.googleapis.com/maps/api/place/details/json`;
+    const url = `https://places.googleapis.com/v1/places/${placeId}`;
     const response = await axios.get(url, {
-      params: {
-        place_id: placeId,
-        key: apiKey,
-        fields: 'name,formatted_address,geometry,address_components'
+      headers: {
+        'X-Goog-Api-Key': GOOGLE_API_KEY,
+        'X-Goog-FieldMask': 'id,displayName,formattedAddress,addressComponents,location'
       }
     });
 
-    if (response.data.status !== 'OK' && response.data.status !== 'ZERO_RESULTS') {
-      console.error('Google Places API Error:', response.data.status, response.data.error_message);
-      return res.status(500).json({ error: response.data.error_message || 'Google API Error' });
-    }
+    const result = response.data;
+    if (!result || !result.id) return res.status(404).json({ error: 'Place not found' });
 
-    const result = response.data.result;
-    if (!result) return res.status(404).json({ error: 'Place not found' });
-
-    const lat = result.geometry?.location?.lat || 0;
-    const lng = result.geometry?.location?.lng || 0;
+    const lat = result.location?.latitude || 0;
+    const lng = result.location?.longitude || 0;
 
     let city = '';
     let district = '';
@@ -102,18 +99,20 @@ router.get('/details', async (req, res) => {
     let country = '';
     let pincode = '';
 
-    (result.address_components || []).forEach(c => {
-      if (c.types.includes('locality')) city = c.long_name;
-      if (c.types.includes('sublocality_level_1') && !district) district = c.long_name;
-      if (c.types.includes('administrative_area_level_1')) state = c.long_name;
-      if (c.types.includes('country')) country = c.long_name;
-      if (c.types.includes('postal_code')) pincode = c.long_name;
+    (result.addressComponents || []).forEach(c => {
+      const val = c.longText;
+      const types = c.types || [];
+      if (types.includes('locality')) city = val;
+      if ((types.includes('administrative_area_level_2') || types.includes('sublocality_level_1')) && !district) district = val;
+      if (types.includes('administrative_area_level_1')) state = val;
+      if (types.includes('country')) country = val;
+      if (types.includes('postal_code')) pincode = val;
     });
 
     const details = {
-      placeId,
-      venueName: result.name,
-      formattedAddress: result.formatted_address,
+      placeId: result.id,
+      venueName: result.displayName?.text || '',
+      formattedAddress: result.formattedAddress || '',
       city,
       district,
       state,
@@ -127,7 +126,7 @@ router.get('/details', async (req, res) => {
     setToCache(detailsCache, placeId, details, DETAILS_TTL);
     res.json(details);
   } catch (error) {
-    console.error('Places Details Error:', error.message);
+    console.error("[Place Details]", error.response?.data || error);
     res.status(500).json({ error: 'Failed to fetch place details' });
   }
 });
