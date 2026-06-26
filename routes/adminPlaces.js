@@ -33,7 +33,7 @@ router.get('/autocomplete', async (req, res) => {
     const cached = getFromCache(autocompleteCache, cacheKey);
     if (cached) return res.json(cached);
 
-    const apiKey = process.env.GOOGLE_PLACES_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
+    const apiKey = process.env.ADMIN_PLACE_API || process.env.GOOGLE_PLACES_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
     if (!apiKey) return res.status(500).json({ error: 'Google API key not configured' });
 
     const url = `https://maps.googleapis.com/maps/api/place/autocomplete/json`;
@@ -73,7 +73,7 @@ router.get('/details', async (req, res) => {
     const cached = getFromCache(detailsCache, placeId);
     if (cached) return res.json(cached);
 
-    const apiKey = process.env.GOOGLE_PLACES_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
+    const apiKey = process.env.ADMIN_PLACE_API || process.env.GOOGLE_PLACES_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
     if (!apiKey) return res.status(500).json({ error: 'Google API key not configured' });
 
     const url = `https://maps.googleapis.com/maps/api/place/details/json`;
