@@ -508,9 +508,13 @@ router.post('/admin/events', auth, adminOnly, async (req, res) => {
     if (event.status === 'Published' && body.sendNotification) {
       sendEventNotifications(event).catch(err => console.error('FCM error:', err));
     }
-  } catch (err) {
-    console.error('Create event error:', err);
-    res.status(500).json({ success: false, message: 'Server error', error: err.message });
+  } catch (error) {
+    console.error("Official Event Create Error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+      stack: process.env.NODE_ENV !== "production" ? error.stack : undefined
+    });
   }
 });
 
@@ -557,9 +561,13 @@ router.put('/admin/events/:id', auth, adminOnly, async (req, res) => {
     if (old.status !== 'Published' && updated.status === 'Published' && body.sendNotification) {
       sendEventNotifications(updated).catch(err => console.error('FCM error:', err));
     }
-  } catch (err) {
-    console.error('Update event error:', err);
-    res.status(500).json({ success: false, message: 'Server error' });
+  } catch (error) {
+    console.error("Official Event Update Error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+      stack: process.env.NODE_ENV !== "production" ? error.stack : undefined
+    });
   }
 });
 
