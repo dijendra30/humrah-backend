@@ -119,8 +119,8 @@ app.use('/api/users/upload-profile-photo-base64',      express.json({ limit: '5m
 app.use('/api/users/submit-verification-photo-base64', express.json({ limit: '5mb' }));
 app.use('/api/posts',                                  express.json({ limit: '5mb' }));
 
-app.use(express.json({ limit: '100kb' }));
-app.use(express.urlencoded({ extended: true, limit: '100kb' }));
+app.use(express.json({ limit: '25mb' }));
+app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
 app.set('io', io);
 
@@ -563,6 +563,9 @@ server.listen(PORT, HOST, () => {
   console.log(`✅ Live Location Matchmaking: POST /api/users/matchmaking-location`);
   console.log(`✅ Live Location Status:      GET  /api/users/matchmaking-location/status`);
 });
+
+// Increase server timeout to 120 seconds for large base64 Cloudinary uploads
+server.timeout = 120000;
 
 const gracefulShutdown = async (signal) => {
   console.log(`\n${signal} signal received: closing HTTP server`);
