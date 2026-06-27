@@ -501,6 +501,7 @@ app.use('/api/bookings',          authenticate, enforceLegalAcceptance, bookingR
 app.use('/api/messages',          authenticate, enforceLegalAcceptance, messageRoutes);
 app.use('/api/posts',             authenticate, enforceLegalAcceptance, postRoutes);
 app.use('/api/spotlight',         authenticate, enforceLegalAcceptance, spotlightRoutes);
+app.use('/api/home',              authenticate, enforceLegalAcceptance, require('./routes/home.route'));
 app.use('/api/safety',            authenticate, enforceLegalAcceptance, safetyReportRoutes);
 app.use('/api/profile',           authenticate, enforceLegalAcceptance, profileRoutes);
 app.use('/api/reviews',           authenticate, enforceLegalAcceptance, reviewRoutes);
