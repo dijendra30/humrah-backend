@@ -56,33 +56,45 @@ exports.sendRequest = async (req, res) => {
 
     // Realtime push to receiver
     const sender = await User.findById(senderId, 'firstName').lean();
-    const moodLabel = senderMood.mood ?? 'Vibe';
+    console.log(`[MoodReq] Request created: ${req_._id} by User ${senderId} for User ${receiverId}`);
+    
     await safePush(
       receiverId,
-      'New Mood Match Request',
+      'New Companion Request 🤝',
       `${sender?.firstName ?? 'Someone'} wants to connect with you.`,
       {
-        type:       'MOOD_REQUEST',
+        type:       'companion_request',
         requestId:  req_._id.toString(),
+        screen:     'requests',
         senderId:   senderId.toString(),
         senderName: sender?.firstName ?? 'Someone',
         mood:       senderMood.mood       ?? '',
         vibeLevel:  senderMood.vibeLevel  ?? 'normal',
       }
     );
+    console.log(`[MoodReq] FCM push sent to User ${receiverId}`);
 
     // Emit Socket.IO if io is available
     try {
       const { io } = require('../server');
-      io.to(`user:${receiverId}`).emit('mood:request', {
+      const payload = {
         requestId: req_._id.toString(),
         senderId:  senderId.toString(),
+        senderName: sender?.firstName ?? 'Someone',
         firstName: sender?.firstName ?? 'Someone',
         mood:      senderMood.mood,
         vibeLevel: senderMood.vibeLevel,
         message:   req_.message,
-      });
-    } catch {}
+      };
+      
+      io.to(`user:${receiverId}`).emit('mood:request', payload);
+      // Forward compatibility
+      io.to(`user:${receiverId}`).emit('new_companion_request', payload);
+      
+      console.log(`[MoodReq] Socket notification sent to User ${receiverId}`);
+    } catch (e) {
+      console.error('❌ [MoodReq] Socket emit failed:', e.message);
+    }
 
     return res.json({ success: true, message: 'Request sent', requestId: req_._id });
   } catch (err) {
@@ -203,16 +215,22 @@ exports.acceptRequest = async (req, res) => {
       moodReq.senderId,
       'Your vibe request was accepted! ✨',
       'Start chatting safely.',
-      { type: 'MOOD_ACCEPTED', chatRoomId: chat._id.toString() }
+      { type: 'companion_request_accepted', chatRoomId: chat._id.toString(), screen: 'chats' }
     );
+    console.log(`[MoodReq] FCM accept push sent to User ${moodReq.senderId}`);
 
     try {
       const { io } = require('../server');
-      io.to(`user:${moodReq.senderId}`).emit('mood:accepted', {
+      const payload = {
         chatRoomId: chat._id.toString(),
         requestId:  moodReq._id.toString(),
-      });
-    } catch {}
+      };
+      io.to(`user:${moodReq.senderId}`).emit('mood:accepted', payload);
+      io.to(`user:${moodReq.senderId}`).emit('request_accepted', payload);
+      console.log(`[MoodReq] Socket accept notification sent to User ${moodReq.senderId}`);
+    } catch (e) {
+      console.error('❌ [MoodReq] Socket emit accepted failed:', e.message);
+    }
 
     return res.json({ success: true, chatRoomId: chat._id, message: 'Request accepted' });
   } catch (err) {
@@ -234,20 +252,26 @@ exports.declineRequest = async (req, res) => {
 
     if (!moodReq) return res.status(404).json({ success: false, message: 'Request not found' });
 
+    console.log(`[MoodReq] Request declined: ${requestId} by User ${req.userId}`);
+
     // Soft decline notification to sender
     await safePush(
       moodReq.senderId,
-      'Your vibe request was declined.',
-      'More people nearby are waiting ✨',
-      { type: 'MOOD_DECLINED' }
+      'Update on your request',
+      'The user is currently unavailable. Explore other vibes nearby!',
+      { type: 'companion_request_declined', requestId: moodReq._id.toString(), screen: 'requests' }
     );
+    console.log(`[MoodReq] FCM decline push sent to User ${moodReq.senderId}`);
 
     try {
       const { io } = require('../server');
-      io.to(`user:${moodReq.senderId}`).emit('mood:declined', {
-        requestId: moodReq._id.toString(),
-      });
-    } catch {}
+      const payload = { requestId: moodReq._id.toString() };
+      io.to(`user:${moodReq.senderId}`).emit('mood:declined', payload);
+      io.to(`user:${moodReq.senderId}`).emit('request_declined', payload);
+      console.log(`[MoodReq] Socket decline notification sent to User ${moodReq.senderId}`);
+    } catch (e) {
+      console.error('❌ [MoodReq] Socket emit declined failed:', e.message);
+    }
 
     return res.json({ success: true, message: 'Request declined' });
   } catch (err) {
