@@ -23,6 +23,18 @@ cron.schedule('* * * * *', async () => {
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
+// EVERY 5 MINUTES — Official Events: auto-publish Scheduled, auto-expire old
+// ══════════════════════════════════════════════════════════════════════════════
+cron.schedule('*/5 * * * *', async () => {
+  try {
+    const { runOfficialEventsCron } = require('./cronJobs/officialEventsCron');
+    await runOfficialEventsCron();
+  } catch (err) {
+    console.error('[CRON] Official Events tick error:', err.message);
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
 // EVERY HOUR — general cleanup
 // ══════════════════════════════════════════════════════════════════════════════
 cron.schedule('0 * * * *', async () => {
@@ -44,6 +56,30 @@ cron.schedule('0 * * * *', async () => {
     // 4. Auto-expire Safety Tickets
     const { checkExpiry: checkSafetyExpiry } = require('./cronJobs/safetyTicketExpiry');
     await checkSafetyExpiry();
+
+    // 5. Clean orphan letter data (replies, reactions, reports)
+    try {
+      const LetterReply = require('./models/LetterReply');
+      const LetterReaction = require('./models/LetterReaction');
+      const LetterReport = require('./models/LetterReport');
+      const Letter = require('./models/Letter');
+      
+      const activeLetters = await Letter.find({}, '_id').lean();
+      const existingLetterIds = activeLetters.map(l => l._id);
+
+      const [repliesRes, reactionsRes, reportsRes] = await Promise.all([
+        LetterReply.deleteMany({ letterId: { $nin: existingLetterIds } }),
+        LetterReaction.deleteMany({ letterId: { $nin: existingLetterIds } }),
+        LetterReport.deleteMany({ letterId: { $nin: existingLetterIds } })
+      ]);
+
+      console.log('🧹 [Letters Cleanup]');
+      console.log(`   Deleted orphan replies: ${repliesRes.deletedCount}`);
+      console.log(`   Deleted orphan reactions: ${reactionsRes.deletedCount}`);
+      console.log(`   Deleted orphan reports: ${reportsRes.deletedCount}`);
+    } catch (err) {
+      console.error('[CRON] Letters orphan cleanup error:', err.message);
+    }
 
     console.log('✨ [CRON] Hourly cleanup complete\n');
   } catch (err) {
@@ -77,6 +113,16 @@ cron.schedule('0 0 * * *', async () => {
     console.log(`   Weekly users:              ${weeklyStats.totalUsers}`);
     console.log(`   Weekly bookings:           ${weeklyStats.totalBookings}`);
     console.log('---------------------------------------------------\n');
+    
+    // Humrah Letters Daily Analytics
+    try {
+      console.log('📊 [CRON] Humrah Letters Analytics');
+      const { runDailyAnalytics } = require('./utils/analyticsHelper');
+      await runDailyAnalytics();
+    } catch (err) {
+      console.error('❌ [CRON] Humrah Letters Analytics error:', err);
+    }
+    
   } catch (err) {
     console.error('❌ [CRON] Stats error:', err);
   }
@@ -84,6 +130,7 @@ cron.schedule('0 0 * * *', async () => {
 
 console.log('🤖 Cron jobs initialised');
 console.log('   • Reservation expiry tick: every minute');
+console.log('   • Official Events tick:    every 5 minutes');
 console.log('   • General cleanup:         every hour');
 console.log('   • Stats report:            daily at midnight\n');
 
