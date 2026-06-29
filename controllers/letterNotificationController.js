@@ -4,38 +4,26 @@
 // PATCH /api/letters/activity/read-all → mark every notification read
 // PATCH /api/letters/activity/:id/read → mark single notification read
 
-const LetterNotification = require('../models/LetterNotification');
+const notificationsService = require('../services/notifications.service');
+
+// ── GET /api/letters/activity/unread-count ────────────────────────────────────
+
+exports.getUnreadCount = async (req, res) => {
+  try {
+    const data = await notificationsService.getUnreadCount(req.userId);
+    return res.status(200).json({ success: true, ...data });
+  } catch (err) {
+    console.error('[letterNotif] getUnreadCount error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to fetch unread count' });
+  }
+};
 
 // ── GET /api/letters/activity ─────────────────────────────────────────────────
 
 exports.getActivity = async (req, res) => {
   try {
-    const userId = req.userId;
-
-    const notifications = await LetterNotification.find({ recipientId: userId })
-      .sort({ createdAt: -1 })
-      .limit(60)
-      .lean();
-
-    // Build summary counters (aggregate across all notifications, not just unread)
-    const summary = { comfortCount: 0, warmthCount: 0, noteCount: 0 };
-    const formatted = notifications.map(n => {
-      if (n.type === 'comfort') summary.comfortCount += n.count;
-      if (n.type === 'warmth')  summary.warmthCount  += n.count;
-      if (n.type === 'note')    summary.noteCount    += n.count;
-
-      return {
-        _id:      n._id,
-        letterId: n.letterId,
-        type:     n.type,
-        preview:  n.preview,
-        count:    n.count,
-        isRead:   n.isRead,
-        createdAt: n.createdAt
-      };
-    });
-
-    return res.status(200).json({ success: true, notifications: formatted, summary });
+    const data = await notificationsService.getActivitySummaryAndList(req.userId);
+    return res.status(200).json({ success: true, ...data });
   } catch (err) {
     console.error('[letterNotif] getActivity error:', err);
     return res.status(500).json({ success: false, message: 'Failed to fetch activity' });
@@ -46,10 +34,7 @@ exports.getActivity = async (req, res) => {
 
 exports.markAllRead = async (req, res) => {
   try {
-    await LetterNotification.updateMany(
-      { recipientId: req.userId, isRead: false },
-      { $set: { isRead: true } }
-    );
+    await notificationsService.markAllRead(req.userId);
     return res.status(200).json({ success: true, message: 'All notifications marked as read' });
   } catch (err) {
     console.error('[letterNotif] markAllRead error:', err);
@@ -61,12 +46,8 @@ exports.markAllRead = async (req, res) => {
 
 exports.markRead = async (req, res) => {
   try {
-    const doc = await LetterNotification.findOneAndUpdate(
-      { _id: req.params.id, recipientId: req.userId },
-      { $set: { isRead: true } },
-      { new: true }
-    );
-    if (!doc) {
+    const success = await notificationsService.markRead(req.userId, req.params.id);
+    if (!success) {
       return res.status(404).json({ success: false, message: 'Notification not found' });
     }
     return res.status(200).json({ success: true });

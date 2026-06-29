@@ -87,7 +87,20 @@ class LettersController {
       return res.status(500).json({ success: false, message: 'Failed to fetch letter details' });
     }
   }
+  async getMyLetters(req, res) {
+    try {
+      const userId = req.userId;
+      const data = await lettersService.getMyLetters(userId);
 
+      return res.status(200).json({
+        success: true,
+        ...data
+      });
+    } catch (error) {
+      console.error('Error in getMyLetters:', error);
+      return res.status(500).json({ success: false, message: 'Failed to fetch your letters' });
+    }
+  }
   async createReply(req, res) {
     try {
       const { id } = req.params;
@@ -127,6 +140,12 @@ class LettersController {
         reply
       });
     } catch (error) {
+      if (error.message === 'SelfInteractionNotAllowed') {
+        return res.status(403).json({ success: false, message: 'You cannot interact with your own letter.' });
+      }
+      if (error.message === 'LetterNotFound') {
+        return res.status(404).json({ success: false, message: 'Letter not found or no longer active' });
+      }
       console.error('Error in createReply:', error);
       return res.status(500).json({ success: false, message: 'Failed to reply to letter' });
     }
@@ -158,6 +177,12 @@ class LettersController {
         result
       });
     } catch (error) {
+      if (error.message === 'SelfInteractionNotAllowed') {
+        return res.status(403).json({ success: false, message: 'You cannot interact with your own letter.' });
+      }
+      if (error.message === 'LetterNotFound') {
+        return res.status(404).json({ success: false, message: 'Letter not found or no longer active' });
+      }
       console.error('Error in reactToLetter:', error);
       return res.status(500).json({ success: false, message: 'Failed to react to letter' });
     }
