@@ -56,6 +56,9 @@ class LettersController {
 
       const feed = await lettersService.getFeed(page, limit, category, search, sort);
 
+      console.log("Letters found:", feed.letters.length);
+      console.log(feed.letters);
+
       return res.status(200).json({
         success: true,
         ...feed
