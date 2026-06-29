@@ -357,6 +357,7 @@ exports.sendMessage = async (req, res) => {
             chatType:        'MOOD',
             senderName:      sender?.firstName ?? 'Someone',
             senderPhotoUrl:  sender?.profilePhoto ?? '',
+            senderId:        req.userId.toString(),
             messageText:     msg.text.substring(0, 100),
             messageId:       msgId,
             recipientUserId: otherId.toString(),
