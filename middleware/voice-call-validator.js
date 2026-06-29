@@ -13,12 +13,33 @@ async function validateCallEligibility(callerId, receiverId, bookingId) {
   const errors = [];
   
   // ==================== 1. FETCH REQUIRED DATA ====================
-  const [caller, receiver, booking, chat] = await Promise.all([
+  let [caller, receiver, booking, chat] = await Promise.all([
     User.findById(callerId),
     User.findById(receiverId),
     RandomBooking.findById(bookingId),
     RandomBookingChat.findOne({ bookingId, isDeleted: false })
   ]);
+  
+  // ✅ FIX: Allow MoodChat (Matching Today Mood) to be used as a booking for voice calls
+  if (!booking && !chat) {
+    const MoodChat = require('../models/MoodChat');
+    const moodChat = await MoodChat.findById(bookingId);
+    if (moodChat && moodChat.active) {
+      booking = {
+        _id: moodChat._id,
+        status: 'MATCHED',
+        initiatorId: moodChat.users[0] || null,
+        acceptorId: moodChat.users[1] || null
+      };
+      chat = {
+        _id: moodChat._id,
+        isExpired: () => {
+          if (!moodChat.expiresAt) return false;
+          return new Date() > moodChat.expiresAt;
+        }
+      };
+    }
+  }
   
   // ==================== 2. VALIDATE EXISTENCE ====================
   if (!caller) {
