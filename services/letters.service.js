@@ -4,7 +4,7 @@ const repliesRepo = require('../repositories/replies.repository');
 const reactionsRepo = require('../repositories/reactions.repository');
 const moderationService = require('./moderation.service');
 const { generateLocationLabel } = require('../utils/locationLabelGenerator');
-const LetterNotification = require('../models/LetterNotification');
+const notificationsService = require('./notifications.service');
 
 class LettersService {
   
@@ -44,7 +44,7 @@ class LettersService {
   }
 
   async getFeed(page = 1, limit = 20, category = null, search = null, sortType = 'new') {
-    const query = { status: 'active' };
+    const query = { status: 'active', expiresAt: { $gt: new Date() } };
     
     if (category) {
       query.category = category;
@@ -94,6 +94,14 @@ class LettersService {
   }
 
   async createReply(userId, letterId, body) {
+    const letter = await lettersRepo.findById(letterId);
+    if (!letter) {
+      throw new Error('LetterNotFound');
+    }
+    if (letter.author.toString() === userId.toString()) {
+      throw new Error('SelfInteractionNotAllowed');
+    }
+
     const modResult = moderationService.moderateText(body);
     
     const replyData = {
@@ -107,34 +115,26 @@ class LettersService {
     const reply = await repliesRepo.create(replyData);
     
     if (modResult.safe) {
-      // Increment reply count and engagement score on the letter (reply = +3)
+      // Increment reply count and engagement score on the letter (reply = +4)
       await lettersRepo.incrementStat(letterId, 'replyCount', 1);
-      await lettersRepo.incrementStat(letterId, 'engagementScore', 3);
+      await lettersRepo.incrementStat(letterId, 'engagementScore', 4);
 
-      // ── Notify letter author about the new note (skip self-notes) ──
-      try {
-        const letter = await lettersRepo.findById(letterId);
-        if (letter && letter.author.toString() !== userId.toString()) {
-          await LetterNotification.findOneAndUpdate(
-            { recipientId: letter.author, letterId, type: 'note' },
-            {
-              $inc:        { count: 1 },
-              $set:        { isRead: false, preview: body.substring(0, 100) },
-              $setOnInsert: { recipientId: letter.author, letterId, type: 'note' }
-            },
-            { upsert: true }
-          );
-        }
-      } catch (notifErr) {
-        // Non-fatal — notification failure must never block the reply response
-        console.error('[letters.service] reply notification error:', notifErr.message);
-      }
+      // Notify letter author about the new note
+      await notificationsService.notifyNewNote(letter.author, letterId, body);
     }
     
     return this._anonymizeReply(reply);
   }
 
   async toggleReaction(userId, letterId, type) {
+    const letter = await lettersRepo.findById(letterId);
+    if (!letter) {
+      throw new Error('LetterNotFound');
+    }
+    if (letter.author.toString() === userId.toString()) {
+      throw new Error('SelfInteractionNotAllowed');
+    }
+
     // Check if exists
     const existing = await reactionsRepo.findByUserAndLetter(userId, letterId);
     
@@ -143,50 +143,58 @@ class LettersService {
         // Same type, remove it
         await reactionsRepo.delete(userId, letterId);
         const statField = type === 'helped' ? 'comfortCount' : 'supportCount';
+        const scoreChange = type === 'helped' ? -3 : -2;
         await lettersRepo.incrementStat(letterId, statField, -1);
-        await lettersRepo.incrementStat(letterId, 'engagementScore', -2); // Reaction = +2
+        await lettersRepo.incrementStat(letterId, 'engagementScore', scoreChange);
         return { added: false, type };
       } else {
-        // Different type, we ignore or switch? Let's assume they can only have one, so we switch
+        // Different type, switch it
         await reactionsRepo.delete(userId, letterId);
         const oldStatField = existing.type === 'helped' ? 'comfortCount' : 'supportCount';
+        const oldScoreChange = existing.type === 'helped' ? -3 : -2;
         await lettersRepo.incrementStat(letterId, oldStatField, -1);
-        await lettersRepo.incrementStat(letterId, 'engagementScore', -2); // Removing old
+        await lettersRepo.incrementStat(letterId, 'engagementScore', oldScoreChange);
         
         await reactionsRepo.create({ userId, letterId, type });
         const newStatField = type === 'helped' ? 'comfortCount' : 'supportCount';
+        const newScoreChange = type === 'helped' ? 3 : 2;
         await lettersRepo.incrementStat(letterId, newStatField, 1);
-        await lettersRepo.incrementStat(letterId, 'engagementScore', 2); // Adding new
+        await lettersRepo.incrementStat(letterId, 'engagementScore', newScoreChange);
         return { added: true, type };
       }
     } else {
       // Add new
       await reactionsRepo.create({ userId, letterId, type });
       const statField = type === 'helped' ? 'comfortCount' : 'supportCount';
+      const scoreChange = type === 'helped' ? 3 : 2;
       await lettersRepo.incrementStat(letterId, statField, 1);
-      await lettersRepo.incrementStat(letterId, 'engagementScore', 2); // Adding new
+      await lettersRepo.incrementStat(letterId, 'engagementScore', scoreChange);
 
-      // ── Notify letter author (skip self-reactions) ──
-      try {
-        const letter = await lettersRepo.findById(letterId);
-        if (letter && letter.author.toString() !== userId.toString()) {
-          const notifType = type === 'helped' ? 'comfort' : 'warmth';
-          await LetterNotification.findOneAndUpdate(
-            { recipientId: letter.author, letterId, type: notifType },
-            {
-              $inc:        { count: 1 },
-              $set:        { isRead: false },
-              $setOnInsert: { recipientId: letter.author, letterId, type: notifType }
-            },
-            { upsert: true }
-          );
-        }
-      } catch (notifErr) {
-        console.error('[letters.service] reaction notification error:', notifErr.message);
-      }
+      const notifType = type === 'helped' ? 'comfort' : 'warmth';
+      await notificationsService.notifyNewReaction(letter.author, letterId, notifType);
 
       return { added: true, type };
     }
+  }
+
+  async getMyLetters(userId) {
+    const letters = await lettersRepo.findMyLetters(userId);
+    const now = new Date();
+    
+    const activeLetters = [];
+    const archivedLetters = [];
+
+    letters.forEach(letter => {
+      const anonymized = this._anonymizeLetter(letter);
+      anonymized.isMine = true;
+      if (new Date(letter.expiresAt) > now) {
+        activeLetters.push(anonymized);
+      } else {
+        archivedLetters.push(anonymized);
+      }
+    });
+
+    return { activeLetters, archivedLetters };
   }
 
   _anonymizeLetter(letter) {
