@@ -39,6 +39,14 @@ const letterNotificationSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
       index: true
+    },
+    pendingPushCount: {
+      type: Number,
+      default: 0
+    },
+    lastPushAt: {
+      type: Date,
+      default: null
     }
   },
   { timestamps: true }
