@@ -49,12 +49,33 @@ function startMovieSessionExpiryJob() {
       }
 
       // ── STEP 3: Expire chats ─────────────────────────────────────────────
-      const chatResult = await MovieChat.updateMany(
-        { status: 'active', expiresAt: { $lte: now } },
-        { $set: { status: 'expired' } }
-      );
-      if (chatResult.modifiedCount > 0) {
-        console.log(`💬 [expiry] Expired ${chatResult.modifiedCount} chat(s)`);
+      // Find sessions whose chatExpiresAt has passed but status is still active (this could happen if chat expiry is longer than session expiry)
+      // Actually, session.status is 'expired' after showTime+15m. So we should just find sessions where chatExpiresAt < now and not yet cleaned.
+      // But wait, the spec says "Session becomes read-only after expiry." (which is showTime + 3 hours, i.e., chatExpiresAt).
+      // Let's find sessions that just passed chatExpiresAt and clean voice notes if not cleaned yet.
+      
+      const chatsToExpire = await MovieSession.find({
+        chatExpiresAt: { $lte: now },
+        voiceNotesCleaned: { $ne: true }
+      }).lean();
+
+      if (chatsToExpire.length > 0) {
+        const admin = require('firebase-admin');
+        const bucket = admin.storage().bucket('humrah-d926d.firebasestorage.app');
+        
+        for (const session of chatsToExpire) {
+          try {
+            await bucket.deleteFiles({ prefix: `voice-notes/${session._id.toString()}/` });
+          } catch (e) {
+            console.error(`[expiry] Failed to delete voice notes for ${session._id}:`, e.message);
+          }
+        }
+        
+        await MovieSession.updateMany(
+          { _id: { $in: chatsToExpire.map(s => s._id) } },
+          { $set: { voiceNotesCleaned: true } }
+        );
+        console.log(`💬 [expiry] Cleaned voice notes for ${chatsToExpire.length} session(s)`);
       }
 
       // ── STEP 4: After 8 PM IST — expire ALL today’s active sessions ────────────
