@@ -343,39 +343,92 @@ io.on('connection', (socket) => {
   socket.on('webrtc-answer',        ({ chatId, answer })    => socket.to(chatId).emit('webrtc-answer',        { from: userId, answer }));
   socket.on('webrtc-ice-candidate', ({ chatId, candidate }) => socket.to(chatId).emit('webrtc-ice-candidate', { from: userId, candidate }));
 
-  // ── Movie Session Chat rooms ──────────────────────────────────────────────
-  // Room name: "movie-chat-{chatId}"
-  // Events: join-movie-chat, leave-movie-chat, movie-send-message
-  // Emitted back: movie-new-message, movie-user-joined, movie-user-left, movie-typing
+  // ── Movie Session Chat rooms (Movie Hangout v1) ────────────────────────────────
+  // Room format: movie:{sessionId}
+  // Events: joinMovieRoom, leaveMovieRoom, typing, stopTyping, markRead
 
-  socket.on('join-movie-chat', async ({ chatId }) => {
-    if (!chatId) return;
-    socket.join(`movie-chat-${chatId}`);
-    socket.movieChatId = chatId;
+  socket.on('joinMovieRoom', async ({ sessionId }) => {
+    if (!sessionId) return;
+    const room = `movie:${sessionId}`;
+    socket.join(room);
+    socket.movieSessionId = sessionId;
 
     // Notify others in the room
-    socket.to(`movie-chat-${chatId}`).emit('movie-user-joined', {
+    socket.to(room).emit('participantJoined', {
       userId,
       userName,
-      userPhoto: socket.userPhoto,
+      userPhoto: socket.userPhoto || userInfo.get(userId)?.photo || null,
+      timestamp: new Date().toISOString()
     });
   });
 
-  socket.on('leave-movie-chat', ({ chatId }) => {
-    if (!chatId) return;
-    socket.leave(`movie-chat-${chatId}`);
-    if (socket.movieChatId === chatId) socket.movieChatId = null;
-    socket.to(`movie-chat-${chatId}`).emit('movie-user-left', { userId, userName });
+  socket.on('leaveMovieRoom', ({ sessionId }) => {
+    if (!sessionId) return;
+    const room = `movie:${sessionId}`;
+    socket.leave(room);
+    if (socket.movieSessionId === sessionId) socket.movieSessionId = null;
+    socket.to(room).emit('participantLeft', { userId, userName, timestamp: new Date().toISOString() });
   });
 
-  socket.on('movie-typing-start', ({ chatId }) => {
-    if (!chatId) return;
-    socket.to(`movie-chat-${chatId}`).emit('movie-typing', { userId, userName, isTyping: true });
+  socket.on('typing', ({ sessionId }) => {
+    if (!sessionId) return;
+    socket.to(`movie:${sessionId}`).emit('typing', { userId, userName });
   });
 
-  socket.on('movie-typing-stop', ({ chatId }) => {
-    if (!chatId) return;
-    socket.to(`movie-chat-${chatId}`).emit('movie-typing', { userId, userName, isTyping: false });
+  socket.on('stopTyping', ({ sessionId }) => {
+    if (!sessionId) return;
+    socket.to(`movie:${sessionId}`).emit('stopTyping', { userId, userName });
+  });
+
+  socket.on('markRead', async ({ sessionId, messageIds }) => {
+    if (!sessionId || !messageIds || !messageIds.length) return;
+    
+    try {
+      const { handleMarkRead } = require('./services/movieSessionService');
+      await handleMarkRead(userId, sessionId, messageIds);
+      
+      io.to(`movie:${sessionId}`).emit('messagesRead', {
+        sessionId,
+        userId,
+        messageIds,
+        readAt: new Date().toISOString()
+      });
+    } catch (err) { console.error('markRead error:', err); }
+  });
+
+  socket.on('sendMovieMessage', async (data) => {
+    try {
+      const { handleSocketMessage } = require('./services/movieSessionService');
+      await handleSocketMessage(userId, data.sessionId, data.text, data.replyTo, io);
+    } catch (err) { console.error('sendMovieMessage error:', err); }
+  });
+
+  socket.on('sendVoiceNote', async (data) => {
+    try {
+      const { handleSocketVoiceNote } = require('./services/movieSessionService');
+      await handleSocketVoiceNote(userId, data.sessionId, data.voiceUrl, data.duration, data.replyTo, io);
+    } catch (err) { console.error('sendVoiceNote error:', err); }
+  });
+
+  socket.on('reactToMessage', async (data) => {
+    try {
+      const { handleMessageReaction } = require('./services/movieSessionService');
+      await handleMessageReaction(userId, data.sessionId, data.messageId, data.reaction, io);
+    } catch (err) { console.error('reactToMessage error:', err); }
+  });
+
+  socket.on('pinMessage', async (data) => {
+    try {
+      const { handlePinMessage } = require('./services/movieSessionService');
+      await handlePinMessage(userId, data.sessionId, data.messageId, io);
+    } catch (err) { console.error('pinMessage error:', err); }
+  });
+
+  socket.on('pollVote', async (data) => {
+    try {
+      const { handlePollVote } = require('./services/movieSessionService');
+      await handlePollVote(userId, data.sessionId, data.rating, io);
+    } catch (err) { console.error('pollVote error:', err); }
   });
 
   socket.on('disconnect', () => {
