@@ -56,35 +56,11 @@ class PushService {
   }
 
   async sendWarmthNotification(userId, letterId, notificationId) {
-    const payload = {
-      notification: {
-        title: '🤗 Someone sent warmth',
-        body: 'Your letter made someone feel less alone.'
-      },
-      data: {
-        type: 'letter_activity',
-        activityType: 'warmth',
-        letterId: letterId.toString(),
-        notificationId: notificationId.toString()
-      }
-    };
-    await this.sendToUser(userId, payload);
+    // Deprecated: Warmth is now batched. This method can be removed or left empty.
   }
 
   async sendComfortNotification(userId, letterId, notificationId) {
-    const payload = {
-      notification: {
-        title: '❤️ Someone found comfort',
-        body: 'Your words helped someone today.'
-      },
-      data: {
-        type: 'letter_activity',
-        activityType: 'comfort',
-        letterId: letterId.toString(),
-        notificationId: notificationId.toString()
-      }
-    };
-    await this.sendToUser(userId, payload);
+    // Deprecated: Comfort is now batched. This method can be removed or left empty.
   }
 
   async sendNoteNotification(userId, letterId, notificationId, previewText) {
@@ -93,15 +69,43 @@ class PushService {
       : previewText;
 
     const payload = {
-      notification: {
-        title: '✉️ New note on your letter',
-        body: preview || 'Someone left a note on your letter.'
-      },
       data: {
         type: 'letter_activity',
         activityType: 'note',
+        title: '✉️ New note on your letter',
+        body: preview || 'Someone left a note on your letter.',
         letterId: letterId.toString(),
         notificationId: notificationId.toString()
+      }
+    };
+    await this.sendToUser(userId, payload);
+  }
+
+  async sendSummaryNotification(userId, letterId, comfortCount, warmthCount) {
+    const total = comfortCount + warmthCount;
+    if (total === 0) return;
+
+    let bodyParts = [];
+    if (comfortCount > 0) bodyParts.push(`❤️ ${comfortCount} ${comfortCount === 1 ? 'person' : 'people'} found comfort`);
+    if (warmthCount > 0) bodyParts.push(`🤗 ${warmthCount} ${warmthCount === 1 ? 'person' : 'people'} sent warmth`);
+    
+    let title = total === 1 
+      ? `✨ Your letter received a new interaction` 
+      : `✨ Your letter received ${total} new interactions`;
+      
+    if (total === 1 && comfortCount === 1) title = `❤️ Someone found comfort in your letter.`;
+    if (total === 1 && warmthCount === 1) title = `🤗 Someone sent warmth to your letter.`;
+
+    const body = bodyParts.join('. ');
+
+    const payload = {
+      data: {
+        type: 'letter_activity',
+        activityType: 'summary',
+        title: title,
+        body: body,
+        letterId: letterId.toString(),
+        notificationId: `summary_${Date.now()}`
       }
     };
     await this.sendToUser(userId, payload);

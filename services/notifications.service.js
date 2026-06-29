@@ -48,15 +48,19 @@ class NotificationsService {
   async notifyNewReaction(recipientId, letterId, type) {
     // type is typically "comfort" or "warmth"
     try {
+      const Letter = require('../models/Letter');
+      const letter = await Letter.findById(letterId);
+      if (!letter || letter.author.toString() !== recipientId.toString()) {
+        console.warn('[notifications.service] Ignored push: recipient is not the author');
+        return;
+      }
+
       const notification = await notificationsRepo.upsertNotification(recipientId, letterId, type);
       
-      // push notification
       if (notification && notification._id) {
-        if (type === 'comfort' || type === 'helped') {
-          await pushService.sendComfortNotification(recipientId, letterId, notification._id);
-        } else if (type === 'warmth') {
-          await pushService.sendWarmthNotification(recipientId, letterId, notification._id);
-        }
+        // Increment pending push count for batching
+        notification.pendingPushCount += 1;
+        await notification.save();
       }
     } catch (err) {
       console.error('[notifications.service] reaction notification error:', err.message);
@@ -65,9 +69,16 @@ class NotificationsService {
 
   async notifyNewNote(recipientId, letterId, previewText) {
     try {
+      const Letter = require('../models/Letter');
+      const letter = await Letter.findById(letterId);
+      if (!letter || letter.author.toString() !== recipientId.toString()) {
+        console.warn('[notifications.service] Ignored note push: recipient is not the author');
+        return;
+      }
+
       const notification = await notificationsRepo.upsertNotification(recipientId, letterId, 'note', previewText);
       
-      // push notification
+      // push notification immediately for notes
       if (notification && notification._id) {
         await pushService.sendNoteNotification(recipientId, letterId, notification._id, previewText);
       }
