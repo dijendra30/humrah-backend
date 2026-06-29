@@ -1,4 +1,5 @@
 const notificationsRepo = require('../repositories/notifications.repository');
+const pushService = require('./push.service');
 
 class NotificationsService {
   async getActivitySummaryAndList(userId) {
@@ -47,7 +48,16 @@ class NotificationsService {
   async notifyNewReaction(recipientId, letterId, type) {
     // type is typically "comfort" or "warmth"
     try {
-      await notificationsRepo.upsertNotification(recipientId, letterId, type);
+      const notification = await notificationsRepo.upsertNotification(recipientId, letterId, type);
+      
+      // push notification
+      if (notification && notification._id) {
+        if (type === 'comfort' || type === 'helped') {
+          await pushService.sendComfortNotification(recipientId, letterId, notification._id);
+        } else if (type === 'warmth') {
+          await pushService.sendWarmthNotification(recipientId, letterId, notification._id);
+        }
+      }
     } catch (err) {
       console.error('[notifications.service] reaction notification error:', err.message);
     }
@@ -55,7 +65,12 @@ class NotificationsService {
 
   async notifyNewNote(recipientId, letterId, previewText) {
     try {
-      await notificationsRepo.upsertNotification(recipientId, letterId, 'note', previewText);
+      const notification = await notificationsRepo.upsertNotification(recipientId, letterId, 'note', previewText);
+      
+      // push notification
+      if (notification && notification._id) {
+        await pushService.sendNoteNotification(recipientId, letterId, notification._id, previewText);
+      }
     } catch (err) {
       console.error('[notifications.service] note notification error:', err.message);
     }
