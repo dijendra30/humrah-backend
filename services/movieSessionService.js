@@ -19,6 +19,8 @@
 const mongoose     = require('mongoose');
 const MovieSession = require('../models/MovieSession');
 const MovieChat    = require('../models/MovieChat');
+const MovieMessage = require('../models/MovieMessage');
+const MovieParticipant = require('../models/MovieParticipant');
 const { getTimeLabel, getParticipantDisplay, getPostSessionMessage,
         getNextShowTime, isCreationAllowed, validateShowTime, isAfterEndHour } = require('../utils/timeLabel');
 
@@ -1333,82 +1335,98 @@ async function joinSession(userId, sessionId, io) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// getSessionChat — member-only access
+// getSessionChat — member-only access (Paginated via MovieMessage)
 // ─────────────────────────────────────────────────────────────────────────────
-async function getSessionChat(userId, sessionId) {
+async function getSessionChat(userId, sessionId, page = 1, limit = 30) {
   const session = await MovieSession.findById(sessionId);
   if (!session) return { success: false, status: 404, message: 'Session not found' };
 
   const isMember = session.participants.some(p => p.toString() === userId.toString());
   if (!isMember) return { success: false, status: 403, message: 'You are not a member of this session' };
 
-  const chat = await MovieChat.findById(session.chatId);
-  if (!chat) return { success: false, status: 404, message: 'Chat not found' };
+  const skip = (page - 1) * limit;
+  const messages = await MovieMessage.find({ sessionId })
+    .sort({ createdAt: -1 })
+    .skip(skip)
+    .limit(limit)
+    .lean();
 
   return {
     success: true,
     chat: {
-      id:           chat._id.toString(),
-      sessionId:    chat.sessionId?.toString() || null,
-      participants: chat.participants.map(p => p.toString()),
-      messages:     chat.messages.map(m => ({
+      sessionId:    session._id.toString(),
+      participants: session.participants.map(p => p.toString()),
+      messages:     messages.reverse().map(m => ({
+        id:          m._id.toString(),
         senderId:    m.senderId?.toString() || null,
         senderName:  m.senderName,
         senderPhoto: m.senderPhoto || null,
         text:        m.text,
-        isSystem:    m.isSystem || false,
-        timestamp:   m.timestamp.toISOString(),
+        type:        m.type,
+        voiceUrl:    m.voiceUrl || null,
+        duration:    m.duration || 0,
+        replyTo:     m.replyTo?.toString() || null,
+        readBy:      (m.readBy || []).map(r => r.toString()),
+        reactions:   (m.reactions || []).map(r => ({ userId: r.userId?.toString(), reaction: r.reaction })),
+        isSystem:    m.type === 'system',
+        timestamp:   m.createdAt.toISOString(),
       })),
-      expiresAt: chat.expiresAt.toISOString(),
-      status:    chat.status,
+      pinnedMessageId: session.pinnedMessageId?.toString() || null,
+      expiresAt: session.chatExpiresAt.toISOString(),
+      status:    session.status,
     },
   };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// sendMessage
+// getSessionSummary
+// ─────────────────────────────────────────────────────────────────────────────
+async function getSessionSummary(userId, sessionId) {
+  const session = await MovieSession.findById(sessionId);
+  if (!session) return { success: false, status: 404, message: 'Session not found' };
+
+  if (session.status !== 'expired') {
+    return { success: false, status: 400, message: 'Session has not expired yet' };
+  }
+
+  const messagesCount = await MovieMessage.countDocuments({ sessionId });
+  
+  // Aggregate to find most active user
+  const mostActiveAggr = await MovieMessage.aggregate([
+    { $match: { sessionId: session._id, type: { $ne: 'system' } } },
+    { $group: { _id: '$senderId', count: { $sum: 1 }, name: { $first: '$senderName' } } },
+    { $sort: { count: -1 } },
+    { $limit: 1 }
+  ]);
+  
+  const mostActiveUser = mostActiveAggr.length > 0 ? mostActiveAggr[0].name : 'N/A';
+  
+  // Calculate average rating
+  let avgRating = 0;
+  if (session.ratings && session.ratings.length > 0) {
+    const sum = session.ratings.reduce((acc, r) => acc + r.rating, 0);
+    avgRating = sum / session.ratings.length;
+  }
+
+  return {
+    success: true,
+    summary: {
+      messagesCount,
+      participantsCount: session.participants.length,
+      mostActiveUser,
+      averageRating: avgRating > 0 ? avgRating.toFixed(1) : 'N/A'
+    }
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// sendMessage (HTTP Fallback)
 // ─────────────────────────────────────────────────────────────────────────────
 async function sendMessage(userId, sessionId, text, io) {
   if (!text?.trim()) return { success: false, status: 400, message: 'Message text required' };
 
-  const session = await MovieSession.findById(sessionId);
-  if (!session) return { success: false, status: 404, message: 'Session not found' };
-
-  const isMember = session.participants.some(p => p.toString() === userId.toString());
-  if (!isMember) return { success: false, status: 403, message: 'Not a member' };
-
-  const chat = await MovieChat.findById(session.chatId);
-  if (!chat || chat.status === 'expired') {
-    return { success: false, status: 400, message: 'Chat no longer available' };
-  }
-
-  const User   = mongoose.model('User');
-  const sender = await User.findById(userId).select('firstName lastName profilePhoto').lean();
-  const msg    = {
-    senderId:    userId,
-    senderName:  sender ? `${sender.firstName} ${sender.lastName || ''}`.trim() : 'User',
-    senderPhoto: sender?.profilePhoto || null,
-    text:        text.trim(),
-    isSystem:    false,
-    timestamp:   new Date(),
-  };
-
-  chat.messages.push(msg);
-  await chat.save();
-
-  // Socket broadcast
-  try {
-    if (io) {
-      io.to(`movie-chat-${chat._id}`).emit('movie-new-message', {
-        senderId:    userId.toString(),
-        senderName:  msg.senderName,
-        senderPhoto: msg.senderPhoto,
-        text:        msg.text,
-        isSystem:    false,
-        timestamp:   msg.timestamp.toISOString(),
-      });
-    }
-  } catch (_) { /* non-critical */ }
+  const { handleSocketMessage } = require('./movieHangoutService');
+  await handleSocketMessage(userId, sessionId, text, null, io);
 
   return { success: true, message: 'Sent' };
 }
@@ -1705,4 +1723,5 @@ module.exports = {
   fetchTrendingMovies,
   generateSystemSessions,
   countNearbyRealUserSessions,
+  getSessionSummary,
 };

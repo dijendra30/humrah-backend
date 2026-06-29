@@ -213,9 +213,42 @@ async function sendPushToUser(userId, title, body, data = {}) {
   }
 }
 
+async function sendMovieHangoutNotification(sessionId, msg, senderName, isVoice) {
+  try {
+    const MovieSession = require('../models/MovieSession');
+    const session = await MovieSession.findById(sessionId).lean();
+    if (!session) return;
+
+    const { sendDataFcm } = require('../utils/fcmHelper');
+    const title = 'Humrah Movie Hangout';
+    const body = isVoice ? `${senderName} sent a voice note` : `${senderName}: ${msg.text}`;
+    
+    // Find all participants except sender
+    const recipientIds = session.participants.filter(p => p.toString() !== msg.senderId.toString());
+    
+    for (const uid of recipientIds) {
+      const user = await User.findById(uid).select('fcmTokens').lean();
+      if (!user?.fcmTokens?.length) continue;
+      
+      await sendDataFcm(uid.toString(), user.fcmTokens, {
+        type: 'movie_hangout_message',
+        sessionId: sessionId.toString(),
+        senderId: msg.senderId.toString(),
+        senderName: senderName,
+        title: title,
+        body: body,
+        messageId: msg._id.toString()
+      });
+    }
+  } catch (err) {
+    console.error('[notificationService] sendMovieHangoutNotification error:', err.message);
+  }
+}
+
 module.exports = {
   findUsersToNotify,
   notifyNearbyUsers,
   getNearbyRandomBookings,
   sendPushToUser,
+  sendMovieHangoutNotification,
 };
