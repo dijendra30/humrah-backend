@@ -162,7 +162,8 @@ class LettersService {
       replyCount: letter.replyCount,
       engagementScore: letter.engagementScore,
       language: letter.language,
-      createdAt: letter.createdAt
+      createdAt: letter.createdAt,
+      expiresAt: letter.expiresAt
     };
   }
   
