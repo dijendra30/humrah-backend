@@ -1,9 +1,15 @@
 const express = require('express');
 const router = express.Router();
 const lettersController = require('../controllers/letters.controller');
+const letterNotifController = require('../controllers/letterNotificationController');
 const { validateLetterCreation, validateLetterReply, validateLetterReport } = require('../validators/letters.validator');
 const { lettersWriteLimiter, lettersReadLimiter } = require('../middleware/lettersRateLimit');
 const lettersModeration = require('../middleware/lettersModeration');
+
+// ── Activity Inbox (must be before /:id routes to avoid "activity" being matched as a letter ID)
+router.get('/activity',          lettersReadLimiter,  letterNotifController.getActivity);
+router.patch('/activity/read-all', lettersWriteLimiter, letterNotifController.markAllRead);
+router.patch('/activity/:id/read', lettersWriteLimiter, letterNotifController.markRead);
 
 // CREATE a new letter
 router.post(
