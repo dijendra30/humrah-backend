@@ -4,6 +4,7 @@ const repliesRepo = require('../repositories/replies.repository');
 const reactionsRepo = require('../repositories/reactions.repository');
 const moderationService = require('./moderation.service');
 const { generateLocationLabel } = require('../utils/locationLabelGenerator');
+const LetterNotification = require('../models/LetterNotification');
 
 class LettersService {
   
@@ -109,6 +110,25 @@ class LettersService {
       // Increment reply count and engagement score on the letter (reply = +3)
       await lettersRepo.incrementStat(letterId, 'replyCount', 1);
       await lettersRepo.incrementStat(letterId, 'engagementScore', 3);
+
+      // ── Notify letter author about the new note (skip self-notes) ──
+      try {
+        const letter = await lettersRepo.findById(letterId);
+        if (letter && letter.author.toString() !== userId.toString()) {
+          await LetterNotification.findOneAndUpdate(
+            { recipientId: letter.author, letterId, type: 'note' },
+            {
+              $inc:        { count: 1 },
+              $set:        { isRead: false, preview: body.substring(0, 100) },
+              $setOnInsert: { recipientId: letter.author, letterId, type: 'note' }
+            },
+            { upsert: true }
+          );
+        }
+      } catch (notifErr) {
+        // Non-fatal — notification failure must never block the reply response
+        console.error('[letters.service] reply notification error:', notifErr.message);
+      }
     }
     
     return this._anonymizeReply(reply);
@@ -145,6 +165,26 @@ class LettersService {
       const statField = type === 'helped' ? 'comfortCount' : 'supportCount';
       await lettersRepo.incrementStat(letterId, statField, 1);
       await lettersRepo.incrementStat(letterId, 'engagementScore', 2); // Adding new
+
+      // ── Notify letter author (skip self-reactions) ──
+      try {
+        const letter = await lettersRepo.findById(letterId);
+        if (letter && letter.author.toString() !== userId.toString()) {
+          const notifType = type === 'helped' ? 'comfort' : 'warmth';
+          await LetterNotification.findOneAndUpdate(
+            { recipientId: letter.author, letterId, type: notifType },
+            {
+              $inc:        { count: 1 },
+              $set:        { isRead: false },
+              $setOnInsert: { recipientId: letter.author, letterId, type: notifType }
+            },
+            { upsert: true }
+          );
+        }
+      } catch (notifErr) {
+        console.error('[letters.service] reaction notification error:', notifErr.message);
+      }
+
       return { added: true, type };
     }
   }
