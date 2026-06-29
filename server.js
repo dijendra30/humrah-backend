@@ -413,6 +413,7 @@ const { startMovieSessionExpiryJob } = require('./jobs/movieSessionExpiryJob');
 const { startMovieDailySessionJob }  = require('./jobs/movieDailySessionJob');
 const { runStartupCleanup, scheduleDailyCleanup } = require('./utils/autoModerationCleanup');
 const { startPayoutCronJobs } = require('./cronJobs/payoutCron');
+const { startLetterPushCron } = require('./cronJobs/letterPushCron');
 
 const connectDB = async () => {
   try {
@@ -422,6 +423,7 @@ const connectDB = async () => {
     startMovieSessionExpiryJob();
     startMovieDailySessionJob();  // pre-seeds tomorrow's system sessions at 7 PM IST
     startPayoutCronJobs();
+    startLetterPushCron();
     await runStartupCleanup();
     scheduleDailyCleanup();
   } catch (err) {
