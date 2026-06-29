@@ -57,6 +57,13 @@ const movieSessionSchema = new mongoose.Schema({
 
   chatId: { type: mongoose.Schema.Types.ObjectId, ref: 'MovieChat', default: null },
 
+  // For movie hangout features
+  pinnedMessageId: { type: mongoose.Schema.Types.ObjectId, ref: 'MovieMessage', default: null },
+  ratings: [{
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    rating: { type: Number, min: 1, max: 5 }
+  }],
+
   // Notification sent flag — avoids duplicate post-session notifications
   postSessionNotified: { type: Boolean, default: false },
 
