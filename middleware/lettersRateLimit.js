@@ -1,8 +1,8 @@
 const rateLimit = require('express-rate-limit');
 
-const getUserId = (req) => {
+const getUserId = (req, res) => {
   const uid = req.userId?.toString() || req.user?._id?.toString();
-  return uid ? `uid:${uid}` : `ip:${req.ip}`;
+  return uid ? `uid:${uid}` : 'anonymous';
 };
 
 const lettersWriteLimiter = rateLimit({
