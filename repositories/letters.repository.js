@@ -12,6 +12,10 @@ class LettersRepository {
     return await Letter.findById(id).lean();
   }
 
+  async findMyLetters(userId) {
+    return await Letter.find({ author: userId }).sort({ createdAt: -1 }).lean();
+  }
+
   async findWithPagination(query, page = 1, limit = 20, sort = { createdAt: -1 }) {
     const skip = (page - 1) * limit;
     
