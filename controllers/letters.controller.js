@@ -54,7 +54,7 @@ class LettersController {
       const search = req.query.search || req.query.q || null;
       const sort = req.query.sort || 'new';
 
-      const feed = await lettersService.getFeed(page, limit, category, search, sort);
+      const feed = await lettersService.getFeed(req.userId, page, limit, category, search, sort);
 
       console.log("Letters found:", feed.letters.length);
       console.log(feed.letters);
@@ -72,7 +72,7 @@ class LettersController {
   async getLetterById(req, res) {
     try {
       const { id } = req.params;
-      const data = await lettersService.getLetterDetails(id);
+      const data = await lettersService.getLetterDetails(req.userId, id);
       
       if (!data) {
         return res.status(404).json({ success: false, message: 'Letter not found or has been removed' });
