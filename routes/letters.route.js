@@ -8,6 +8,7 @@ const lettersModeration = require('../middleware/lettersModeration');
 
 // ── Activity Inbox (must be before /:id routes to avoid "activity" being matched as a letter ID)
 router.get('/activity',          lettersReadLimiter,  letterNotifController.getActivity);
+router.get('/activity/unread-count', lettersReadLimiter, letterNotifController.getUnreadCount);
 router.patch('/activity/read-all', lettersWriteLimiter, letterNotifController.markAllRead);
 router.patch('/activity/:id/read', lettersWriteLimiter, letterNotifController.markRead);
 
@@ -25,6 +26,13 @@ router.get(
   '/',
   lettersReadLimiter,
   lettersController.getFeed.bind(lettersController)
+);
+
+// GET my letters
+router.get(
+  '/my-letters',
+  lettersReadLimiter,
+  lettersController.getMyLetters.bind(lettersController)
 );
 
 // GET single letter details
