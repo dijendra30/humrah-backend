@@ -453,6 +453,7 @@ router.post('/chats/:chatId/messages', authenticate, async (req, res) => {
             chatType:        'RANDOM_BOOKING',
             senderName:      sender?.firstName ?? 'Someone',
             senderPhotoUrl:  sender?.profilePhoto ?? '',
+            senderId:        req.userId.toString(),
             messageText:     req.body.content.trim().substring(0, 100),
             messageId:       message._id.toString(),
             recipientUserId: recipientId,
