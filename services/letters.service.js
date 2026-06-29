@@ -43,7 +43,7 @@ class LettersService {
     return await lettersRepo.create(letterData);
   }
 
-  async getFeed(page = 1, limit = 20, category = null, search = null, sortType = 'new') {
+  async getFeed(userId, page = 1, limit = 20, category = null, search = null, sortType = 'new') {
     const query = { status: 'active', expiresAt: { $gt: new Date() } };
     
     if (category) {
@@ -63,7 +63,7 @@ class LettersService {
     const result = await lettersRepo.findWithPagination(query, page, limit, sort);
     
     // Anonymize before sending
-    const anonymizedLetters = result.letters.map(letter => this._anonymizeLetter(letter));
+    const anonymizedLetters = result.letters.map(letter => this._anonymizeLetter(letter, userId));
     
     return {
       letters: anonymizedLetters,
@@ -72,7 +72,7 @@ class LettersService {
     };
   }
 
-  async getLetterDetails(letterId) {
+  async getLetterDetails(userId, letterId) {
     const letter = await lettersRepo.findById(letterId);
     if (!letter || letter.status !== 'active') return null;
     
@@ -82,8 +82,8 @@ class LettersService {
     const replies = await repliesRepo.findByLetterId(letterId);
     
     return {
-      letter: this._anonymizeLetter(letter),
-      replies: replies.map(r => this._anonymizeReply(r)),
+      letter: this._anonymizeLetter(letter, userId),
+      replies: replies.map(r => this._anonymizeReply(r, userId)),
       stats: {
         comfortCount: letter.comfortCount,
         supportCount: letter.supportCount,
@@ -123,7 +123,7 @@ class LettersService {
       await notificationsService.notifyNewNote(letter.author, letterId, body);
     }
     
-    return this._anonymizeReply(reply);
+    return this._anonymizeReply(reply, userId);
   }
 
   async toggleReaction(userId, letterId, type) {
@@ -185,8 +185,7 @@ class LettersService {
     const archivedLetters = [];
 
     letters.forEach(letter => {
-      const anonymized = this._anonymizeLetter(letter);
-      anonymized.isMine = true;
+      const anonymized = this._anonymizeLetter(letter, userId);
       if (new Date(letter.expiresAt) > now) {
         activeLetters.push(anonymized);
       } else {
@@ -197,7 +196,9 @@ class LettersService {
     return { activeLetters, archivedLetters };
   }
 
-  _anonymizeLetter(letter) {
+  _anonymizeLetter(letter, currentUserId) {
+    const isMine = currentUserId && letter.author ? letter.author.toString() === currentUserId.toString() : false;
+
     return {
       id: letter._id,
       body: letter.body,
@@ -211,16 +212,20 @@ class LettersService {
       engagementScore: letter.engagementScore,
       language: letter.language,
       createdAt: letter.createdAt,
-      expiresAt: letter.expiresAt
+      expiresAt: letter.expiresAt,
+      isMine: isMine
     };
   }
   
-  _anonymizeReply(reply) {
+  _anonymizeReply(reply, currentUserId) {
+    const isMine = currentUserId && reply.author ? reply.author.toString() === currentUserId.toString() : false;
+
     return {
       id: reply._id,
       letterId: reply.letterId,
-      body: reply.body,
-      createdAt: reply.createdAt
+      body: reply.isModerated ? '[This note was removed by moderation]' : reply.body,
+      createdAt: reply.createdAt,
+      isMine: isMine
     };
   }
 
