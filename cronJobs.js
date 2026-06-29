@@ -62,21 +62,24 @@ cron.schedule('0 * * * *', async () => {
       const LetterReply = require('./models/LetterReply');
       const LetterReaction = require('./models/LetterReaction');
       const LetterReport = require('./models/LetterReport');
+      const LetterNotification = require('./models/LetterNotification');
       const Letter = require('./models/Letter');
       
       const activeLetters = await Letter.find({}, '_id').lean();
       const existingLetterIds = activeLetters.map(l => l._id);
 
-      const [repliesRes, reactionsRes, reportsRes] = await Promise.all([
+      const [repliesRes, reactionsRes, reportsRes, notifRes] = await Promise.all([
         LetterReply.deleteMany({ letterId: { $nin: existingLetterIds } }),
         LetterReaction.deleteMany({ letterId: { $nin: existingLetterIds } }),
-        LetterReport.deleteMany({ letterId: { $nin: existingLetterIds } })
+        LetterReport.deleteMany({ letterId: { $nin: existingLetterIds } }),
+        LetterNotification.deleteMany({ letterId: { $nin: existingLetterIds } })
       ]);
 
       console.log('🧹 [Letters Cleanup]');
       console.log(`   Deleted orphan replies: ${repliesRes.deletedCount}`);
       console.log(`   Deleted orphan reactions: ${reactionsRes.deletedCount}`);
       console.log(`   Deleted orphan reports: ${reportsRes.deletedCount}`);
+      console.log(`   Deleted orphan notifications: ${notifRes.deletedCount}`);
     } catch (err) {
       console.error('[CRON] Letters orphan cleanup error:', err.message);
     }
