@@ -107,10 +107,21 @@ exports.joinSession = async (req, res) => {
 // =============================================================================
 exports.getSessionChat = async (req, res) => {
   try {
-    return send(res, await svc.getSessionChat(uid(req), req.params.id));
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 30;
+    return send(res, await svc.getSessionChat(uid(req), req.params.id, page, limit));
   } catch (err) {
     console.error('[ctrl] getSessionChat:', err.message);
-    return res.status(500).json({ success: false, message: 'Internal server error' });
+    return send(res, { success: false, status: 500, message: err.message });
+  }
+};
+
+exports.getSessionSummary = async (req, res) => {
+  try {
+    return send(res, await svc.getSessionSummary(uid(req), req.params.id));
+  } catch (err) {
+    console.error('[ctrl] getSessionSummary:', err.message);
+    return send(res, { success: false, status: 500, message: err.message });
   }
 };
 
