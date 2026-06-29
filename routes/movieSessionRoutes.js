@@ -44,7 +44,10 @@ router.post('/movie-session/:id/join', ctrl.joinSession);
 // GET /api/movie-session/:id/chat
 router.get('/movie-session/:id/chat', ctrl.getSessionChat);
 
-// POST /api/movie-session/:id/chat/message
+// GET /api/movie-session/:id/chat/message
 router.post('/movie-session/:id/chat/message', ctrl.sendMessage);
+
+// GET /api/movie-session/:id/summary
+router.get('/movie-session/:id/summary', ctrl.getSessionSummary);
 
 module.exports = router;
