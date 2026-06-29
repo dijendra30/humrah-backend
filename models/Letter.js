@@ -89,7 +89,7 @@ const letterSchema = new mongoose.Schema(
 
 // Indexes
 letterSchema.index({ status: 1, createdAt: -1 });
-letterSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+letterSchema.index({ expiresAt: 1 }); // Used for filtering active letters
 letterSchema.index({ category: 1 });
 letterSchema.index({
   body: 'text',
