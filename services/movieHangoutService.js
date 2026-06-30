@@ -176,6 +176,7 @@ async function handleMarkRead(userId, sessionId, messageIds) {
 
 function _broadcastMessage(io, sessionId, msg) {
   if (!io) return;
+  console.log(`Broadcasting message ${msg._id} to room: movie:${sessionId}`);
   io.to(`movie:${sessionId}`).emit('movieMessageReceived', {
     id:          msg._id.toString(),
     senderId:    msg.senderId?.toString() || null,
