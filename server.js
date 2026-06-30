@@ -347,11 +347,14 @@ io.on('connection', (socket) => {
   // Room format: movie:{sessionId}
   // Events: joinMovieRoom, leaveMovieRoom, typing, stopTyping, markRead
 
-  socket.on('joinMovieRoom', async ({ sessionId }) => {
+  socket.on('joinMovieRoom', async (data) => {
+    const sessionId = data.sessionId || data; // handle if it's sent as a plain string or object
     if (!sessionId) return;
     const room = `movie:${sessionId}`;
     socket.join(room);
     socket.movieSessionId = sessionId;
+    console.log(`Movie socket connected: ${socket.id}`);
+    console.log(`User: ${socket.userId} joined room ${sessionId}`);
 
     // Notify others in the room
     socket.to(room).emit('participantJoined', {
