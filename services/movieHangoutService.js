@@ -47,7 +47,7 @@ async function handleSocketMessage(userId, sessionId, text, replyTo, io) {
 /**
  * Handle incoming voice note via Socket
  */
-async function handleSocketVoiceNote(userId, sessionId, voiceUrl, duration, replyTo, io) {
+async function handleSocketVoiceNote(userId, sessionId, voiceUrl, duration, replyTo, clientMessageId, io) {
   if (!voiceUrl) throw new Error('Voice URL required');
   await validateAccess(userId, sessionId);
 
@@ -63,6 +63,7 @@ async function handleSocketVoiceNote(userId, sessionId, voiceUrl, duration, repl
     voiceUrl,
     duration,
     replyTo: replyTo || null,
+    clientMessageId: clientMessageId || null,
     readBy: [userId],
   });
   await msg.save();
@@ -187,6 +188,7 @@ function _broadcastMessage(io, sessionId, msg) {
     voiceUrl:    msg.voiceUrl || null,
     duration:    msg.duration || 0,
     replyTo:     msg.replyTo?.toString() || null,
+    clientMessageId: msg.clientMessageId || null,
     readBy:      msg.readBy.map(r => r.toString()),
     reactions:   [],
     isSystem:    msg.type === 'system',
