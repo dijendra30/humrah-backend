@@ -380,11 +380,11 @@ io.on('connection', (socket) => {
     socket.to(`movie:${sessionId}`).emit('stopTyping', { userId, userName });
   });
 
-  socket.on('markRead', async ({ sessionId, messageIds }) => {
+  socket.on('markRead', async (data, callback) => {
+    const { sessionId, messageIds } = data;
     if (!sessionId || !messageIds || !messageIds.length) return;
-    
     try {
-      const { handleMarkRead } = require('./services/movieSessionService');
+      const { handleMarkRead } = require('./services/movieHangoutService');
       await handleMarkRead(userId, sessionId, messageIds);
       
       io.to(`movie:${sessionId}`).emit('messagesRead', {
@@ -393,42 +393,66 @@ io.on('connection', (socket) => {
         messageIds,
         readAt: new Date().toISOString()
       });
-    } catch (err) { console.error('markRead error:', err); }
+      if (typeof callback === 'function') callback();
+    } catch (err) { 
+      console.error('markRead error:', err); 
+      if (typeof callback === 'function') callback({ error: err.message });
+    }
   });
 
-  socket.on('sendMovieMessage', async (data) => {
+  socket.on('sendMovieMessage', async (data, callback) => {
     try {
-      const { handleSocketMessage } = require('./services/movieSessionService');
+      const { handleSocketMessage } = require('./services/movieHangoutService');
       await handleSocketMessage(userId, data.sessionId, data.text, data.replyTo, io);
-    } catch (err) { console.error('sendMovieMessage error:', err); }
+      if (typeof callback === 'function') callback();
+    } catch (err) { 
+      console.error('sendMovieMessage error:', err);
+      if (typeof callback === 'function') callback({ error: err.message });
+    }
   });
 
-  socket.on('sendVoiceNote', async (data) => {
+  socket.on('sendVoiceNote', async (data, callback) => {
     try {
-      const { handleSocketVoiceNote } = require('./services/movieSessionService');
+      const { handleSocketVoiceNote } = require('./services/movieHangoutService');
       await handleSocketVoiceNote(userId, data.sessionId, data.voiceUrl, data.duration, data.replyTo, io);
-    } catch (err) { console.error('sendVoiceNote error:', err); }
+      if (typeof callback === 'function') callback();
+    } catch (err) { 
+      console.error('sendVoiceNote error:', err);
+      if (typeof callback === 'function') callback({ error: err.message });
+    }
   });
 
-  socket.on('reactToMessage', async (data) => {
+  socket.on('reactToMessage', async (data, callback) => {
     try {
-      const { handleMessageReaction } = require('./services/movieSessionService');
+      const { handleMessageReaction } = require('./services/movieHangoutService');
       await handleMessageReaction(userId, data.sessionId, data.messageId, data.reaction, io);
-    } catch (err) { console.error('reactToMessage error:', err); }
+      if (typeof callback === 'function') callback();
+    } catch (err) { 
+      console.error('reactToMessage error:', err);
+      if (typeof callback === 'function') callback({ error: err.message });
+    }
   });
 
-  socket.on('pinMessage', async (data) => {
+  socket.on('pinMessage', async (data, callback) => {
     try {
-      const { handlePinMessage } = require('./services/movieSessionService');
+      const { handlePinMessage } = require('./services/movieHangoutService');
       await handlePinMessage(userId, data.sessionId, data.messageId, io);
-    } catch (err) { console.error('pinMessage error:', err); }
+      if (typeof callback === 'function') callback();
+    } catch (err) { 
+      console.error('pinMessage error:', err);
+      if (typeof callback === 'function') callback({ error: err.message });
+    }
   });
 
-  socket.on('pollVote', async (data) => {
+  socket.on('pollVote', async (data, callback) => {
     try {
-      const { handlePollVote } = require('./services/movieSessionService');
+      const { handlePollVote } = require('./services/movieHangoutService');
       await handlePollVote(userId, data.sessionId, data.rating, io);
-    } catch (err) { console.error('pollVote error:', err); }
+      if (typeof callback === 'function') callback();
+    } catch (err) { 
+      console.error('pollVote error:', err);
+      if (typeof callback === 'function') callback({ error: err.message });
+    }
   });
 
   socket.on('disconnect', () => {
