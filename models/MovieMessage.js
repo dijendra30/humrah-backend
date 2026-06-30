@@ -43,6 +43,10 @@ const movieMessageSchema = new mongoose.Schema({
     ref: 'MovieMessage', 
     default: null 
   },
+  clientMessageId: {
+    type: String,
+    default: null
+  },
   readBy: [{ 
     type: mongoose.Schema.Types.ObjectId, 
     ref: 'User' 
