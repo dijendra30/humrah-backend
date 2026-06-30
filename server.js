@@ -414,10 +414,10 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('sendVoiceNote', async (data, callback) => {
+    socket.on('sendVoiceNote', async (data, callback) => {
     try {
       const { handleSocketVoiceNote } = require('./services/movieHangoutService');
-      await handleSocketVoiceNote(userId, data.sessionId, data.voiceUrl, data.duration, data.replyTo, io);
+      await handleSocketVoiceNote(userId, data.sessionId, data.voiceUrl, data.duration, data.replyTo, data.clientMessageId, io);
       if (typeof callback === 'function') callback();
     } catch (err) { 
       console.error('sendVoiceNote error:', err);
