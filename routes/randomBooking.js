@@ -558,24 +558,39 @@ router.get('/my-activities', authenticate, async (req, res) => {
   try {
     // Return only activities created by the logged-in user
     const activities = await RandomBooking.find({ initiatorId: req.userId })
-      .populate('acceptorId', 'username profilePhoto')
+      .populate('acceptorId', 'username profilePhoto firstName lastName questionnaire')
       .sort({ createdAt: -1 })
       .lean();
     
     // Map to frontend-expected format
-    const mappedActivities = activities.map(a => ({
-      id: a._id.toString(),
-      meetupEnergy: a.meetupEnergy || [],
-      status: a.status,
-      createdAt: a.createdAt,
-      expiresAt: a.expiresAt,
-      matchedUser: a.acceptorId ? {
-        username: a.acceptorId.username,
-        profilePhoto: a.acceptorId.profilePhoto
-      } : null,
-      chatId: a.chatId ? a.chatId.toString() : null,
-      city: a.city
-    }));
+    const mappedActivities = activities.map(a => {
+      let matchedUser = null;
+      if (a.acceptorId) {
+        const u = a.acceptorId;
+        const name = (u.firstName || u.username || 'User').trim();
+        const age = u.questionnaire?.age || null;
+        matchedUser = {
+          id: u._id.toString(),
+          name: name,
+          profilePhoto: u.profilePhoto,
+          age: age
+        };
+      }
+
+      return {
+        id: a._id.toString(),
+        meetupEnergy: a.meetupEnergy || [],
+        status: a.status,
+        createdAt: a.createdAt,
+        expiresAt: a.expiresAt,
+        startTime: a.startTime,
+        endTime: a.endTime,
+        matchedAt: a.matchedAt,
+        matchedUser: matchedUser,
+        chatId: a.chatId ? a.chatId.toString() : null,
+        city: a.city
+      };
+    });
 
     return res.json({ success: true, activities: mappedActivities });
   } catch (err) {
