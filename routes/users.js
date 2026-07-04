@@ -214,7 +214,7 @@ function getDistanceFromLatLonInKm(lat1, lon1, lat2, lon2) {
 
 async function reverseGeocode(lat, lng) {
   try {
-    const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}`;
+    const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&addressdetails=1&zoom=18`;
     const response = await fetch(url, { headers: { 'User-Agent': 'HumrahApp/1.0 (contact@humrah.com)' } });
     if (!response.ok) return null;
     const data = await response.json();
@@ -271,17 +271,23 @@ router.post('/matchmaking-location', authenticate, async (req, res) => {
     if (needsGeocoding) {
       const addr = await reverseGeocode(lat, lng);
       if (addr) {
-        area = addr.neighbourhood || addr.suburb || addr.locality || addr.city_district || area;
-        geocodedCity = addr.city || addr.town || addr.district || geocodedCity;
-        district = addr.state_district || addr.district || district;
-        geocodedState = addr.state || geocodedState;
-        country = addr.country || country;
+        area = addr.neighbourhood || addr.suburb || addr.quarter || addr.residential || addr.road || null;
+        district = addr.city_district || addr.county || null;
+        geocodedCity = addr.city || addr.town || addr.municipality || null;
+        geocodedState = addr.state || null;
+        country = addr.country || null;
 
-        if (area && geocodedCity) displayName = `${area}, ${geocodedCity}`;
-        else if (district && geocodedCity) displayName = `${district}, ${geocodedCity}`;
-        else if (geocodedCity) displayName = geocodedCity;
-        else if (area) displayName = area;
-        else displayName = geocodedState || "Unknown Location";
+        if (area && geocodedCity) {
+          displayName = `${area}, ${geocodedCity}`;
+        } else if (district && geocodedCity) {
+          displayName = `${district}, ${geocodedCity}`;
+        } else if (geocodedCity) {
+          displayName = geocodedCity;
+        } else if (area) {
+          displayName = area;
+        } else {
+          displayName = geocodedState || "Unknown Location";
+        }
       }
     }
 
