@@ -320,7 +320,8 @@ router.post("/sessions", async (req, res) => {
     const cardExpiresAt = new Date(start.getTime());                  // = startTime
     const chatExpiresAt = new Date(start.getTime() + THREE_HOURS_MS); // = startTime + 3h
 
-    const sessionData = {
+    const session = await GamingSession.create({
+      location:        ll?.type === "Point" ? ll : undefined,
       creatorId:       req.user._id,
       creatorUsername: displayName(req.user),
       city:            sessionCity,
