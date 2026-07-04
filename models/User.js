@@ -510,7 +510,13 @@ userSchema.pre('save', function(next) {
   next();
 });
 
-// Legacy location helpers -- kept for backward compat
+// ⚠️ DEPRECATED — DO NOT USE. This only sets lat/lng and is exactly what
+// caused the "lat/lng updates instantly but city/state stay stale" bug
+// (it never touches liveLocation.city/state/area/displayName, so those go
+// out of sync with the coordinates). All location-update routes now call
+// services/liveLocationService.js#updateUserLiveLocation() instead, which
+// reverse-geocodes FIRST and writes lat/lng + city/state atomically together.
+// Kept only so old callers don't hard-crash; do not wire this into new code.
 userSchema.methods.updateLocation = function(lat, lng) {
   this.last_known_lat = lat;
   this.last_known_lng = lng;
@@ -525,7 +531,11 @@ userSchema.methods.getLocationForMatching = function() {
   return { lat: this.last_known_lat, lng: this.last_known_lng, updatedAt: this.last_location_updated_at };
 };
 
-// Live location helpers
+// ⚠️ DEPRECATED — DO NOT USE. Callers were expected to pass city/state in
+// themselves (no geocoding), and replacing the whole liveLocation object also
+// wipes area/district/country/displayName/coordinates. Use
+// services/liveLocationService.js#updateUserLiveLocation(userId, lat, lng)
+// instead — it reverse-geocodes first and writes everything atomically.
 userSchema.methods.updateLiveLocation = function(lat, lng, city = null, state = null) {
   const now = new Date();
   this.liveLocation = { lat, lng, city, state, updatedAt: now };
