@@ -293,53 +293,79 @@ router.post('/mood-request', authenticate, async (req, res) => {
 
 router.get('/recommended', auth, async (req, res) => {
   try {
-    const STALE_MS = 60 * 60 * 1000; // 60 min
     const u = await User.findById(req.userId).select('liveLocation questionnaire');
     if (!u) return res.status(404).json({ success: false, message: 'User not found' });
 
-    // Prefer liveLocation for city; fall back to questionnaire.city
     const ll = u.liveLocation;
-    const hasLiveLocation = !!(ll && ll.lat != null && ll.lng != null &&
-      ll.updatedAt && (Date.now() - new Date(ll.updatedAt).getTime()) <= STALE_MS);
-    const searchCity = (hasLiveLocation && ll.city) ? ll.city : u.questionnaire?.city;
-
     const f = { _id: { $ne: req.userId }, userType: 'COMPANION', status: 'ACTIVE' };
-    // Match by liveLocation.city first; fall back to questionnaire.city
-    if (searchCity) {
-      f.$or = [
-        { 'liveLocation.city': searchCity },
-        { 'questionnaire.city': searchCity },
-      ];
+    
+    if (u.questionnaire?.interests?.length) {
+      f['questionnaire.interests'] = { $in: u.questionnaire.interests };
     }
-    if (u.questionnaire?.interests?.length) f['questionnaire.interests'] = { $in: u.questionnaire.interests };
-    const companions = await User.find(f)
+
+    let sortObj = { 'ratingStats.averageRating': -1, lastActive: -1 };
+
+    if (ll && ll.coordinates && ll.coordinates.length === 2) {
+      f.liveLocation = {
+        $near: {
+          $geometry: { type: 'Point', coordinates: ll.coordinates },
+          $maxDistance: 50000 // 50km
+        }
+      };
+      sortObj = null; // $near implicitly sorts by distance
+    } else if (u.questionnaire?.city) {
+      f['liveLocation.city'] = u.questionnaire.city;
+    }
+
+    let query = User.find(f)
       .select('firstName lastName profilePhoto questionnaire liveLocation ratingStats verified isPremium userType')
-      .limit(10).sort({ 'ratingStats.averageRating': -1, lastActive: -1 });
+      .limit(10);
+      
+    if (sortObj) query = query.sort(sortObj);
+    
+    const companions = await query;
     res.json({ success: true, companions });
-  } catch (err) { res.status(500).json({ success: false, message: 'Server error' }); }
+  } catch (err) { 
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error' }); 
+  }
 });
 
 router.get('/', auth, async (req, res) => {
   try {
-    const { interests, city, state, limit = 20 } = req.query;
+    const { interests, limit = 20 } = req.query;
     const f = { _id: { $ne: req.userId }, userType: 'COMPANION', status: 'ACTIVE' };
+    
     if (interests) f['questionnaire.interests'] = { $in: interests.split(',') };
-    // city filter: check liveLocation.city first, then questionnaire.city
-    if (city) {
-      f.$or = [
-        { 'liveLocation.city': city },
-        { 'questionnaire.city': city },
-      ];
+    
+    const u = await User.findById(req.userId).select('liveLocation questionnaire');
+    const ll = u?.liveLocation;
+    let sortObj = { isPremium: -1, 'ratingStats.averageRating': -1, lastActive: -1 };
+
+    if (ll && ll.coordinates && ll.coordinates.length === 2) {
+      f.liveLocation = {
+        $near: {
+          $geometry: { type: 'Point', coordinates: ll.coordinates },
+          $maxDistance: 100000 // 100km for normal search
+        }
+      };
+      sortObj = null; // implicitly sorts by distance
+    } else if (u?.questionnaire?.city) {
+      f['liveLocation.city'] = u.questionnaire.city;
     }
-    if (state) f.$or = [
-      { 'liveLocation.state': state },
-      { 'questionnaire.state': state },
-    ];
-    const companions = await User.find(f)
+
+    let query = User.find(f)
       .select('firstName lastName profilePhoto questionnaire liveLocation ratingStats verified isPremium userType')
-      .limit(parseInt(limit)).sort({ isPremium: -1, 'ratingStats.averageRating': -1, lastActive: -1 });
+      .limit(parseInt(limit));
+      
+    if (sortObj) query = query.sort(sortObj);
+    
+    const companions = await query;
     res.json({ success: true, companions });
-  } catch (err) { res.status(500).json({ success: false, message: 'Server error' }); }
+  } catch (err) { 
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error' }); 
+  }
 });
 
 router.get('/:companionId', auth, async (req, res) => {

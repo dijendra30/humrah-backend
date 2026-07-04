@@ -163,7 +163,8 @@ function displayName(user) {
   return `${user.firstName || ""} ${user.lastName || ""}`.trim() || "User";
 }
 function resolveCity(req, bodyCity) {
-  return (bodyCity || req.user?.questionnaire?.city || req.user?.city || "Unknown").trim();
+  const ll = req.user?.liveLocation;
+  return (bodyCity || ll?.displayName || ll?.city || req.user?.questionnaire?.city || req.user?.city || "Unknown").trim();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -216,17 +217,39 @@ router.post("/sessions/check-existing", async (req, res) => {
 router.get("/sessions", async (req, res) => {
   try {
     const uid  = req.user._id;
-    const city = resolveCity(req, req.query.city);
+    const u = await User.findById(uid).select('liveLocation');
+    const ll = u?.liveLocation;
+    const city = resolveCity({ user: u }, req.query.city);
 
     // ── Query 1: Active feed cards (visible in community) ──────
-    const feedSessions = await GamingSession.find({
-      city,
-      // ✅ cardStatus filter — never chatStatus
+    let feedSessions = [];
+    const baseQuery = {
       cardStatus:         { $in: ["waiting", "full", "started"] },
       notInterestedUsers: { $nin: [uid] },
       dismissedBy:        { $nin: [uid] },
       kickedPlayers:      { $nin: [uid] },
-    }).sort({ startTime: 1 }).limit(20);
+    };
+
+    if (ll && ll.coordinates && ll.coordinates.length === 2) {
+      feedSessions = await GamingSession.aggregate([
+        {
+          $geoNear: {
+            near: { type: 'Point', coordinates: ll.coordinates },
+            distanceField: 'distance',
+            maxDistance: 50000, // 50km
+            query: baseQuery,
+            spherical: true
+          }
+        },
+        { $sort: { startTime: 1 } },
+        { $limit: 20 }
+      ]);
+    } else {
+      feedSessions = await GamingSession.find({
+        ...baseQuery,
+        city
+      }).sort({ startTime: 1 }).limit(20);
+    }
 
     // ── Query 2: User's own sessions where chat is still open ──
     // Card expires at startTime, but chat runs for startTime + 3h.
@@ -285,7 +308,9 @@ router.post("/sessions", async (req, res) => {
       nextAllowedAt: new Date(existing.createdAt.getTime() + TWO_HOURS_MS).toISOString(),
     });
 
-    const sessionCity = resolveCity(req, city);
+    const u = await User.findById(req.user._id).select('liveLocation');
+    const ll = u?.liveLocation;
+    const sessionCity = resolveCity({ user: u, liveLocation: ll }, city);
 
     // ── Timing ─────────────────────────────────────────────────
     // cardExpiresAt = startTime exactly
@@ -295,7 +320,7 @@ router.post("/sessions", async (req, res) => {
     const cardExpiresAt = new Date(start.getTime());                  // = startTime
     const chatExpiresAt = new Date(start.getTime() + THREE_HOURS_MS); // = startTime + 3h
 
-    const session = await GamingSession.create({
+    const sessionData = {
       creatorId:       req.user._id,
       creatorUsername: displayName(req.user),
       city:            sessionCity,
