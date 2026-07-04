@@ -200,6 +200,31 @@ router.delete('/me', authenticate, deleteAccountLimiter, deleteMyAccount);
  *          15-min server-side guard prevents unnecessary DB writes when
  *          the client sends the same coords repeatedly.
  */
+function getDistanceFromLatLonInKm(lat1, lon1, lat2, lon2) {
+  const R = 6371; // Radius of the earth in km
+  const dLat = (lat2-lat1) * (Math.PI/180);
+  const dLon = (lon2-lon1) * (Math.PI/180); 
+  const a = 
+    Math.sin(dLat/2) * Math.sin(dLat/2) +
+    Math.cos(lat1 * (Math.PI/180)) * Math.cos(lat2 * (Math.PI/180)) * 
+    Math.sin(dLon/2) * Math.sin(dLon/2); 
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)); 
+  return R * c; 
+}
+
+async function reverseGeocode(lat, lng) {
+  try {
+    const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}`;
+    const response = await fetch(url, { headers: { 'User-Agent': 'HumrahApp/1.0 (contact@humrah.com)' } });
+    if (!response.ok) return null;
+    const data = await response.json();
+    return data.address || null;
+  } catch(e) {
+    console.error("Geocoding failed:", e);
+    return null;
+  }
+}
+
 router.post('/matchmaking-location', authenticate, async (req, res) => {
   try {
     const { lat, lng, city, state } = req.body;
@@ -211,6 +236,7 @@ router.post('/matchmaking-location', authenticate, async (req, res) => {
 
     const now  = new Date();
     const FIFTEEN_MIN_MS = 15 * 60 * 1000;
+    const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
     // ── Server-side staleness guard ──────────────────────────────────────────
     const user = await User.findById(req.userId).select('liveLocation last_known_lat last_known_lng').lean();
@@ -219,38 +245,76 @@ router.post('/matchmaking-location', authenticate, async (req, res) => {
     const ll       = user.liveLocation;
     const lastUpd  = ll?.updatedAt ? new Date(ll.updatedAt).getTime() : 0;
     const age      = now.getTime() - lastUpd;
-    const latDiff  = Math.abs((ll?.lat || 0) - lat);
-    const lngDiff  = Math.abs((ll?.lng || 0) - lng);
-    const hasMovedSignificantly = latDiff > 0.001 || lngDiff > 0.001;
+    
+    const distKm = getDistanceFromLatLonInKm(ll?.lat || 0, ll?.lng || 0, lat, lng);
+    const hasMovedSignificantly = distKm > 0.5; // 500 meters
 
-    if (age < FIFTEEN_MIN_MS && !hasMovedSignificantly) {
+    // Avoid unnecessary DB writes if less than 15 mins and < 500m
+    if (age < FIFTEEN_MIN_MS && !hasMovedSignificantly && ll?.displayName) {
       return res.json({
         success:   true,
         cached:    true,
         message:   'Location is still fresh',
-        liveLocation: { lat: ll.lat, lng: ll.lng, city: ll.city, state: ll.state, updatedAt: ll.updatedAt },
+        liveLocation: ll,
       });
+    }
+
+    const needsGeocoding = hasMovedSignificantly || age >= ONE_DAY_MS || !ll?.displayName;
+    
+    let area = ll?.area || null;
+    let district = ll?.district || null;
+    let geocodedCity = ll?.city || city || null;
+    let geocodedState = ll?.state || state || null;
+    let country = ll?.country || null;
+    let displayName = ll?.displayName || null;
+
+    if (needsGeocoding) {
+      const addr = await reverseGeocode(lat, lng);
+      if (addr) {
+        area = addr.neighbourhood || addr.suburb || addr.locality || addr.city_district || area;
+        geocodedCity = addr.city || addr.town || addr.district || geocodedCity;
+        district = addr.state_district || addr.district || district;
+        geocodedState = addr.state || geocodedState;
+        country = addr.country || country;
+
+        if (area && geocodedCity) displayName = `${area}, ${geocodedCity}`;
+        else if (district && geocodedCity) displayName = `${district}, ${geocodedCity}`;
+        else if (geocodedCity) displayName = geocodedCity;
+        else if (area) displayName = area;
+        else displayName = geocodedState || "Unknown Location";
+      }
     }
 
     await User.findByIdAndUpdate(req.userId, {
       $set: {
-        'liveLocation.lat':       Number(lat),
-        'liveLocation.lng':       Number(lng),
-        'liveLocation.city':      city  || ll?.city  || null,
-        'liveLocation.state':     state || ll?.state || null,
-        'liveLocation.updatedAt': now,
+        'liveLocation.type':        'Point',
+        'liveLocation.coordinates': [Number(lng), Number(lat)],
+        'liveLocation.lat':         Number(lat),
+        'liveLocation.lng':         Number(lng),
+        'liveLocation.area':        area,
+        'liveLocation.district':    district,
+        'liveLocation.city':        geocodedCity,
+        'liveLocation.state':       geocodedState,
+        'liveLocation.country':     country,
+        'liveLocation.displayName': displayName,
+        'liveLocation.updatedAt':   now,
         last_known_lat:           Number(lat),
         last_known_lng:           Number(lng),
         last_location_updated_at: now,
       }
     });
 
-    console.log(`[matchmaking-location] updated for ${req.userId}: (${lat}, ${lng}) city=${city || '?'}`);
+    console.log(`[matchmaking-location] updated for ${req.userId}: (${lat}, ${lng}) displayName=${displayName || '?'}`);
 
     return res.json({
       success:     true,
       cached:      false,
-      liveLocation: { lat: Number(lat), lng: Number(lng), city: city || null, state: state || null, updatedAt: now },
+      liveLocation: { 
+        lat: Number(lat), 
+        lng: Number(lng), 
+        area, district, city: geocodedCity, state: geocodedState, country, displayName,
+        updatedAt: now 
+      },
     });
 
   } catch (error) {

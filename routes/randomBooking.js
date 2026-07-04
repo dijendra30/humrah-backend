@@ -111,6 +111,8 @@ router.post('/create', authenticate, async (req, res) => {
     // Prefer liveLocation (more precise); fall back to request body lat/lng.
     const ll = user.liveLocation;
     const matchSearchLocation = {
+      type:       'Point',
+      coordinates: [(ll && ll.lng != null) ? ll.lng : Number(lng), (ll && ll.lat != null) ? ll.lat : Number(lat)],
       lat:        (ll && ll.lat != null) ? ll.lat : Number(lat),
       lng:        (ll && ll.lng != null) ? ll.lng : Number(lng),
       city:       (ll && ll.city)        ? ll.city  : (city || null),
@@ -212,22 +214,25 @@ router.get('/eligible', authenticate, async (req, res) => {
       return res.json({ success: true, bookings: [] });
     }
 
-    const all = await RandomBooking.find({
-      status:      { $in: ['PENDING', 'SEARCHING'] },
-      expiresAt:   { $gt: new Date() },
-      initiatorId: { $ne: req.userId },
-    }).populate('initiatorId', 'firstName lastName profilePhoto questionnaire verified photoVerificationStatus').lean();
+    const eligible = await RandomBooking.aggregate([
+      {
+        $geoNear: {
+          near: { type: 'Point', coordinates: [uLng, uLat] },
+          distanceField: 'distance',
+          distanceMultiplier: 0.001, // meters to km
+          maxDistance: 15000, // 15km
+          query: {
+            status:      { $in: ['PENDING', 'SEARCHING'] },
+            expiresAt:   { $gt: new Date() },
+            initiatorId: { $ne: new mongoose.Types.ObjectId(req.userId) },
+          },
+          spherical: true
+        }
+      },
+      { $limit: 20 }
+    ]);
 
-    const eligible = all
-      .map(b => {
-        // Use frozen matchSearchLocation for distance if available, else booking lat/lng
-        const bLat = b.matchSearchLocation?.lat ?? b.lat;
-        const bLng = b.matchSearchLocation?.lng ?? b.lng;
-        return { ...b, distance: calculateDistance(uLat, uLng, bLat, bLng) };
-      })
-      .filter(b => b.distance <= 15)
-      .sort((a, b) => a.distance - b.distance)
-      .slice(0, 20);
+    await RandomBooking.populate(eligible, { path: 'initiatorId', select: 'firstName lastName profilePhoto questionnaire verified photoVerificationStatus' });
 
     return res.json({ success: true, bookings: eligible });
   } catch (err) {
@@ -280,12 +285,25 @@ router.get('/nearby', authenticate, async (req, res) => {
       return cur && cur.userId.toString() === userId && cur.response === 'PENDING';
     });
 
-    // 2. General pool (PENDING / SEARCHING)
-    const general = await RandomBooking.find({
-      status:      { $in: ['PENDING', 'SEARCHING'] },
-      initiatorId: { $ne: userObjId },
-      expiresAt:   { $gt: now },
-    }).populate('initiatorId', 'firstName lastName profilePhoto verified questionnaire photoVerificationStatus').lean();
+    // 2. General pool (PENDING / SEARCHING) via $geoNear
+    const general = await RandomBooking.aggregate([
+      {
+        $geoNear: {
+          near: { type: 'Point', coordinates: [effectiveLng, effectiveLat] },
+          distanceField: 'distance',
+          distanceMultiplier: 0.001,
+          maxDistance: 20000, // 20km
+          query: {
+            status:      { $in: ['PENDING', 'SEARCHING'] },
+            initiatorId: { $ne: userObjId },
+            expiresAt:   { $gt: now },
+          },
+          spherical: true
+        }
+      },
+      { $limit: 50 }
+    ]);
+    await RandomBooking.populate(general, { path: 'initiatorId', select: 'firstName lastName profilePhoto verified questionnaire photoVerificationStatus' });
 
     // Merge, deduplicate
     const seen = new Set();
@@ -297,10 +315,13 @@ router.get('/nearby', authenticate, async (req, res) => {
 
     const nearby = all
       .map(b => {
-        // Use frozen matchSearchLocation for distance; fall back to booking lat/lng
-        const bLat = b.matchSearchLocation?.lat ?? b.lat;
-        const bLng = b.matchSearchLocation?.lng ?? b.lng;
-        return { ...b, distance: calculateDistance(effectiveLat, effectiveLng, bLat, bLng) };
+        // For myReserved which didn't go through $geoNear, calculate in memory
+        if (b.distance === undefined) {
+           const bLat = b.matchSearchLocation?.lat ?? b.lat;
+           const bLng = b.matchSearchLocation?.lng ?? b.lng;
+           b.distance = calculateDistance(effectiveLat, effectiveLng, bLat, bLng);
+        }
+        return b;
       })
       .filter(b => b.distance <= 20)
       .sort((a, b) => {
