@@ -77,12 +77,10 @@ async function reverseGeocode(lat, lng) {
 }
 
 // ── POST /api/users/matchmaking-location ─────────────────────────────────────
-// Body: { lat, lng, city, state }
-// 1. Updates user.liveLocation
-// 2. If city differs from questionnaire.city → silently updates questionnaire.city + questionnaire.state
+// Body: { lat, lng }
 router.post('/', async (req, res) => {
   try {
-    const { lat, lng, city, state } = req.body;
+    const { lat, lng } = req.body;
 
     if (lat === undefined || lng === undefined)
       return res.status(400).json({ success: false, message: 'lat and lng are required' });
@@ -91,13 +89,12 @@ router.post('/', async (req, res) => {
 
     const now  = new Date();
     const FIFTEEN_MIN_MS = 15 * 60 * 1000;
-    const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
     // ── Server-side staleness guard ──────────────────────────────────────────
     const user = await User.findById(req.userId).select('liveLocation last_known_lat last_known_lng questionnaire').lean();
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
-    const ll       = user.liveLocation;
+    const ll       = user.liveLocation || {};
     const lastUpd  = ll?.updatedAt ? new Date(ll.updatedAt).getTime() : 0;
     const age      = now.getTime() - lastUpd;
     
@@ -110,60 +107,38 @@ router.post('/', async (req, res) => {
         success:            true,
         cached:             true,
         message:            'Location is still fresh',
-        liveLocation:       ll,
-        profileCityUpdated: false,
-        profileCity:        user.questionnaire?.city  || null,
-        profileState:       user.questionnaire?.state || null,
+        liveLocation:       ll
       });
     }
 
-    const needsGeocoding = hasMovedSignificantly || age >= ONE_DAY_MS || !ll?.displayName;
-    
-    let area = ll?.area || null;
-    let district = ll?.district || null;
-    let geocodedCity = ll?.city || null;
-    let geocodedState = ll?.state || null;
-    let country = ll?.country || null;
-    let displayName = ll?.displayName || null;
+    // Attempt Reverse Geocoding
+    const addr = await reverseGeocode(lat, lng);
 
-    if (needsGeocoding) {
-      const addr = await reverseGeocode(lat, lng);
-      if (addr) {
-        area = addr.neighbourhood || addr.suburb || addr.quarter || addr.residential || addr.road || null;
-        district = addr.city_district || addr.county || null;
-        geocodedCity = addr.city || addr.town || addr.municipality || null;
-        geocodedState = addr.state || null;
-        country = addr.country || null;
+    if (!addr) {
+      console.warn(`⚠️ Geocoding completely failed for ${req.userId}. Keeping previous location data.`);
+      return res.status(503).json({
+        success: false,
+        message: 'Reverse geocoding failed. Please try again later.',
+        retry: true,
+        liveLocation: ll
+      });
+    }
 
-        if (area && geocodedCity) {
-          displayName = `${area}, ${geocodedCity}`;
-        } else if (district && geocodedCity) {
-          displayName = `${district}, ${geocodedCity}`;
-        } else if (geocodedCity) {
-          displayName = geocodedCity;
-        } else if (area) {
-          displayName = area;
-        } else {
-          displayName = geocodedState || "Unknown Location";
-        }
-      } else {
-        // If BOTH geocoders failed entirely, we must NOT use the old city if distance > 500m
-        // because the user physically moved. We use the client's city if provided, OR wipe it.
-        if (hasMovedSignificantly) {
-           geocodedCity = city || "Unknown City";
-           geocodedState = state || "Unknown State";
-           displayName = geocodedCity;
-           area = null;
-           district = null;
-        } else {
-           geocodedCity = city || ll?.city || null;
-           geocodedState = state || ll?.state || null;
-        }
-      }
-    } else {
-       // If no geocoding needed (e.g. < 500m but age > 15m), we can trust the client/cache
-       geocodedCity = city || ll?.city || null;
-       geocodedState = state || ll?.state || null;
+    const area = addr.neighbourhood || addr.suburb || addr.quarter || addr.residential || addr.road || null;
+    const district = addr.city_district || addr.county || null;
+    const geocodedCity = addr.city || addr.town || addr.municipality || addr.county || addr.state_district || null;
+    const geocodedState = addr.state || null;
+    const country = addr.country || addr.countryName || null;
+
+    let displayName = geocodedCity;
+    if (area && geocodedCity) {
+      displayName = `${area}, ${geocodedCity}`;
+    } else if (district && geocodedCity) {
+      displayName = `${district}, ${geocodedCity}`;
+    } else if (area) {
+      displayName = area;
+    } else if (!displayName && geocodedState) {
+      displayName = geocodedState;
     }
 
     const $set = {
@@ -187,18 +162,15 @@ router.post('/', async (req, res) => {
     const updated = await User.findByIdAndUpdate(
       req.userId,
       { $set },
-      { new: true, select: 'liveLocation questionnaire' }
+      { new: true, select: 'liveLocation' }
     );
 
-    console.log(`[matchmaking-location] updated for ${req.userId}: (${lat}, ${lng}) displayName=${displayName || '?'}`);
+    console.log("LOCATION UPDATED:", lat, lng, displayName);
 
     res.json({
       success:            true,
       cached:             false,
       liveLocation:       updated.liveLocation,
-      profileCityUpdated: false,
-      profileCity:        updated.questionnaire?.city  || null,
-      profileState:       updated.questionnaire?.state || null,
       message:            'Live location updated successfully'
     });
   } catch (error) {

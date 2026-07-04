@@ -313,10 +313,7 @@ router.get('/recommended', auth, async (req, res) => {
         }
       };
       sortObj = null; // $near implicitly sorts by distance
-    } else if (u.questionnaire?.city) {
-      f['liveLocation.city'] = u.questionnaire.city;
     }
-
     let query = User.find(f)
       .select('firstName lastName profilePhoto questionnaire liveLocation ratingStats verified isPremium userType')
       .limit(10);
@@ -350,8 +347,6 @@ router.get('/', auth, async (req, res) => {
         }
       };
       sortObj = null; // implicitly sorts by distance
-    } else if (u?.questionnaire?.city) {
-      f['liveLocation.city'] = u.questionnaire.city;
     }
 
     let query = User.find(f)
