@@ -264,11 +264,17 @@ const userSchema = new mongoose.Schema({
   // Stale after 60 minutes -> frontend must refresh before matchmaking.
   // =============================================
   liveLocation: {
-    lat:       { type: Number, default: null },
-    lng:       { type: Number, default: null },
-    city:      { type: String, default: null },  // reverse-geocoded, not profileCity
-    state:     { type: String, default: null },
-    updatedAt: { type: Date,   default: null },
+    type:        { type: String, enum: ['Point'], default: 'Point' },
+    coordinates: { type: [Number], default: undefined }, // [lng, lat]
+    lat:         { type: Number, default: null },
+    lng:         { type: Number, default: null },
+    area:        { type: String, default: null },
+    district:    { type: String, default: null },
+    city:        { type: String, default: null },
+    state:       { type: String, default: null },
+    country:     { type: String, default: null },
+    displayName: { type: String, default: null },
+    updatedAt:   { type: Date,   default: null },
   },
 
   // =============================================
@@ -450,9 +456,9 @@ userSchema.methods.isImagePostBlocked = function () {
 // INDEXES
 // =============================================
 userSchema.index({ last_known_lat: 1, last_known_lng: 1 });
-userSchema.index({ 'liveLocation.lat': 1, 'liveLocation.lng': 1 });
+userSchema.index({ 'liveLocation': '2dsphere' });
 userSchema.index({ 'liveLocation.updatedAt': 1 });
-userSchema.index({ 'liveLocation.city': 1 }); // companion city filter (live city)
+userSchema.index({ 'liveLocation.city': 1 }); // Fallback if still needed for some reason
 userSchema.index({ 'dailyMood.expiresAt': 1, 'dailyMood.visible': 1 });
 userSchema.index({ 'moderationFlags.isFlagged': 1 });
 userSchema.index({ 'moderationFlags.strikeCount': 1 });
@@ -533,7 +539,18 @@ userSchema.methods.hasFreshLiveLocation = function() {
 };
 userSchema.methods.getBestLocationForMatching = function() {
   if (this.liveLocation?.lat && this.liveLocation?.lng && this.hasFreshLiveLocation()) {
-    return { lat: this.liveLocation.lat, lng: this.liveLocation.lng, city: this.liveLocation.city, state: this.liveLocation.state, updatedAt: this.liveLocation.updatedAt, source: 'live' };
+    return {
+      lat: this.liveLocation.lat,
+      lng: this.liveLocation.lng,
+      area: this.liveLocation.area,
+      district: this.liveLocation.district,
+      city: this.liveLocation.city,
+      state: this.liveLocation.state,
+      country: this.liveLocation.country,
+      displayName: this.liveLocation.displayName,
+      updatedAt: this.liveLocation.updatedAt,
+      source: 'live'
+    };
   }
   if (this.hasRecentLocation()) {
     return { lat: this.last_known_lat, lng: this.last_known_lng, city: null, state: null, updatedAt: this.last_location_updated_at, source: 'legacy' };

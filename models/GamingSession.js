@@ -31,6 +31,13 @@ const GamingSessionSchema = new mongoose.Schema({
   creatorId:       { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
   creatorUsername: { type: String, default: "User" },
   city:            { type: String, required: true, trim: true, index: true },
+  
+  // ── Geospatial Location ────────────────────────────────────────────────────
+  location: {
+    type:        { type: String, enum: ['Point'], default: 'Point' },
+    coordinates: { type: [Number], default: undefined }, // [lng, lat]
+  },
+  
   gameType:        { type: String, required: true, trim: true },
   customGameName:  { type: String, default: null },
   playersNeeded:   { type: Number, required: true, min: 2, max: 6 },
@@ -94,6 +101,7 @@ const GamingSessionSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 GamingSessionSchema.index({ city: 1, cardStatus: 1, startTime: 1 });
+GamingSessionSchema.index({ location: '2dsphere' });
 GamingSessionSchema.index({ cardStatus: 1, cardExpiresAt: 1 });   // card expiry query
 GamingSessionSchema.index({ chatStatus: 1, chatExpiresAt: 1 });   // chat expiry query
 // ✅ NO TTL INDEX — documents are kept in the database permanently.

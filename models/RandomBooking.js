@@ -26,6 +26,8 @@ const randomBookingSchema = new mongoose.Schema({
   // does NOT affect an active meetup request's search area.
   // This is the single source of truth for "where was the user when they posted".
   matchSearchLocation: {
+    type:        { type: String, enum: ['Point'], default: 'Point' },
+    coordinates: { type: [Number], default: undefined }, // [lng, lat]
     lat:         { type: Number, default: null },
     lng:         { type: Number, default: null },
     city:        { type: String, default: null },
@@ -90,7 +92,7 @@ const randomBookingSchema = new mongoose.Schema({
 
 // ── Indexes ────────────────────────────────────────────────────────────────────
 randomBookingSchema.index({ lat: 1, lng: 1 });
-randomBookingSchema.index({ 'matchSearchLocation.lat': 1, 'matchSearchLocation.lng': 1 });
+randomBookingSchema.index({ 'matchSearchLocation': '2dsphere' });
 randomBookingSchema.index({ city: 1, status: 1, expiresAt: 1 });
 randomBookingSchema.index({ status: 1, startTime: 1 });
 randomBookingSchema.index({ status: 1, reservedUntil: 1 });
