@@ -3,6 +3,12 @@
 
 const MatchingTodayMood  = require('../models/MatchingTodayMood');
 const { toLocationHash, getAreaNearby, toLegacyShape } = require('../services/nearbyPlaceService');
+// ✅ Atomic, geocode-first live location update — same single source of truth
+// used by /api/users/location and /api/users/matchmaking-location.
+// See services/liveLocationService.js for why this matters: writing lat/lng
+// without also writing city/state/displayName in the SAME update is exactly
+// what caused "lat/lng update instantly but city stays old".
+const { updateUserLiveLocation } = require('../services/liveLocationService');
 
 const VALID_MOODS = new Set([
   'Cafe Mood', 'Food Mood', 'Walk Mood', 'Talk Mood', 'Study Mood',
@@ -40,7 +46,10 @@ exports.appOpen = async (req, res) => {
         { $set: { locationHash, updatedAt: now } },
         { upsert: true, new: true, setDefaultsOnInsert: true }
       ).then(d => { doc = d; }),
-      // Only write liveLocation if it's stale (> 15 min) — avoids hammering DB
+      // Only geocode+write liveLocation if it's stale (> 15 min) or moved meaningfully
+      // — avoids hammering Nominatim on every single app open.
+      // ⚠️ Always goes through the atomic service: lat/lng are NEVER written here
+      // without area/city/state/displayName landing in the exact same DB write.
       User.findById(req.userId).select('liveLocation').lean().then(async u => {
         if (!u) return;
         const lastUpd = u.liveLocation?.updatedAt ? new Date(u.liveLocation.updatedAt).getTime() : 0;
@@ -48,17 +57,12 @@ exports.appOpen = async (req, res) => {
         const latDiff = Math.abs((u.liveLocation?.lat || 0) - lat);
         const lngDiff = Math.abs((u.liveLocation?.lng || 0) - lng);
         if (age >= FIFTEEN_MIN_MS || latDiff > 0.001 || lngDiff > 0.001) {
-          await User.findByIdAndUpdate(req.userId, {
-            $set: {
-              'liveLocation.lat':       Number(lat),
-              'liveLocation.lng':       Number(lng),
-              'liveLocation.updatedAt': now,
-              last_known_lat:           Number(lat),
-              last_known_lng:           Number(lng),
-              last_location_updated_at: now,
-            }
-          });
-          console.log(`[appOpen] liveLocation updated for ${req.userId}: (${lat}, ${lng})`);
+          const result = await updateUserLiveLocation(req.userId, lat, lng);
+          if (result.success) {
+            console.log(`[appOpen] liveLocation updated for ${req.userId}: (${lat}, ${lng}) -> ${result.liveLocation?.displayName}`);
+          } else {
+            console.warn(`[appOpen] liveLocation update failed for ${req.userId} — previous location preserved, will retry next app open.`);
+          }
         }
       })
     ]);
