@@ -553,6 +553,37 @@ router.get('/my-bookings', authenticate, async (req, res) => {
   }
 });
 
+// ── MY SURPRISE ACTIVITIES ───────────────────────────────────────────────────
+router.get('/my-activities', authenticate, async (req, res) => {
+  try {
+    // Return only activities created by the logged-in user
+    const activities = await RandomBooking.find({ initiatorId: req.userId })
+      .populate('acceptorId', 'username profilePhoto')
+      .sort({ createdAt: -1 })
+      .lean();
+    
+    // Map to frontend-expected format
+    const mappedActivities = activities.map(a => ({
+      id: a._id.toString(),
+      meetupEnergy: a.meetupEnergy || [],
+      status: a.status,
+      createdAt: a.createdAt,
+      expiresAt: a.expiresAt,
+      matchedUser: a.acceptorId ? {
+        username: a.acceptorId.username,
+        profilePhoto: a.acceptorId.profilePhoto
+      } : null,
+      chatId: a.chatId ? a.chatId.toString() : null,
+      city: a.city
+    }));
+
+    return res.json({ success: true, activities: mappedActivities });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false, message: 'Failed to load surprise activities.' });
+  }
+});
+
 // ── USAGE ─────────────────────────────────────────────────────────────────────
 router.get('/usage', authenticate, async (req, res) => {
   try {
@@ -769,6 +800,32 @@ router.post('/:bookingId/cancel', authenticate, async (req, res) => {
     await User.findByIdAndUpdate(req.userId, { $inc: { 'behaviorMetrics.cancellationCount': 1 } });
     return res.json({ success: true, message: 'Booking cancelled.' });
   } catch (err) {
+    return res.status(500).json({ success: false, message: 'Failed to cancel booking.' });
+  }
+});
+
+// ── CANCEL SURPRISE ACTIVITY (PATCH) ──────────────────────────────────────────
+router.patch('/:id/cancel', authenticate, async (req, res) => {
+  try {
+    const booking = await RandomBooking.findById(req.params.id);
+    if (!booking) return res.status(404).json({ success: false, message: 'Booking not found.' });
+    
+    if (booking.initiatorId.toString() !== req.userId) {
+      return res.status(403).json({ success: false, message: 'Only the creator can cancel.' });
+    }
+    
+    // Strict requirement: Only allow cancel when status is SEARCHING
+    if (booking.status !== 'SEARCHING') {
+      return res.status(400).json({ success: false, message: 'Meetup already confirmed and cannot be cancelled here.' });
+    }
+    
+    booking.status = 'CANCELLED';
+    booking.cancelledAt = new Date();
+    await booking.save();
+    
+    return res.json({ success: true, message: 'Booking cancelled.' });
+  } catch (err) {
+    console.error(err);
     return res.status(500).json({ success: false, message: 'Failed to cancel booking.' });
   }
 });
