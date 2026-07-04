@@ -41,16 +41,39 @@ function getDistanceFromLatLonInKm(lat1, lon1, lat2, lon2) {
 }
 
 async function reverseGeocode(lat, lng) {
+  // 1. Try Nominatim (OSM) first
   try {
     const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&addressdetails=1&zoom=18`;
     const response = await fetch(url, { headers: { 'User-Agent': 'HumrahApp/1.0 (contact@humrah.com)' } });
-    if (!response.ok) return null;
-    const data = await response.json();
-    return data.address || null;
+    if (response.ok) {
+      const data = await response.json();
+      if (data && data.address) return data.address;
+    }
   } catch(e) {
-    console.error("Geocoding failed:", e);
-    return null;
+    console.error("Nominatim geocoding failed:", e.message);
   }
+
+  // 2. Fallback to BigDataCloud (Free, highly reliable, no API key needed for client-tier)
+  try {
+    console.log("Falling back to BigDataCloud for reverse geocoding...");
+    const url = `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lng}&localityLanguage=en`;
+    const response = await fetch(url);
+    if (response.ok) {
+      const data = await response.json();
+      return {
+        city: data.city || data.locality,
+        town: data.locality,
+        state: data.principalSubdivision,
+        city_district: data.locality,
+        suburb: data.locality,
+        country: data.countryName
+      };
+    }
+  } catch(e) {
+    console.error("BigDataCloud geocoding failed:", e.message);
+  }
+  
+  return null;
 }
 
 // ── POST /api/users/matchmaking-location ─────────────────────────────────────
@@ -98,8 +121,8 @@ router.post('/', async (req, res) => {
     
     let area = ll?.area || null;
     let district = ll?.district || null;
-    let geocodedCity = ll?.city || city || null;
-    let geocodedState = ll?.state || state || null;
+    let geocodedCity = ll?.city || null;
+    let geocodedState = ll?.state || null;
     let country = ll?.country || null;
     let displayName = ll?.displayName || null;
 
@@ -123,7 +146,24 @@ router.post('/', async (req, res) => {
         } else {
           displayName = geocodedState || "Unknown Location";
         }
+      } else {
+        // If BOTH geocoders failed entirely, we must NOT use the old city if distance > 500m
+        // because the user physically moved. We use the client's city if provided, OR wipe it.
+        if (hasMovedSignificantly) {
+           geocodedCity = city || "Unknown City";
+           geocodedState = state || "Unknown State";
+           displayName = geocodedCity;
+           area = null;
+           district = null;
+        } else {
+           geocodedCity = city || ll?.city || null;
+           geocodedState = state || ll?.state || null;
+        }
       }
+    } else {
+       // If no geocoding needed (e.g. < 500m but age > 15m), we can trust the client/cache
+       geocodedCity = city || ll?.city || null;
+       geocodedState = state || ll?.state || null;
     }
 
     const $set = {
