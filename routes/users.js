@@ -15,6 +15,9 @@ const crypto = require('crypto');
 const ModerationLog = require('../models/ModerationLog');
 const ModerationCache = require('../models/ModerationCache');
 const { checkWithOpenAI, checkWithLlamaGuard, moderateQuestionnaireSync, applyStrikesAndEnforce, buildModerationResponse, buildAutoCleanSuccessResponse } = require('../middleware/moderation');
+// ✅ Atomic, geocode-first live location update — single source of truth
+// shared with routes/liveLocationMatchmaking.js (see services/liveLocationService.js)
+const { updateUserLiveLocation } = require('../services/liveLocationService');
 
 const normalizeCostSharingPreference = (val) => {
   if (!val || typeof val !== 'string') return null;
@@ -189,8 +192,15 @@ needsGuidelinesAcceptance=${user.needsGuidelinesAcceptance !== undefined ? user.
 router.delete('/me', authenticate, deleteAccountLimiter, deleteMyAccount);
 
 // ==================== LOCATION ROUTE ====================
-
-
+//
+// ⚠️ FIXED: this endpoint used to call the legacy user.updateLocation(lat, lng)
+// helper, which wrote ONLY last_known_lat/last_known_lng and never touched
+// liveLocation.city/state/displayName. That is exactly what caused the bug
+// where lat/lng updated instantly but the displayed city stayed stale.
+//
+// Now it goes through the SAME atomic, geocode-first service used by
+// /api/users/matchmaking-location, so lat/lng and city/state can never
+// diverge no matter which endpoint the client calls.
 router.post('/location', authenticate, async (req, res) => {
   try {
     const { lat, lng } = req.body;
@@ -199,16 +209,29 @@ router.post('/location', authenticate, async (req, res) => {
     if (lat < -90 || lat > 90 || lng < -180 || lng > 180)
       return res.status(400).json({ success: false, message: 'Invalid latitude or longitude values' });
 
-    const user = await User.findById(req.userId);
-    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    const result = await updateUserLiveLocation(req.userId, lat, lng);
 
-    user.updateLocation(lat, lng);
-    await user.save();
+    if (!result.success) {
+      // Reverse geocoding failed — previous liveLocation (city/state/displayName)
+      // was left completely untouched. Tell Android to retry, never show a
+      // half-updated location.
+      return res.status(503).json({
+        success:      false,
+        message:      result.message || 'Could not update location. Please try again.',
+        retry:        true,
+        liveLocation: result.liveLocation || null
+      });
+    }
 
     res.json({
       success: true,
       message: 'Location updated successfully',
-      location: { last_known_lat: user.last_known_lat, last_known_lng: user.last_known_lng, last_location_updated_at: user.last_location_updated_at }
+      location: {
+        last_known_lat:           result.liveLocation.lat,
+        last_known_lng:           result.liveLocation.lng,
+        last_location_updated_at: result.liveLocation.updatedAt
+      },
+      liveLocation: result.liveLocation
     });
   } catch (error) {
     console.error('❌ Location update error:', error);

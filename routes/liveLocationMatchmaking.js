@@ -9,7 +9,7 @@
 //   5. Before creating a meetup
 //
 // Endpoints (mounted at /api/users/matchmaking-location in server.js):
-//   POST /        → update liveLocation + silently sync questionnaire.city/state
+//   POST /        → atomic geocode-first liveLocation update (never touches questionnaire.city)
 //   GET  /status  → freshness check
 //
 // Authentication is applied by server.js at mount time.
@@ -24,6 +24,10 @@
 const express = require('express');
 const router  = express.Router();
 const User    = require('../models/User');
+// ✅ Shared atomic geocode-first update — the SAME logic used by
+//    POST /api/users/location, so lat/lng and city/state can never diverge
+//    between the two endpoints. See services/liveLocationService.js.
+const { updateUserLiveLocation } = require('../services/liveLocationService');
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 const STALE_THRESHOLD_MS = 60 * 60 * 1000; // 60 minutes
@@ -38,42 +42,6 @@ function getDistanceFromLatLonInKm(lat1, lon1, lat2, lon2) {
     Math.sin(dLon/2) * Math.sin(dLon/2); 
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)); 
   return R * c; 
-}
-
-async function reverseGeocode(lat, lng) {
-  // 1. Try Nominatim (OSM) first
-  try {
-    const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&addressdetails=1&zoom=18`;
-    const response = await fetch(url, { headers: { 'User-Agent': 'HumrahApp/1.0 (contact@humrah.com)' } });
-    if (response.ok) {
-      const data = await response.json();
-      if (data && data.address) return data.address;
-    }
-  } catch(e) {
-    console.error("Nominatim geocoding failed:", e.message);
-  }
-
-  // 2. Fallback to BigDataCloud (Free, highly reliable, no API key needed for client-tier)
-  try {
-    console.log("Falling back to BigDataCloud for reverse geocoding...");
-    const url = `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lng}&localityLanguage=en`;
-    const response = await fetch(url);
-    if (response.ok) {
-      const data = await response.json();
-      return {
-        city: data.city || data.locality,
-        town: data.locality,
-        state: data.principalSubdivision,
-        city_district: data.locality,
-        suburb: data.locality,
-        country: data.countryName
-      };
-    }
-  } catch(e) {
-    console.error("BigDataCloud geocoding failed:", e.message);
-  }
-  
-  return null;
 }
 
 // ── POST /api/users/matchmaking-location ─────────────────────────────────────
@@ -111,67 +79,27 @@ router.post('/', async (req, res) => {
       });
     }
 
-    // Attempt Reverse Geocoding
-    const addr = await reverseGeocode(lat, lng);
+    // ── Atomic geocode-first update (shared with POST /api/users/location) ──
+    // Reverse geocoding happens FIRST inside this call; lat/lng and
+    // area/city/state/displayName are written together in a single
+    // findByIdAndUpdate. If geocoding fails, nothing is overwritten.
+    const result = await updateUserLiveLocation(req.userId, lat, lng);
 
-    if (!addr) {
-      console.warn(`⚠️ Geocoding completely failed for ${req.userId}. Keeping previous location data.`);
+    if (!result.success) {
+      // Geocoding failed — old city/state/displayName were left untouched.
       return res.status(503).json({
-        success: false,
-        message: 'Reverse geocoding failed. Please try again later.',
-        retry: true,
-        liveLocation: ll
+        success:      false,
+        message:      result.message || 'Reverse geocoding failed. Please try again later.',
+        retry:        true,
+        liveLocation: result.liveLocation || ll
       });
     }
 
-    const area = addr.neighbourhood || addr.suburb || addr.quarter || addr.residential || addr.road || null;
-    const district = addr.city_district || addr.county || null;
-    const geocodedCity = addr.city || addr.town || addr.municipality || addr.county || addr.state_district || null;
-    const geocodedState = addr.state || null;
-    const country = addr.country || addr.countryName || null;
-
-    let displayName = geocodedCity;
-    if (area && geocodedCity) {
-      displayName = `${area}, ${geocodedCity}`;
-    } else if (district && geocodedCity) {
-      displayName = `${district}, ${geocodedCity}`;
-    } else if (area) {
-      displayName = area;
-    } else if (!displayName && geocodedState) {
-      displayName = geocodedState;
-    }
-
-    const $set = {
-      'liveLocation.type':        'Point',
-      'liveLocation.coordinates': [Number(lng), Number(lat)],
-      'liveLocation.lat':         Number(lat),
-      'liveLocation.lng':         Number(lng),
-      'liveLocation.area':        area,
-      'liveLocation.district':    district,
-      'liveLocation.city':        geocodedCity,
-      'liveLocation.state':       geocodedState,
-      'liveLocation.country':     country,
-      'liveLocation.displayName': displayName,
-      'liveLocation.updatedAt':   now,
-
-      last_known_lat:           Number(lat),
-      last_known_lng:           Number(lng),
-      last_location_updated_at: now
-    };
-
-    const updated = await User.findByIdAndUpdate(
-      req.userId,
-      { $set },
-      { new: true, select: 'liveLocation' }
-    );
-
-    console.log("LOCATION UPDATED:", lat, lng, displayName);
-
     res.json({
-      success:            true,
-      cached:             false,
-      liveLocation:       updated.liveLocation,
-      message:            'Live location updated successfully'
+      success:      true,
+      cached:       false,
+      liveLocation: result.liveLocation,
+      message:      'Live location updated successfully'
     });
   } catch (error) {
     console.error('❌ matchmaking-location update error:', error);
