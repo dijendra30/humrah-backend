@@ -265,7 +265,7 @@ const userSchema = new mongoose.Schema({
   // =============================================
   liveLocation: {
     type:        { type: String, enum: ['Point'], default: 'Point' },
-    coordinates: { type: [Number], default: undefined }, // [lng, lat]
+    coordinates: { type: [Number], default: [0, 0] }, // [lng, lat]
     lat:         { type: Number, default: null },
     lng:         { type: Number, default: null },
     area:        { type: String, default: null },
