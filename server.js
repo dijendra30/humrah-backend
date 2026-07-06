@@ -606,6 +606,7 @@ app.use('/api/food',              authenticate, enforceLegalAcceptance, foodRout
 app.use('/api',                   authenticate, enforceLegalAcceptance, movieSessionRoutes);
 app.use('/api/auth',              authenticate, fcmTokenRoutes);
 app.use('/api/events',            authenticate, require('./routes/featureClicks'));
+app.use('/api/features',          authenticate, require('./routes/features'));
 app.use('/api/matching-mood',     authenticate, enforceLegalAcceptance, matchingMoodRoutes);
 app.use('/api/mood-request',      authenticate, enforceLegalAcceptance, moodRequestRoutes);
 app.use('/api/safety-tools',      authenticate, enforceLegalAcceptance, safetyToolsRoutes);
