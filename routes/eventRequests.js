@@ -11,6 +11,9 @@ const { auth, adminOnly } = require('../middleware/auth');
 // @desc    Submit a new event request idea
 // @access  Private
 router.post('/', async (req, res) => {
+  console.log("EVENT REQUEST API HIT");
+  console.log("USER:", req.user);
+  console.log("BODY:", req.body);
   try {
     const {
       title,
