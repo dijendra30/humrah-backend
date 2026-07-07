@@ -614,6 +614,7 @@ app.use('/api/safety-tickets',    authenticate, enforceLegalAcceptance, safetyTi
 app.use('/api/live-location',     authenticate, enforceLegalAcceptance, require('./routes/liveLocationRoutes'));
 app.use('/api',                   authenticate, enforceLegalAcceptance, require('./routes/moderation_route'));
 app.use('/api/official-events',   authenticate, enforceLegalAcceptance, require('./routes/officialEvents')); // ✅ Official Events Management System
+app.use('/api/event-requests',    authenticate, enforceLegalAcceptance, require('./routes/eventRequests')); // ✅ Event Requests System
 
 // ✅ NEW: Live location for matchmaking — POST /api/users/matchmaking-location
 //         Separate from safety live-location. Updates liveLocation on User doc.
