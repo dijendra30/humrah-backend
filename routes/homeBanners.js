@@ -164,7 +164,7 @@ router.post('/admin', auth, adminOnly, async (req, res) => {
         return res.status(400).json({ success: false, message: 'Banner image is required' });
     }
 
-    if (actionType === 'url' && actionValue) {
+    if (actionType === 'Open URL' && actionValue) {
         if (!isValidUrl(actionValue)) {
             return res.status(400).json({ success: false, message: 'Invalid URL. Only secure https:// URLs are allowed.' });
         }
@@ -208,7 +208,7 @@ router.put('/admin/:id', auth, adminOnly, async (req, res) => {
     const banner = await HomeBanner.findById(req.params.id);
     if (!banner) return res.status(404).json({ success: false, message: 'Banner not found' });
 
-    if (actionType === 'url' && actionValue) {
+    if (actionType === 'Open URL' && actionValue) {
         if (!isValidUrl(actionValue)) {
             return res.status(400).json({ success: false, message: 'Invalid URL. Only secure https:// URLs are allowed.' });
         }
