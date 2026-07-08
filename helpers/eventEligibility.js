@@ -70,4 +70,31 @@ function canUserJoinEvent(user, event) {
   return true;
 }
 
-module.exports = { canUserJoinEvent };
+function getEventExpiryDate(event) {
+  if (!event.date) return null;
+  const expireTime = new Date(event.date);
+  if (event.endTime) {
+    const timeStr = event.endTime.trim().toLowerCase();
+    let hours = 23, minutes = 59;
+    const timeMatch = timeStr.match(/(\d+):(\d+)\s*(am|pm)?/);
+    if (timeMatch) {
+      hours = parseInt(timeMatch[1], 10);
+      minutes = parseInt(timeMatch[2], 10);
+      const ampm = timeMatch[3];
+      if (ampm === 'pm' && hours < 12) hours += 12;
+      if (ampm === 'am' && hours === 12) hours = 0;
+    }
+    expireTime.setHours(hours, minutes, 0, 0);
+  } else {
+    expireTime.setHours(23, 59, 59, 999);
+  }
+  return expireTime;
+}
+
+function isEventExpired(event) {
+  const expiry = getEventExpiryDate(event);
+  if (!expiry) return false;
+  return new Date() > expiry;
+}
+
+module.exports = { canUserJoinEvent, getEventExpiryDate, isEventExpired };
