@@ -577,6 +577,7 @@ app.get('/api/live-location/:sessionId', liveLocationPollLimiter, require('./con
 
 // ── Protected routes ───────────────────────────────────────────────────────────
 app.use('/api/users',             authenticate, enforceLegalAcceptance, userRoutes);
+app.use('/api/home-banners',      authenticate, require('./routes/homeBanners'));
 app.use('/api/events',            authenticate, enforceLegalAcceptance, eventRoutes);
 app.use('/api/companions',        authenticate, enforceLegalAcceptance, companionRoutes);
 app.use('/api/bookings',          authenticate, enforceLegalAcceptance, bookingRoutes);
