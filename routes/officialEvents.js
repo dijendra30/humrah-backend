@@ -199,54 +199,111 @@ router.post('/:id/join', auth, async (req, res) => {
 
     const userId = req.userId;
 
-    if (event.joinedUsers.includes(userId)) {
-      return res.status(400).json({ success: false, message: 'Already joined' });
+    // Temporarily block paid events
+    if (event.eventPriceType === 'Paid') {
+      console.log(`[EVENT JOIN FAILED] reason=Paid events blocked eventId=${event._id} userId=${userId}`);
+      return res.status(400).json({ success: false, message: 'Online booking for paid events is coming soon' });
     }
 
     if (event.registrationDeadline && new Date() > event.registrationDeadline) {
       return res.status(400).json({ success: false, message: 'Registration deadline has passed' });
     }
 
-    const isFull = !event.unlimitedSeats && event.capacity && event.joinedCount >= event.capacity;
+    const user = await User.findById(userId).select('fcmToken fcmTokens questionnaire state city profileCompletion photoVerificationStatus').lean();
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
-    if (isFull) {
-      if (event.waitlistEnabled && !event.waitlistedUsers.includes(userId)) {
-        event.waitlistedUsers.push(userId);
-        event.waitlistCount += 1;
-        await event.save();
-        return res.json({ success: true, waitlisted: true, message: 'Added to waitlist' });
+    const { canUserJoinEvent } = require('../helpers/eventEligibility');
+    if (!canUserJoinEvent(user, event)) {
+      console.log(`[EVENT JOIN FAILED] reason=Ineligible eventId=${event._id} userId=${userId}`);
+      return res.status(403).json({ success: false, message: 'You are not eligible for this event' });
+    }
+
+    // Atomic join logic
+    const updatedEvent = await OfficialEvent.findOneAndUpdate({
+      _id: event._id,
+      joinedUsers: { $ne: userId },
+      $or: [
+        { unlimitedSeats: true },
+        { $expr: { $lt: ["$joinedCount", "$capacity"] } }
+      ]
+    }, {
+      $addToSet: { joinedUsers: userId },
+      $inc: { joinedCount: 1 }
+    }, { new: true });
+
+    if (!updatedEvent) {
+      // Check why it failed
+      const currentEvent = await OfficialEvent.findById(event._id);
+      if (currentEvent.joinedUsers.includes(userId)) {
+        return res.status(400).json({ success: false, message: 'Already joined' });
       }
+
+      // Event is full, handle waitlist
+      if (currentEvent.waitlistEnabled) {
+         if (!currentEvent.waitlistedUsers.includes(userId)) {
+           // Atomic waitlist update
+           await OfficialEvent.updateOne(
+             { _id: event._id, waitlistedUsers: { $ne: userId } },
+             { $addToSet: { waitlistedUsers: userId }, $inc: { waitlistCount: 1 } }
+           );
+           console.log(`[WAITLIST ADDED] eventId=${event._id} userId=${userId}`);
+           return res.json({ success: true, waitlisted: true, message: 'Added to waitlist' });
+         }
+         return res.status(400).json({ success: false, message: 'Already on waitlist' });
+      }
+
+      console.log(`[EVENT JOIN FAILED] reason=Full eventId=${event._id} userId=${userId}`);
       return res.status(400).json({ success: false, message: 'Event is full' });
     }
 
-    const user = await User.findById(userId).select('questionnaire state city').lean();
-    const userState    = user.questionnaire?.state || user.state    || 'Unknown';
-    const userDistrict = user.questionnaire?.city  || user.city     || 'Unknown';
-
-    event.joinedUsers.push(userId);
-    event.joinedCount += 1;
-
-    if (!event.stateWiseParticipation)    event.stateWiseParticipation    = new Map();
-    if (!event.districtWiseParticipation) event.districtWiseParticipation = new Map();
-    event.stateWiseParticipation.set(userState,    (event.stateWiseParticipation.get(userState)       || 0) + 1);
-    event.districtWiseParticipation.set(userDistrict, (event.districtWiseParticipation.get(userDistrict) || 0) + 1);
-
-    if (event.autoCloseRegistration && !event.unlimitedSeats &&
-        event.capacity && event.joinedCount >= event.capacity) {
-      event.registrationDeadline = new Date();
+    // Update state/district participation counts (non-atomic but low risk)
+    const userState = user.questionnaire?.state || user.state || 'Unknown';
+    const userDistrict = user.questionnaire?.city || user.city || 'Unknown';
+    if (!updatedEvent.stateWiseParticipation) updatedEvent.stateWiseParticipation = new Map();
+    if (!updatedEvent.districtWiseParticipation) updatedEvent.districtWiseParticipation = new Map();
+    
+    updatedEvent.stateWiseParticipation.set(userState, (updatedEvent.stateWiseParticipation.get(userState) || 0) + 1);
+    updatedEvent.districtWiseParticipation.set(userDistrict, (updatedEvent.districtWiseParticipation.get(userDistrict) || 0) + 1);
+    
+    if (updatedEvent.autoCloseRegistration && !updatedEvent.unlimitedSeats &&
+        updatedEvent.capacity && updatedEvent.joinedCount >= updatedEvent.capacity) {
+      updatedEvent.registrationDeadline = new Date();
     }
-
-    await event.save();
+    await updatedEvent.save();
 
     // ── Auto-generate ticket on join (idempotent) ──────────────────────────
     try {
       await EventTicket.findOneAndUpdate(
         { eventId: event._id, userId },
-        { $setOnInsert: { eventId: event._id, userId } },
+        { 
+          $set: { status: 'active' }, 
+          $setOnInsert: { eventId: event._id, userId } 
+        },
         { upsert: true, new: true, setDefaultsOnInsert: true }
       );
     } catch (ticketErr) {
       console.error('[Ticket] Auto-generate error (non-fatal):', ticketErr.message);
+    }
+
+    console.log(`[EVENT JOIN SUCCESS] eventId=${event._id} userId=${userId}`);
+
+    // Push notification (failure shouldn't break join)
+    try {
+      const payload = {
+        notification: {
+          title: 'Your Humrah ticket is ready 🎟️',
+          body: `You successfully joined ${event.title}`
+        },
+        data: { type: 'official_event', eventId: event._id.toString() }
+      };
+      const fcmTokens = user.fcmTokens || [];
+      if (fcmTokens.length > 0) {
+        await admin.messaging().sendEachForMulticast({ ...payload, tokens: fcmTokens });
+      } else if (user.fcmToken) {
+        await admin.messaging().send({ ...payload, token: user.fcmToken });
+      }
+    } catch (fcmErr) {
+      console.error('[FCM Error]:', fcmErr.message);
     }
 
     res.json({ success: true, message: 'Successfully joined the event!' });
@@ -259,30 +316,111 @@ router.post('/:id/join', auth, async (req, res) => {
 // POST /api/official-events/:id/leave
 router.post('/:id/leave', auth, async (req, res) => {
   try {
-    const event = await OfficialEvent.findById(req.params.id);
+    const eventId = req.params.id;
+    const userId = req.userId;
+
+    const event = await OfficialEvent.findById(eventId);
     if (!event) return res.status(404).json({ success: false, message: 'Event not found' });
 
-    const was = event.joinedUsers.includes(req.userId);
-    event.joinedUsers   = event.joinedUsers.filter(u => u.toString() !== req.userId);
-    if (was) event.joinedCount = Math.max(0, event.joinedCount - 1);
+    // Atomic leave from joinedUsers
+    const leaveResult = await OfficialEvent.findOneAndUpdate(
+      { _id: eventId, joinedUsers: userId, joinedCount: { $gt: 0 } },
+      { 
+        $pull: { joinedUsers: userId },
+        $inc: { joinedCount: -1 } 
+      },
+      { new: true }
+    );
 
-    if (was && event.waitlistEnabled && event.waitlistedUsers.length > 0) {
-      const next = event.waitlistedUsers.shift();
-      event.waitlistCount = Math.max(0, event.waitlistCount - 1);
-      event.joinedUsers.push(next);
-      event.joinedCount += 1;
+    let wasJoined = !!leaveResult;
+    let wasWaitlisted = false;
+
+    if (!wasJoined) {
+      // Try waitlist if user wasn't in joinedUsers
+      const waitlistLeave = await OfficialEvent.findOneAndUpdate(
+        { _id: eventId, waitlistedUsers: userId, waitlistCount: { $gt: 0 } },
+        {
+          $pull: { waitlistedUsers: userId },
+          $inc: { waitlistCount: -1 }
+        }
+      );
+      if (waitlistLeave) wasWaitlisted = true;
     }
 
-    await event.save();
+    if (!wasJoined && !wasWaitlisted) {
+      // It's possible joinedCount was 0 (shouldn't happen), or user just isn't there
+      return res.status(400).json({ success: false, message: 'Not joined or on waitlist' });
+    }
+
+    // Waitlist promotion logic
+    if (wasJoined && leaveResult.waitlistEnabled && leaveResult.waitlistedUsers.length > 0) {
+      // Promote the first user
+      const nextUser = leaveResult.waitlistedUsers[0];
+      const promoteResult = await OfficialEvent.findOneAndUpdate(
+        {
+          _id: eventId,
+          waitlistedUsers: nextUser,
+          $or: [
+            { unlimitedSeats: true },
+            { $expr: { $lt: ["$joinedCount", "$capacity"] } }
+          ]
+        },
+        {
+          $pull: { waitlistedUsers: nextUser },
+          $inc: { waitlistCount: -1, joinedCount: 1 },
+          $addToSet: { joinedUsers: nextUser }
+        },
+        { new: true }
+      );
+
+      if (promoteResult) {
+        console.log(`[WAITLIST PROMOTED] eventId=${eventId} userId=${nextUser}`);
+        
+        try {
+          await EventTicket.findOneAndUpdate(
+            { eventId: eventId, userId: nextUser },
+            { 
+              $set: { status: 'active' }, 
+              $setOnInsert: { eventId: eventId, userId: nextUser } 
+            },
+            { upsert: true, new: true, setDefaultsOnInsert: true }
+          );
+        } catch (e) {
+          console.error('[Ticket Promote Error]:', e.message);
+        }
+
+        try {
+          const promotedUser = await User.findById(nextUser).select('fcmTokens fcmToken').lean();
+          if (promotedUser) {
+            const payload = {
+              notification: { 
+                title: "You're in 🎉", 
+                body: `A spot opened for ${promoteResult.title}. Your ticket is confirmed.` 
+              },
+              data: { type: 'official_event', eventId: eventId.toString() }
+            };
+            const fcmTokens = promotedUser.fcmTokens || [];
+            if (fcmTokens.length > 0) {
+              await admin.messaging().sendEachForMulticast({ ...payload, tokens: fcmTokens });
+            } else if (promotedUser.fcmToken) {
+              await admin.messaging().send({ ...payload, token: promotedUser.fcmToken });
+            }
+          }
+        } catch (e) {
+          console.error('[FCM Error Waitlist Promoted]:', e.message);
+        }
+      }
+    }
 
     // Cancel ticket on leave
     await EventTicket.findOneAndUpdate(
-      { eventId: event._id, userId: req.userId },
+      { eventId: eventId, userId: userId },
       { $set: { status: 'cancelled' } }
     );
 
     res.json({ success: true, message: 'Left event' });
   } catch (err) {
+    console.error('Leave error:', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -290,6 +428,56 @@ router.post('/:id/leave', auth, async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // TICKET ROUTES — USER-FACING
 // ─────────────────────────────────────────────────────────────────────────────
+
+// GET /api/official-events/my-tickets
+router.get('/my-tickets', auth, async (req, res) => {
+  try {
+    const tickets = await EventTicket.find({ userId: req.userId })
+      .populate({
+         path: 'eventId',
+         select: 'title bannerImage venueName date startTime status',
+      })
+      .lean();
+
+    const upcomingTickets = [];
+    const pastTickets = [];
+    const cancelledTickets = [];
+    
+    const now = new Date();
+
+    for (const t of tickets) {
+       if (!t.eventId) continue; 
+
+       if (t.status === 'cancelled') {
+           cancelledTickets.push(t);
+           continue;
+       }
+       
+       const eventDate = new Date(t.eventId.date);
+       if (t.eventId.status === 'Expired' || eventDate < now) {
+           if (t.status === 'active' || t.status === 'used') {
+               pastTickets.push(t);
+           }
+       } else {
+           upcomingTickets.push(t);
+       }
+    }
+
+    upcomingTickets.sort((a, b) => new Date(a.eventId.date) - new Date(b.eventId.date));
+    pastTickets.sort((a, b) => new Date(b.eventId.date) - new Date(a.eventId.date));
+    cancelledTickets.sort((a, b) => new Date(b.eventId.date) - new Date(a.eventId.date));
+
+    res.json({
+       success: true,
+       upcomingTickets,
+       pastTickets,
+       cancelledTickets
+    });
+  } catch (err) {
+    console.error('My-tickets error:', err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
 
 // GET /api/official-events/:id/my-ticket
 // Returns (or lazily creates) the user's ticket for this event.
@@ -388,6 +576,52 @@ router.get('/admin/events/:id/registrations', auth, adminOnly, async (req, res) 
     });
   } catch (err) {
     console.error('Registrations error:', err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// GET /api/official-events/admin/events/:id/export-attendees
+router.get('/admin/events/:id/export-attendees', auth, adminOnly, async (req, res) => {
+  try {
+    const tickets = await EventTicket.find({ eventId: req.params.id })
+      .populate('userId', 'firstName lastName email phone')
+      .lean();
+
+    const escapeCSV = (val) => {
+      if (val === null || val === undefined) return '""';
+      const str = String(val);
+      return `"${str.replace(/"/g, '""')}"`;
+    };
+
+    const header = ['Name', 'Email', 'Phone', 'Ticket ID', 'Join Date', 'Ticket Status', 'Check-in Status'].join(',');
+    const rows = [header];
+
+    for (const t of tickets) {
+      if (!t.userId) continue;
+      const name = `${t.userId.firstName || ''} ${t.userId.lastName || ''}`.trim();
+      const email = t.userId.email || '';
+      const phone = t.userId.phone || ''; 
+      const joinDate = t.createdAt ? new Date(t.createdAt).toISOString() : '';
+      const checkInStatus = t.status === 'used' ? 'Checked In' : (t.status === 'active' ? 'Not Checked In' : 'Cancelled');
+      
+      const row = [
+        escapeCSV(name),
+        escapeCSV(email),
+        escapeCSV(phone),
+        escapeCSV(t.ticketCode),
+        escapeCSV(joinDate),
+        escapeCSV(t.status),
+        escapeCSV(checkInStatus)
+      ].join(',');
+      rows.push(row);
+    }
+
+    const csvData = rows.join('\n');
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="attendees_${req.params.id}.csv"`);
+    res.send(csvData);
+  } catch (err) {
+    console.error('Export error:', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
