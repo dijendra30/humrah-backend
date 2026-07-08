@@ -51,12 +51,7 @@ function buildUserFeedQuery(user, extras = {}) {
 
   const activeWindow = {
     status: 'Published',
-    showOnApp: { $ne: false },
-    $or: [
-      { expiresAt: { $exists: false } },
-      { expiresAt: null },
-      { expiresAt: { $gt: now } }
-    ]
+    showOnApp: { $ne: false }
   };
 
   if (!isVerified) activeWindow.visibility = 'All Users';
@@ -116,10 +111,11 @@ router.get('/feed', auth, async (req, res) => {
     const user = await User.findById(req.userId).lean();
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
+    const { isEventExpired } = require('../helpers/eventEligibility');
     const query = buildUserFeedQuery(user);
-    const events = await OfficialEvent.find(query)
+    const events = (await OfficialEvent.find(query)
       .sort({ pinOnExplore: -1, featuredEvent: -1, date: 1 })
-      .lean();
+      .lean()).filter(e => !isEventExpired(e));
 
     res.json({ success: true, events });
   } catch (err) {
@@ -145,8 +141,9 @@ router.get('/explore', auth, async (req, res) => {
       ];
     }
 
+    const { isEventExpired } = require('../helpers/eventEligibility');
     const query = buildUserFeedQuery(user, extras);
-    const all = await OfficialEvent.find(query).lean();
+    const all = (await OfficialEvent.find(query).lean()).filter(e => !isEventExpired(e));
 
     const userState = user.questionnaire?.state || user.state;
     const userCity  = user.questionnaire?.city  || user.city;
@@ -197,6 +194,11 @@ router.post('/:id/join', auth, async (req, res) => {
     if (!event) return res.status(404).json({ success: false, message: 'Event not found' });
     if (event.status !== 'Published') return res.status(400).json({ success: false, message: 'Event not available' });
 
+    const { isEventExpired, canUserJoinEvent } = require('../helpers/eventEligibility');
+    if (isEventExpired(event)) {
+      return res.status(400).json({ success: false, message: 'This event has expired and can no longer be joined' });
+    }
+
     const userId = req.userId;
 
     // Temporarily block paid events
@@ -212,7 +214,6 @@ router.post('/:id/join', auth, async (req, res) => {
     const user = await User.findById(userId).select('fcmToken fcmTokens questionnaire state city profileCompletion photoVerificationStatus').lean();
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
-    const { canUserJoinEvent } = require('../helpers/eventEligibility');
     if (!canUserJoinEvent(user, event)) {
       console.log(`[EVENT JOIN FAILED] reason=Ineligible eventId=${event._id} userId=${userId}`);
       return res.status(403).json({ success: false, message: 'You are not eligible for this event' });
@@ -273,14 +274,14 @@ router.post('/:id/join', auth, async (req, res) => {
 
     // ── Auto-generate ticket on join (idempotent) ──────────────────────────
     try {
-      await EventTicket.findOneAndUpdate(
-        { eventId: event._id, userId },
-        { 
-          $set: { status: 'active' }, 
-          $setOnInsert: { eventId: event._id, userId } 
-        },
-        { upsert: true, new: true, setDefaultsOnInsert: true }
-      );
+      let ticket = await EventTicket.findOne({ eventId: event._id, userId });
+      if (!ticket) {
+        ticket = new EventTicket({ eventId: event._id, userId, status: 'active' });
+        await ticket.save();
+      } else if (ticket.status !== 'active') {
+        ticket.status = 'active';
+        await ticket.save();
+      }
     } catch (ticketErr) {
       console.error('[Ticket] Auto-generate error (non-fatal):', ticketErr.message);
     }
@@ -377,14 +378,14 @@ router.post('/:id/leave', auth, async (req, res) => {
         console.log(`[WAITLIST PROMOTED] eventId=${eventId} userId=${nextUser}`);
         
         try {
-          await EventTicket.findOneAndUpdate(
-            { eventId: eventId, userId: nextUser },
-            { 
-              $set: { status: 'active' }, 
-              $setOnInsert: { eventId: eventId, userId: nextUser } 
-            },
-            { upsert: true, new: true, setDefaultsOnInsert: true }
-          );
+          let promoteTicket = await EventTicket.findOne({ eventId: eventId, userId: nextUser });
+          if (!promoteTicket) {
+            promoteTicket = new EventTicket({ eventId: eventId, userId: nextUser, status: 'active' });
+            await promoteTicket.save();
+          } else if (promoteTicket.status !== 'active') {
+            promoteTicket.status = 'active';
+            await promoteTicket.save();
+          }
         } catch (e) {
           console.error('[Ticket Promote Error]:', e.message);
         }
@@ -496,7 +497,18 @@ router.get('/:id/my-ticket', auth, async (req, res) => {
     let ticket = await EventTicket.findOne({ eventId: req.params.id, userId: req.userId });
     if (!ticket) {
       ticket = await EventTicket.create({ eventId: req.params.id, userId: req.userId });
+    } else if (!ticket.qrData) {
+      // Lazy-repair qrData for older tickets missing the payload
+      ticket.qrData = JSON.stringify({
+        type: 'humrah_event_ticket',
+        ticketCode: ticket.ticketCode,
+        eventId: ticket.eventId.toString(),
+        userId: ticket.userId.toString()
+      });
+      await ticket.save();
     }
+
+    const ticketUser = await User.findById(req.userId).select('firstName lastName email').lean();
 
     res.json({
       success: true,
@@ -506,6 +518,11 @@ router.get('/:id/my-ticket', auth, async (req, res) => {
         status:      ticket.status,
         issuedAt:    ticket.createdAt,
         checkedInAt: ticket.checkedInAt,
+        user: {
+          firstName: ticketUser?.firstName,
+          lastName:  ticketUser?.lastName,
+          email:     ticketUser?.email
+        },
         event: {
           title:       event.title,
           date:        event.date,
