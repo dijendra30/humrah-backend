@@ -4,7 +4,7 @@ const mongoose = require('mongoose');
 const HomeBanner = require('../models/HomeBanner');
 const { auth, adminOnly } = require('../middleware/auth');
 
-const { uploadBase64Image, deleteImage } = require('../config/cloudinary');
+const { uploadBase64, deleteImage } = require('../config/cloudinary');
 
 // ============================================================================
 // LIGHTWEIGHT DEDUPLICATION & VALIDATION UTILS
@@ -171,7 +171,7 @@ router.post('/admin', auth, adminOnly, async (req, res) => {
     }
 
     // Upload to Cloudinary
-    const uploadResult = await uploadBase64Image(bannerImageBase64, 'home_banners');
+    const uploadResult = await uploadBase64(bannerImageBase64, 'home_banners');
     if (!uploadResult) {
         return res.status(500).json({ success: false, message: 'Failed to upload image' });
     }
@@ -179,7 +179,7 @@ router.post('/admin', auth, adminOnly, async (req, res) => {
     const banner = new HomeBanner({
       title, subtitle, 
       bannerImage: uploadResult.url, 
-      bannerImagePublicId: uploadResult.public_id,
+      bannerImagePublicId: uploadResult.publicId,
       actionType, actionValue,
       displayOrder: displayOrder || 0,
       publishDate, expiryDate, isActive,
@@ -220,10 +220,10 @@ router.put('/admin/:id', auth, adminOnly, async (req, res) => {
             await deleteImage(banner.bannerImagePublicId);
         }
         // Upload new image
-        const uploadResult = await uploadBase64Image(bannerImageBase64, 'home_banners');
+        const uploadResult = await uploadBase64(bannerImageBase64, 'home_banners');
         if (uploadResult) {
             banner.bannerImage = uploadResult.url;
-            banner.bannerImagePublicId = uploadResult.public_id;
+            banner.bannerImagePublicId = uploadResult.publicId;
         }
     }
 
