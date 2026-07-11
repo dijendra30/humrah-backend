@@ -27,7 +27,7 @@ async function rephraseContent({ title, message, tone, language }) {
   }
 
   // Model is configurable via environment variable
-  const model = process.env.GEMINI_MODEL || 'gemini-pro';
+  const model = process.env.GEMINI_MODEL || 'gemini-flash-latest';
   const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 
   const prompt = buildRephrasePrompt(title, message, tone, language);
