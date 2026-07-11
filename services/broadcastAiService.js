@@ -7,18 +7,29 @@
 const axios = require('axios');
 
 /**
+ * Intelligent truncation without cutting words in half.
+ */
+function smartTruncate(text, maxLength) {
+  if (!text || text.length <= maxLength) return text;
+  // Shorten to maxLength - 3 to leave room for ellipsis, then cut at last space
+  const trimmed = text.substring(0, maxLength - 3);
+  const lastSpace = trimmed.lastIndexOf(' ');
+  if (lastSpace > 0) {
+    return trimmed.substring(0, lastSpace) + '...';
+  }
+  return trimmed + '...';
+}
+
+/**
+ * Clean up text from API response
+ */
+function cleanText(text) {
+  if (!text) return '';
+  return text.trim().replace(/[\r\n]+/g, ' '); // Remove unnecessary line breaks
+}
+
+/**
  * Rephrase broadcast content using Gemini AI.
- *
- * IMPORTANT: This function is ONLY called when the admin explicitly
- * requests AI rephrase. It must never be invoked automatically.
- *
- * @param {object} params
- * @param {string} params.title    - Original broadcast title
- * @param {string} params.message  - Original broadcast message
- * @param {string} params.tone     - Desired tone (e.g., 'professional', 'friendly', 'urgent', 'casual')
- * @param {string} params.language - Target language ('en', 'hi', 'both')
- * @returns {Promise<{ improvedTitle: string, improvedMessage: string, hindiTranslation?: { title: string, message: string } }>}
- * @throws {Error} On API failure (caller must handle — no silent fallback)
  */
 async function rephraseContent({ title, message, tone, language }) {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -26,17 +37,50 @@ async function rephraseContent({ title, message, tone, language }) {
     throw new Error('GEMINI_API_KEY is not configured. Cannot perform AI rephrase.');
   }
 
-  // Model is configurable via environment variable
   const model = process.env.GEMINI_MODEL || 'gemini-flash-latest';
   const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 
-  const prompt = buildRephrasePrompt(title, message, tone, language);
-
   console.log(`[BroadcastAI] Calling Gemini (model=${model}) for rephrase. Tone: ${tone}, Language: ${language}`);
 
+  // Attempt 1: Standard AI generation
+  let parsed = await callGemini(GEMINI_URL, apiKey, buildRephrasePrompt(title, message, tone, language, false));
+  
+  // Validate Attempt 1
+  let titleValid = parsed.improvedTitle && parsed.improvedTitle.length <= 60;
+  let messageValid = parsed.improvedMessage && parsed.improvedMessage.length <= 150;
+
+  if (!titleValid || !messageValid) {
+    console.warn(`[BroadcastAI] Attempt 1 exceeded limits (Title: ${parsed.improvedTitle?.length}, Msg: ${parsed.improvedMessage?.length}). Retrying strictly...`);
+    // Attempt 2: Strict constraint generation
+    try {
+      const strictParsed = await callGemini(GEMINI_URL, apiKey, buildRephrasePrompt(title, message, tone, language, true));
+      
+      // Update parsed if valid, otherwise we will manually shorten it
+      if (strictParsed.improvedTitle) parsed.improvedTitle = strictParsed.improvedTitle;
+      if (strictParsed.improvedMessage) parsed.improvedMessage = strictParsed.improvedMessage;
+      if (strictParsed.hindiTranslation) parsed.hindiTranslation = strictParsed.hindiTranslation;
+    } catch (e) {
+      console.error('[BroadcastAI] Second attempt failed, falling back to smart truncation on first attempt.');
+    }
+  }
+
+  // Final Validation & Intelligent Shortening
+  parsed.improvedTitle = smartTruncate(cleanText(parsed.improvedTitle), 60);
+  parsed.improvedMessage = smartTruncate(cleanText(parsed.improvedMessage), 150);
+
+  if (parsed.hindiTranslation) {
+    parsed.hindiTranslation.title = smartTruncate(cleanText(parsed.hindiTranslation.title), 60);
+    parsed.hindiTranslation.message = smartTruncate(cleanText(parsed.hindiTranslation.message), 150);
+  }
+
+  console.log('[BroadcastAI] Rephrase successful and validated against production limits.');
+  return parsed;
+}
+
+async function callGemini(url, apiKey, prompt) {
   try {
     const response = await axios.post(
-      `${GEMINI_URL}?key=${apiKey}`,
+      `${url}?key=${apiKey}`,
       {
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig: {
@@ -45,40 +89,32 @@ async function rephraseContent({ title, message, tone, language }) {
           topP:            0.9,
         },
       },
-      { timeout: 30_000 } // 30-second timeout
+      { timeout: 30_000 }
     );
 
     const raw = response.data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-    const parsed = parseGeminiResponse(raw);
-
-    console.log('[BroadcastAI] Rephrase successful.');
-    return parsed;
+    return parseGeminiResponse(raw);
   } catch (err) {
-    // Distinguish between timeout and other errors for clear logging
     if (err.code === 'ECONNABORTED' || err.message?.includes('timeout')) {
-      console.error('[BroadcastAI] Gemini request timed out after 15s.');
+      console.error('[BroadcastAI] Gemini request timed out.');
       throw new Error('AI service timed out. Please try again.');
     }
-
     if (err.response) {
-      // Gemini API returned an error response
       const status = err.response.status;
       const detail = err.response.data?.error?.message || 'Unknown API error';
       console.error(`[BroadcastAI] Gemini API error (${status}): ${detail}`);
       throw new Error(`AI service error (${status}): ${detail}`);
     }
-
     console.error('[BroadcastAI] Gemini request failed:', err.message);
     throw new Error(`AI service unavailable: ${err.message}`);
   }
 }
 
 /**
- * Build the prompt for Gemini to rephrase broadcast content.
+ * Build the prompt for Gemini.
  */
-function buildRephrasePrompt(title, message, tone, language) {
+function buildRephrasePrompt(title, message, tone, language, isStrictRetry) {
   const includeHindi = language === 'hi' || language === 'both';
-
   let languageInstruction = '';
   if (includeHindi) {
     languageInstruction = `
@@ -86,9 +122,17 @@ Also provide a Hindi translation of the improved title and message.
 Include it as "hindiTranslation" in your response with "title" and "message" keys.`;
   }
 
-  return `You are a professional notification copywriter for Humrah, a social meetup platform in India.
+  const strictWarning = isStrictRetry ? `
+CRITICAL: YOUR PREVIOUS RESPONSE WAS TOO LONG. 
+YOU MUST STRICTLY OBEY THESE HARD LIMITS OR THE NOTIFICATION WILL BREAK:
+- Title MUST BE UNDER 60 characters.
+- Message MUST BE UNDER 150 characters.
+Do NOT fail these limits.` : '';
 
-Rephrase the following broadcast notification to be more engaging and effective.
+  return `You are a professional notification copywriter for Humrah, a social meetup platform in India.
+Your goal is to write highly optimized mobile push notifications for Android/iOS.
+
+Rephrase the following broadcast notification.
 
 Original Title: "${title}"
 Original Message: "${message}"
@@ -97,29 +141,30 @@ ${languageInstruction}
 
 Respond ONLY with a valid JSON object (no markdown fences, no explanation):
 {
-  "improvedTitle": "<improved title, max 120 characters>",
-  "improvedMessage": "<improved message, max 1000 characters>"${includeHindi ? `,
+  "improvedTitle": "<improved title, max 60 characters>",
+  "improvedMessage": "<improved message, max 150 characters>"${includeHindi ? `,
   "hindiTranslation": {
-    "title": "<Hindi title>",
-    "message": "<Hindi message>"
+    "title": "<Hindi title, max 60 characters>",
+    "message": "<Hindi message, max 150 characters>"
   }` : ''}
 }
 
-Guidelines:
-- Keep the core meaning intact
-- Match the requested tone exactly
-- Use emojis sparingly and appropriately
-- Title should be concise and attention-grabbing
-- Message should be clear and actionable
-- Respect character limits`;
+Guidelines for Mobile Push Notifications:
+- Title: Recommended 20-45 characters (HARD LIMIT: 60 characters)
+- Message: Recommended 60-120 characters (HARD LIMIT: 150 characters)
+- Maximum 2 short sentences.
+- One clear call-to-action.
+- No paragraphs or line breaks.
+- No unnecessary adjectives or filler words.
+- No repeated information.
+- No emojis unless explicitly requested in the original message.
+- Write for maximum notification open rate.
+- Sound natural and conversational.
+- Never generate email-style or long promotional content.${strictWarning}`;
 }
 
-/**
- * Parse Gemini's response and extract the structured data.
- */
 function parseGeminiResponse(raw) {
   try {
-    // Strip markdown fences if present
     const cleaned = raw.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(cleaned);
 
@@ -128,14 +173,13 @@ function parseGeminiResponse(raw) {
     }
 
     const result = {
-      improvedTitle:   String(parsed.improvedTitle).substring(0, 120),
-      improvedMessage: String(parsed.improvedMessage).substring(0, 1000),
+      improvedTitle: String(parsed.improvedTitle),
+      improvedMessage: String(parsed.improvedMessage),
     };
 
-    // Include Hindi translation only if present and valid
     if (parsed.hindiTranslation?.title && parsed.hindiTranslation?.message) {
       result.hindiTranslation = {
-        title:   String(parsed.hindiTranslation.title),
+        title: String(parsed.hindiTranslation.title),
         message: String(parsed.hindiTranslation.message),
       };
     }
@@ -143,7 +187,6 @@ function parseGeminiResponse(raw) {
     return result;
   } catch (parseErr) {
     console.error('[BroadcastAI] Failed to parse Gemini response:', parseErr.message);
-    console.error('[BroadcastAI] Raw response:', raw?.substring(0, 300));
     throw new Error('AI returned an invalid response. Please try again.');
   }
 }
