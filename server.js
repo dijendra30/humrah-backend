@@ -598,6 +598,7 @@ app.use('/api/admin-dashboard',   authenticate, require('./routes/adminDashboard
 app.use('/api/admin-analytics',   authenticate, require('./routes/adminAnalytics'));
 app.use('/api/moderation',        authenticate, adminOnly, moderationRoutes);
 app.use('/api/admin/places',      authenticate, adminOnly, require('./routes/adminPlaces')); // ✅ Google Places API
+app.use('/api/admin/broadcasts',  authenticate, adminOnly, require('./routes/broadcastRoutes')); // ✅ Phase 1: Broadcast Notification System
 app.use('/api/agora',             authenticate, enforceLegalAcceptance, require('./routes/agora'));
 app.use('/api/voice-call',        authenticate, enforceLegalAcceptance, require('./routes/voice-call'));
 app.use('/api/letters',           authenticate, require('./routes/letters.route'));
