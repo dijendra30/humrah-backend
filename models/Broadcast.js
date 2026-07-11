@@ -113,6 +113,19 @@ const broadcastSchema = new mongoose.Schema({
     type: Number,
     default: 0,
     min: 0
+  },
+  
+  // =============================================
+  // RESUMABLE PROCESSING STATE
+  // =============================================
+  lastProcessedUserId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null
+  },
+  currentBatch: {
+    type: Number,
+    default: 0
   }
 }, {
   timestamps: true // adds createdAt + updatedAt automatically
