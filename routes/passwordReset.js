@@ -112,14 +112,21 @@ router.post('/forgot-password', passwordResetLimiter, async (req, res) => {
     const rawToken    = crypto.randomBytes(32).toString('hex');
     const hashedToken = crypto.createHash('sha256').update(rawToken).digest('hex');
 
-    // Store hashed token + expiry atomically (no pre-save hook triggered)
-    await User.updateOne(
+    // Store hashed token + expiry atomically
+    const updateResult = await User.updateOne(
       { _id: user._id },
       {
-        resetPasswordToken:   hashedToken,
-        resetPasswordExpires: new Date(Date.now() + TOKEN_EXPIRY_MS)
+        $set: {
+          resetPasswordToken:   hashedToken,
+          resetPasswordExpires: new Date(Date.now() + TOKEN_EXPIRY_MS)
+        }
       }
     );
+
+    if (updateResult.modifiedCount === 0) {
+      console.error(`❌ forgot-password error: Failed to save reset token for ${normalizedEmail}`);
+      return jsonErr(res, 500, 'Server error. Please try again later.');
+    }
 
     // Build reset URL → static site reset page
     const resetUrl = `https://humrah.in/reset-password.html?token=${rawToken}`;
