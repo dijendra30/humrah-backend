@@ -121,9 +121,8 @@ router.post('/forgot-password', passwordResetLimiter, async (req, res) => {
       }
     );
 
-    // Build reset URL → backend-hosted reset-password.html
-    const baseUrl  = process.env.BACKEND_URL || 'https://api.humrah.in';
-    const resetUrl = `${baseUrl}/reset-password?token=${rawToken}`;
+    // Build reset URL → static site reset page
+    const resetUrl = `https://humrah.in/reset-password.html?token=${rawToken}`;
 
     // Send email with clickable reset link
     await sendPasswordResetEmail(normalizedEmail, user.firstName, resetUrl);
