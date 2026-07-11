@@ -1,34 +1,128 @@
+// models/Broadcast.js — Broadcast Notification System (Phase 1)
+// Stores broadcast metadata, audience targeting, and delivery analytics.
+
 const mongoose = require('mongoose');
 
 const broadcastSchema = new mongoose.Schema({
+  // =============================================
+  // CONTENT
+  // =============================================
   title: {
     type: String,
-    required: true
+    required: [true, 'Title is required'],
+    trim: true,
+    maxlength: [120, 'Title cannot exceed 120 characters']
   },
   message: {
     type: String,
+    required: [true, 'Message is required'],
+    trim: true,
+    maxlength: [1000, 'Message cannot exceed 1000 characters']
+  },
+  type: {
+    type: String,
+    enum: ['ANNOUNCEMENT', 'UPDATE', 'PROMOTION', 'ALERT', 'REMINDER'],
+    default: 'ANNOUNCEMENT'
+  },
+  language: {
+    type: String,
+    enum: ['en', 'hi', 'both'],
+    default: 'en'
+  },
+
+  // =============================================
+  // AUDIENCE TARGETING
+  // =============================================
+  audienceType: {
+    type: String,
+    enum: ['EVERYONE', 'VERIFIED_USERS', 'PREMIUM_USERS', 'STATE', 'CITY', 'AREA', 'CUSTOM'],
+    required: [true, 'Audience type is required']
+  },
+  targetState: {
+    type: String,
+    trim: true,
+    default: null
+  },
+  targetCity: {
+    type: String,
+    trim: true,
+    default: null
+  },
+  targetArea: {
+    type: String,
+    trim: true,
+    default: null
+  },
+  // Combination filters — used with CUSTOM audienceType
+  onlyVerifiedUsers: {
+    type: Boolean,
+    default: false
+  },
+  onlyPremiumUsers: {
+    type: Boolean,
+    default: false
+  },
+
+  // =============================================
+  // LIFECYCLE
+  // =============================================
+  createdBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
     required: true
   },
-  targetAudience: {
+  status: {
     type: String,
-    required: true,
-    // e.g., 'ALL_USERS', 'VERIFIED_USERS', 'UNVERIFIED_USERS', 'EXACT_PERCENTAGE:50', 'RANGE:50-70'
-  },
-  recipientCount: {
-    type: Number,
-    required: true,
-    default: 0
-  },
-  sentBy: {
-    type: String,
-    default: 'admin'
-  },
-  createdAt: {
-    type: Date,
-    default: Date.now,
+    enum: ['DRAFT', 'SENDING', 'SENT', 'FAILED'],
+    default: 'DRAFT',
     index: true
+  },
+  sentAt: {
+    type: Date,
+    default: null
+  },
+  expiresAt: {
+    type: Date,
+    default: null
+  },
+  aiGenerated: {
+    type: Boolean,
+    default: false
+  },
+
+  // =============================================
+  // DELIVERY ANALYTICS
+  // Structured for future expansion (clicked, dismissed, etc.)
+  // =============================================
+  totalRecipients: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
+  deliveredCount: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
+  failedCount: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
+  openedCount: {
+    type: Number,
+    default: 0,
+    min: 0
   }
+}, {
+  timestamps: true // adds createdAt + updatedAt automatically
 });
 
-const Broadcast = mongoose.model('Broadcast', broadcastSchema);
-module.exports = Broadcast;
+// =============================================
+// INDEXES
+// =============================================
+broadcastSchema.index({ status: 1, createdAt: -1 });
+broadcastSchema.index({ createdBy: 1, createdAt: -1 });
+broadcastSchema.index({ type: 1, status: 1 });
+
+module.exports = mongoose.model('Broadcast', broadcastSchema);

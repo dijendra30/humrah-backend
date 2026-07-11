@@ -78,6 +78,13 @@ const auditLogSchema = new mongoose.Schema({
       'VIEW_BOOKING_DETAILS',
       'CANCEL_BOOKING',
       
+      // Broadcast Actions (Phase 1)
+      'CREATE_BROADCAST',
+      'UPDATE_BROADCAST',
+      'DELETE_BROADCAST',
+      'SEND_BROADCAST',
+      'AI_REPHRASE_BROADCAST',
+      
       // Other
       'UNAUTHORIZED_ACCESS_ATTEMPT'
     ]
