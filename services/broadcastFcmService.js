@@ -1,4 +1,4 @@
-// services/broadcastFcmService.js — FCM sender for broadcast notifications (Phase 1)
+// services/broadcastFcmService.js — FCM sender for broadcast notifications
 // Handles single-user, multi-user, and batch FCM delivery with retry logic.
 
 'use strict';
@@ -6,16 +6,11 @@
 const admin = require('../config/firebase');
 const User  = require('../models/User');
 
-// Configurable batch size for FCM multicast (max 500 per Firebase API)
 const FCM_BATCH_SIZE = 500;
 const MAX_RETRIES    = 3;
 
 /**
  * Send a broadcast push notification to a single user.
- *
- * @param {string}   userId  - Recipient MongoDB user ID
- * @param {object}   payload - { title, body, data }
- * @returns {Promise<{ success: boolean, fcmMessageId: string|null }>}
  */
 async function sendToSingleUser(userId, payload) {
   try {
@@ -24,8 +19,14 @@ async function sendToSingleUser(userId, payload) {
       return { success: false, fcmMessageId: null, reason: 'no_tokens' };
     }
 
-    const result = await sendToTokens(userId, user.fcmTokens, payload);
-    return result;
+    const { results } = await sendToMultipleUsers([{ _id: userId, fcmTokens: user.fcmTokens }], payload);
+    const result = results.find(r => r.userId.toString() === userId.toString());
+    
+    return { 
+      success: result?.success || false, 
+      fcmMessageId: result?.fcmMessageId || null, 
+      reason: result?.reason 
+    };
   } catch (err) {
     console.error('[BroadcastFCM] sendToSingleUser error:', err.message);
     return { success: false, fcmMessageId: null, reason: err.message };
@@ -34,132 +35,154 @@ async function sendToSingleUser(userId, payload) {
 
 /**
  * Send a broadcast push notification to multiple users.
- * Processes users sequentially in batches to avoid overwhelming FCM.
+ * Batches tokens securely and efficiently using Firebase Admin SDK.
  *
  * @param {Array<{ _id: string, fcmTokens: string[] }>} users - User objects with tokens
  * @param {object} payload - { title, body, data }
  * @returns {Promise<{ successCount: number, failureCount: number, results: Array }>}
  */
 async function sendToMultipleUsers(users, payload) {
-  let successCount = 0;
-  let failureCount = 0;
-  const results = [];
+  if (!admin.apps.length) {
+    console.warn('[BroadcastFCM] Firebase Admin not initialized. Skipping push.');
+    return { 
+      successCount: 0, 
+      failureCount: users.length, 
+      results: users.map(u => ({ userId: u._id, success: false, reason: 'firebase_not_initialized' })) 
+    };
+  }
 
+  const results = [];
+  
+  // Flatten tokens: [{ token, userId }]
+  const tokenMap = new Map(); // token -> userId
+  const validTokens = [];
+  
   for (const user of users) {
-    if (!user.fcmTokens?.length) {
-      failureCount++;
+    if (!user.fcmTokens || user.fcmTokens.length === 0) {
       results.push({ userId: user._id, success: false, reason: 'no_tokens' });
       continue;
     }
-
-    const result = await sendToTokens(user._id.toString(), user.fcmTokens, payload);
-    if (result.success) {
-      successCount++;
-    } else {
-      failureCount++;
+    for (const token of user.fcmTokens) {
+      if (!tokenMap.has(token)) {
+        tokenMap.set(token, user._id.toString());
+        validTokens.push(token);
+      }
     }
-    results.push({ userId: user._id, ...result });
   }
 
-  return { successCount, failureCount, results };
+  // Stringify payload
+  const stringData = {};
+  if (payload.data) {
+    for (const [k, v] of Object.entries(payload.data)) {
+      stringData[k] = v == null ? '' : String(v);
+    }
+  }
+
+  // Chunk valid tokens into max Firebase limits
+  for (let i = 0; i < validTokens.length; i += FCM_BATCH_SIZE) {
+    const chunk = validTokens.slice(i, i + FCM_BATCH_SIZE);
+    const chunkResult = await sendChunkWithRetry(chunk, payload.title, payload.body, stringData, tokenMap, 1);
+    results.push(...chunkResult.results);
+  }
+  
+  // Aggregate results per user (a user might have multiple tokens)
+  const userResultsMap = new Map();
+  for (const res of results) {
+    if (!userResultsMap.has(res.userId) || (!userResultsMap.get(res.userId).success && res.success)) {
+      userResultsMap.set(res.userId, res);
+    }
+  }
+  
+  const finalResults = Array.from(userResultsMap.values());
+  const finalSuccess = finalResults.filter(r => r.success).length;
+  const finalFailure = finalResults.filter(r => !r.success).length;
+
+  return { successCount: finalSuccess, failureCount: finalFailure, results: finalResults };
 }
 
 /**
- * Send push notification to a set of FCM tokens for a specific user.
- * Handles token batching (max 500 per multicast call), dead token pruning, and retry.
- *
- * @param {string}   userId - For token pruning
- * @param {string[]} tokens - FCM registration tokens
- * @param {object}   payload - { title, body, data }
- * @param {number}   attempt - Current retry attempt (internal)
- * @returns {Promise<{ success: boolean, fcmMessageId: string|null, reason?: string }>}
+ * Sends a single chunk of up to 500 tokens, handling dead token removal and transient retries.
  */
-async function sendToTokens(userId, tokens, payload, attempt = 1) {
-  if (!tokens || tokens.length === 0) {
-    return { success: false, fcmMessageId: null, reason: 'no_tokens' };
-  }
-
-  // Check if Firebase Admin is initialized
-  if (!admin.apps.length) {
-    console.warn('[BroadcastFCM] Firebase Admin not initialized. Skipping push.');
-    return { success: false, fcmMessageId: null, reason: 'firebase_not_initialized' };
-  }
-
+async function sendChunkWithRetry(tokens, title, body, data, tokenMap, attempt = 1) {
+  const fcmMessage = {
+    data,
+    tokens,
+    android: { priority: 'high' }
+  };
+  
   try {
-    // FCM data payload requires all values to be strings
-    const stringData = {};
-    if (payload.data) {
-      for (const [k, v] of Object.entries(payload.data)) {
-        stringData[k] = v == null ? '' : String(v);
-      }
-    }
-
-    // Build FCM message — data-only for custom Android notification handling
-    const fcmMessage = {
-      data: {
-        ...stringData,
-        title: payload.title || '',
-        body:  payload.body  || '',
-      },
-      tokens: tokens.slice(0, FCM_BATCH_SIZE),
-      android: { priority: 'high' },
-    };
-
     const response = await admin.messaging().sendEachForMulticast(fcmMessage);
-
-    // Prune dead/invalid tokens
-    if (response.failureCount > 0) {
-      const deadTokens = [];
-      response.responses.forEach((resp, idx) => {
-        if (!resp.success) {
-          const errCode = resp.error?.code;
-          if (
-            errCode === 'messaging/invalid-registration-token' ||
-            errCode === 'messaging/registration-token-not-registered'
-          ) {
-            deadTokens.push(tokens[idx]);
-          }
+    
+    const deadTokensByUserId = new Map();
+    const retryTokens = [];
+    const results = [];
+    
+    let successCount = 0;
+    let failureCount = 0;
+    
+    response.responses.forEach((resp, idx) => {
+      const token = tokens[idx];
+      const userId = tokenMap.get(token);
+      
+      if (resp.success) {
+        successCount++;
+        results.push({ userId, success: true, fcmMessageId: resp.messageId });
+      } else {
+        const errCode = resp.error?.code;
+        if (errCode === 'messaging/invalid-registration-token' || errCode === 'messaging/registration-token-not-registered') {
+           // Permanent error: queue for deletion
+           if (!deadTokensByUserId.has(userId)) deadTokensByUserId.set(userId, []);
+           deadTokensByUserId.get(userId).push(token);
+           failureCount++;
+           results.push({ userId, success: false, reason: errCode });
+        } else {
+           // Transient error: retry if attempts left
+           if (attempt < MAX_RETRIES) {
+             retryTokens.push(token);
+           } else {
+             failureCount++;
+             results.push({ userId, success: false, reason: errCode });
+           }
         }
-      });
-
-      if (deadTokens.length > 0) {
-        await User.findByIdAndUpdate(userId, {
-          $pullAll: { fcmTokens: deadTokens }
-        });
-        console.log(`[BroadcastFCM] Pruned ${deadTokens.length} dead token(s) for user ${userId}`);
+      }
+    });
+    
+    // Prune dead tokens in background (fire and forget)
+    if (deadTokensByUserId.size > 0) {
+      for (const [uid, dTokens] of deadTokensByUserId.entries()) {
+        User.findByIdAndUpdate(uid, { $pullAll: { fcmTokens: dTokens } }).catch(e => console.error('[BroadcastFCM] Pruning error:', e.message));
       }
     }
-
-    const success = response.successCount > 0;
-    const fcmMessageId = response.responses.find(r => r.success)?.messageId || null;
-
-    console.log(`[BroadcastFCM] user=${userId} success=${response.successCount} failure=${response.failureCount} attempt=${attempt}`);
-
-    // If all tokens failed and we haven't exhausted retries, retry
-    if (!success && attempt < MAX_RETRIES) {
-      console.log(`[BroadcastFCM] Retrying user=${userId} attempt=${attempt + 1}/${MAX_RETRIES}`);
-      // Short delay before retry (exponential backoff)
+    
+    // Retry transient errors
+    if (retryTokens.length > 0 && attempt < MAX_RETRIES) {
+      console.log(`[BroadcastFCM] Retrying ${retryTokens.length} transient errors, attempt ${attempt+1}/${MAX_RETRIES}`);
       await new Promise(resolve => setTimeout(resolve, attempt * 1000));
-      return sendToTokens(userId, tokens, payload, attempt + 1);
+      const retryResult = await sendChunkWithRetry(retryTokens, title, body, data, tokenMap, attempt + 1);
+      
+      successCount += retryResult.successCount;
+      failureCount += retryResult.failureCount;
+      results.push(...retryResult.results);
     }
-
-    return { success, fcmMessageId };
+    
+    return { successCount, failureCount, results };
+    
   } catch (err) {
-    console.error(`[BroadcastFCM] sendToTokens error (user=${userId}, attempt=${attempt}):`, err.message);
-
-    // Retry on transient errors
+    console.error(`[BroadcastFCM] sendChunk error (attempt ${attempt}):`, err.message);
     if (attempt < MAX_RETRIES) {
-      console.log(`[BroadcastFCM] Retrying user=${userId} attempt=${attempt + 1}/${MAX_RETRIES}`);
       await new Promise(resolve => setTimeout(resolve, attempt * 1000));
-      return sendToTokens(userId, tokens, payload, attempt + 1);
+      return sendChunkWithRetry(tokens, title, body, data, tokenMap, attempt + 1);
+    } else {
+      return { 
+        successCount: 0, 
+        failureCount: tokens.length, 
+        results: tokens.map(t => ({ userId: tokenMap.get(t), success: false, reason: err.message }))
+      };
     }
-
-    return { success: false, fcmMessageId: null, reason: err.message };
   }
 }
 
 module.exports = {
   sendToSingleUser,
   sendToMultipleUsers,
-  sendToTokens,
 };

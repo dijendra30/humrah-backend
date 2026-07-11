@@ -142,27 +142,19 @@ function buildAudienceSummary(filters, count) {
 // SEND ORCHESTRATION
 // =============================================
 
-/**
- * Send a broadcast to its audience.
- * Fetches users in configurable batches, sends FCM notifications,
- * creates notification history records, and updates delivery counts.
- *
- * @param {string} broadcastId - MongoDB ObjectId of the broadcast
- * @returns {Promise<{ success: boolean, totalRecipients: number, deliveredCount: number, failedCount: number }>}
- */
 async function sendToAudience(broadcastId) {
   const broadcast = await Broadcast.findById(broadcastId);
   if (!broadcast) throw new Error('Broadcast not found');
-  if (broadcast.status !== 'DRAFT') {
-    throw new Error(`Cannot send broadcast with status "${broadcast.status}". Only DRAFT broadcasts can be sent.`);
+  
+  if (broadcast.status === 'DRAFT') {
+    broadcast.status = 'SENDING';
+    broadcast.sentAt = new Date();
+    await broadcast.save();
+  } else if (broadcast.status !== 'SENDING') {
+    throw new Error(`Cannot send broadcast with status "${broadcast.status}". Only DRAFT or SENDING broadcasts can be sent.`);
   }
 
-  // Mark as SENDING
-  broadcast.status = 'SENDING';
-  broadcast.sentAt = new Date();
-  await broadcast.save();
-
-  console.log(`[BroadcastService] Starting send for broadcast ${broadcastId}`);
+  console.log(`[BroadcastService] Starting/Resuming send for broadcast ${broadcastId}`);
 
   const query = buildAudienceQuery({
     audienceType:      broadcast.audienceType,
@@ -173,18 +165,21 @@ async function sendToAudience(broadcastId) {
     onlyPremiumUsers:  broadcast.onlyPremiumUsers,
   });
 
-  let totalRecipients = 0;
-  let deliveredCount  = 0;
-  let failedCount     = 0;
-  let skip = 0;
   let hasMore = true;
 
   try {
     while (hasMore) {
-      // Fetch users in batches
-      const users = await User.find(query)
+      const currentBroadcast = await Broadcast.findById(broadcastId);
+      const cursorQuery = { ...query };
+      
+      if (currentBroadcast.lastProcessedUserId) {
+        cursorQuery._id = { $gt: currentBroadcast.lastProcessedUserId };
+      }
+
+      // Fetch users using cursor
+      const users = await User.find(cursorQuery)
+        .sort({ _id: 1 })
         .select('_id fcmTokens')
-        .skip(skip)
         .limit(BATCH_SIZE)
         .lean();
 
@@ -193,9 +188,7 @@ async function sendToAudience(broadcastId) {
         break;
       }
 
-      totalRecipients += users.length;
-      skip += BATCH_SIZE;
-      if (users.length < BATCH_SIZE) hasMore = false;
+      const lastUserInBatch = users[users.length - 1];
 
       // Build FCM payload
       const payload = {
@@ -216,12 +209,10 @@ async function sendToAudience(broadcastId) {
         },
       };
 
-      // Send to this batch
+      // Send to this batch via refactored FCM service
       const batchResult = await broadcastFcm.sendToMultipleUsers(users, payload);
-      deliveredCount += batchResult.successCount;
-      failedCount    += batchResult.failureCount;
 
-      // Create notification history records for this batch
+      // Create notification history records
       const notificationDocs = batchResult.results.map(result => ({
         userId:       result.userId,
         title:        broadcast.title,
@@ -233,39 +224,37 @@ async function sendToAudience(broadcastId) {
         fcmMessageId: result.fcmMessageId || null,
       }));
 
-      // Bulk insert notification records (efficient)
       if (notificationDocs.length > 0) {
         await Notification.insertMany(notificationDocs, { ordered: false }).catch(insertErr => {
           console.error('[BroadcastService] Error inserting notification history:', insertErr.message);
         });
       }
 
-      console.log(`[BroadcastService] Batch processed: ${users.length} users (delivered=${batchResult.successCount}, failed=${batchResult.failureCount})`);
+      // Atomically persist progress so it can be resumed
+      await Broadcast.findByIdAndUpdate(broadcastId, {
+        $inc: { 
+          totalRecipients: users.length,
+          deliveredCount: batchResult.successCount,
+          failedCount: batchResult.failureCount,
+          currentBatch: 1
+        },
+        $set: { lastProcessedUserId: lastUserInBatch._id }
+      });
+
+      console.log(`[BroadcastService] Batch processed: ${users.length} users. Last ID: ${lastUserInBatch._id}`);
     }
 
-    // Update broadcast with final counts
-    const finalStatus = failedCount > 0 && deliveredCount === 0 ? 'FAILED' : 'SENT';
-    await Broadcast.findByIdAndUpdate(broadcastId, {
-      status:          finalStatus,
-      totalRecipients,
-      deliveredCount,
-      failedCount,
-    });
+    // Finalize
+    const finalBroadcast = await Broadcast.findById(broadcastId);
+    const finalStatus = finalBroadcast.failedCount > 0 && finalBroadcast.deliveredCount === 0 ? 'FAILED' : 'SENT';
+    
+    await Broadcast.findByIdAndUpdate(broadcastId, { status: finalStatus });
 
-    console.log(`[BroadcastService] Broadcast ${broadcastId} completed: status=${finalStatus} total=${totalRecipients} delivered=${deliveredCount} failed=${failedCount}`);
-
-    return { success: true, totalRecipients, deliveredCount, failedCount };
+    console.log(`[BroadcastService] Broadcast ${broadcastId} completed. Status: ${finalStatus}`);
+    return { success: true };
   } catch (err) {
-    console.error(`[BroadcastService] Send failed for broadcast ${broadcastId}:`, err.message);
-
-    // Mark as FAILED and save partial progress
-    await Broadcast.findByIdAndUpdate(broadcastId, {
-      status: 'FAILED',
-      totalRecipients,
-      deliveredCount,
-      failedCount,
-    });
-
+    console.error(`[BroadcastService] Send loop interrupted for broadcast ${broadcastId}:`, err.message);
+    // Let it stay in SENDING status so it can be resumed later
     throw err;
   }
 }
