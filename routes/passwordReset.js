@@ -116,25 +116,22 @@ router.post('/forgot-password', passwordResetLimiter, async (req, res) => {
     console.log('1. Generated raw token:', rawToken);
     console.log('2. Stored hashed token:', hashedToken);
 
-    // Store hashed token + expiry atomically
+    // Store hashed token + expiry safely using standard save
     const expiryDate = new Date(Date.now() + TOKEN_EXPIRY_MS);
-    const updateResult = await User.updateOne(
-      { _id: user._id },
-      {
-        $set: {
-          resetPasswordToken:   hashedToken,
-          resetPasswordExpires: expiryDate
-        }
-      }
-    );
+    
+    // We need to fetch the full user to safely call .save() without triggering validation errors on unselected fields
+    const fullUser = await User.findById(user._id);
+    if (!fullUser) {
+      console.error(`❌ forgot-password error: User disappeared during save for ${normalizedEmail}`);
+      return jsonErr(res, 500, 'Server error. Please try again later.');
+    }
+
+    fullUser.resetPasswordToken = hashedToken;
+    fullUser.resetPasswordExpires = expiryDate;
+    await fullUser.save();
 
     console.log('3. Expiry timestamp:', expiryDate.toISOString());
     console.log('4. Current server timestamp:', new Date().toISOString());
-
-    if (updateResult.modifiedCount === 0) {
-      console.error(`❌ forgot-password error: Failed to save reset token for ${normalizedEmail}. Update result:`, updateResult);
-      return jsonErr(res, 500, 'Server error. Please try again later.');
-    }
 
     // Build reset URL → static site reset page
     const resetUrl = `https://humrah.in/reset-password.html?token=${rawToken}`;
