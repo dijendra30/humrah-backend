@@ -103,26 +103,28 @@ router.post('/forgot-password', passwordResetLimiter, async (req, res) => {
     // No account — timing-safe silent no-op, same response as success
     if (!user) {
       await new Promise(r => setTimeout(r, 400));
-      return res.json({ success: true, message: 'If an account exists for that email, an OTP has been sent.' });
+      return res.json({ success: true, message: 'Password reset link/OTP sent successfully.' });
     }
 
     // Generate + hash + store OTP in MongoDB via service
-    const result = await sendOtp(normalizedEmail, 'password_reset', {
-      sendEmailFn: (e, otp) => sendOTPEmail(e, otp),
-      ipAddress:   req.ip,
-      userAgent:   req.get('user-agent')
+    const result = await sendOtp({
+      email: normalizedEmail,
+      purpose: 'password_reset',
+      firstName: user.firstName,
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent')
     });
 
-    if (!result.success) {
-      return res.status(429).json({
+    if (!result.ok) {
+      return res.status(result.status || 400).json({
         success:           false,
-        message:           `Please wait ${result.cooldownSeconds} seconds before requesting a new OTP.`,
-        retryAfterSeconds: result.cooldownSeconds
+        message:           result.message,
+        retryAfterSeconds: result.retryAfterSeconds
       });
     }
 
     console.log(`✅ Password reset OTP dispatched → ${normalizedEmail}`);
-    return res.json({ success: true, message: 'If an account exists for that email, an OTP has been sent.' });
+    return res.json({ success: true, message: 'Password reset link/OTP sent successfully.' });
 
   } catch (err) {
     console.error('❌ forgot-password error:', err);
@@ -144,17 +146,18 @@ router.post('/verify-reset-otp', verifyOtpLimiter, async (req, res) => {
       return jsonErr(res, 400, 'OTP must be a 6-digit number.');
     }
 
-    const result = await verifyOtp(email, 'password_reset', otp);
+    const result = await verifyOtp({
+      email,
+      otp,
+      purpose: 'password_reset'
+    });
 
-    if (!result.verified) {
-      if (result.reason === 'LOCKED') {
-        return res.status(429).json({
-          success:           false,
-          message:           `Too many failed attempts. Please request a new OTP after ${Math.ceil(result.retryAfterSeconds / 60)} minutes.`,
-          retryAfterSeconds: result.retryAfterSeconds
-        });
-      }
-      return jsonErr(res, 400, 'Invalid or expired OTP. Please request a new one.');
+    if (!result.ok) {
+      return res.status(result.status || 400).json({
+        success: false,
+        message: result.message,
+        retryAfterSeconds: result.retryAfterSeconds
+      });
     }
 
     return res.json({ success: true, message: 'OTP verified. You may now reset your password.', verified: true });
@@ -190,16 +193,18 @@ router.post('/reset-password', verifyOtpLimiter, async (req, res) => {
     }
 
     // 2. Verify OTP
-    const otpResult = await verifyOtp(email, 'password_reset', otp);
-    if (!otpResult.verified) {
-      if (otpResult.reason === 'LOCKED') {
-        return res.status(429).json({
-          success:           false,
-          message:           `Too many failed attempts. Please request a new OTP after ${Math.ceil(otpResult.retryAfterSeconds / 60)} minutes.`,
-          retryAfterSeconds: otpResult.retryAfterSeconds
-        });
-      }
-      return jsonErr(res, 400, 'Invalid or expired OTP. Please request a new one.', { code: 'INVALID_OTP' });
+    const otpResult = await verifyOtp({
+      email,
+      otp,
+      purpose: 'password_reset'
+    });
+    if (!otpResult.ok) {
+      return res.status(otpResult.status || 400).json({
+        success: false,
+        message: otpResult.message,
+        retryAfterSeconds: otpResult.retryAfterSeconds,
+        code: otpResult.status === 400 ? 'INVALID_OTP' : undefined
+      });
     }
 
     // 3. Password strength
