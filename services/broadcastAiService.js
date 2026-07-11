@@ -41,11 +41,11 @@ async function rephraseContent({ title, message, tone, language }) {
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig: {
           temperature:     0.7,
-          maxOutputTokens: 512,
+          maxOutputTokens: 2048,
           topP:            0.9,
         },
       },
-      { timeout: 15_000 } // 15-second timeout
+      { timeout: 30_000 } // 30-second timeout
     );
 
     const raw = response.data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
