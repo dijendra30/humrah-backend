@@ -126,9 +126,28 @@ router.post('/forgot-password', passwordResetLimiter, async (req, res) => {
       return jsonErr(res, 500, 'Server error. Please try again later.');
     }
 
-    fullUser.resetPasswordToken = hashedToken;
-    fullUser.resetPasswordExpires = expiryDate;
-    await fullUser.save();
+    // 🛡️ NUCLEAR OPTION: Bypasses all Mongoose strict-mode validation and saves directly
+    const updatedUser = await User.findByIdAndUpdate(
+      user._id,
+      {
+        $set: {
+          resetPasswordToken: hashedToken,
+          resetPasswordExpires: expiryDate
+        }
+      },
+      { new: true, strict: false } // Force the save even if Mongoose thinks it shouldn't
+    ).select('+resetPasswordToken');
+
+    if (!updatedUser) {
+      console.error(`❌ forgot-password error: User disappeared during save for ${normalizedEmail}`);
+      return jsonErr(res, 500, 'Server error. Please try again later.');
+    }
+
+    // IMMEDIATE READ-BACK AUDIT
+    console.log('--- DB WRITE VERIFICATION ---');
+    console.log('Token physically in DB after save:', updatedUser.resetPasswordToken || 'NULL / STRIPPED');
+    console.log('Matches hashed token?', updatedUser.resetPasswordToken === hashedToken ? 'YES ✅' : 'NO ❌ (Database rejected the write!)');
+    console.log('-----------------------------');
 
     console.log('3. Expiry timestamp:', expiryDate.toISOString());
     console.log('4. Current server timestamp:', new Date().toISOString());
