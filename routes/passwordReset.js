@@ -1,19 +1,19 @@
 // routes/passwordReset.js
 // ─────────────────────────────────────────────────────────────────────────────
-// POST /api/auth/forgot-password      — send 6-digit OTP via email
-// POST /api/auth/verify-reset-otp     — verify OTP (one-time use)
-// POST /api/auth/reset-password       — verify OTP + update password atomically
+// POST /api/auth/forgot-password      — generate reset token + email link
+// POST /api/auth/verify-reset-otp     — verify OTP (legacy, kept for compat)
+// POST /api/auth/reset-password       — verify token + update password atomically
 // GET  /api/auth/reset-password-health — liveness check
 //
-// CRITICAL FIX vs original version:
-//   Old code: resetTokenStore = new Map() — wiped on every Render deploy,
-//   broken across multiple instances (load balancer sends verify to wrong instance).
-//   New code: all state in MongoDB via otpService. Survives restarts, works
-//   correctly on all instances.
+// Architecture:
+//   Token-based email reset link. Raw token emailed to user, only SHA-256
+//   hash stored in MongoDB (resetPasswordToken + resetPasswordExpires on
+//   User doc). Survives restarts, works across all instances.
 //
 // Security model:
-//   • OTP: bcrypt-hashed 6-digit, TTL = 10 min (MongoDB TTL index)
-//   • One-time use: document deleted after successful verification
+//   • Token: crypto.randomBytes(32), SHA-256 hashed before storage
+//   • Single-use: token fields cleared after successful reset
+//   • TTL = 15 min (resetPasswordExpires checked at verification)
 //   • 30-day reset limit per user (checked at send AND at reset)
 //   • Last-5-password reuse prevention
 //   • User enumeration protection: identical response for existing/non-existing emails
@@ -23,16 +23,18 @@
 
 const express = require('express');
 const router  = express.Router();
+const crypto  = require('crypto');
 const bcrypt  = require('bcryptjs');
 const User    = require('../models/User');
 const { sendOtp, verifyOtp } = require('../services/otpService');
-const { sendOTPEmail }       = require('../config/email');
+const { sendPasswordResetEmail } = require('../config/email');
 const {
   verifyOtpLimiter,
   passwordResetLimiter
 } = require('../middleware/rateLimitMiddleware');
 
-const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+const THIRTY_DAYS_MS  = 30 * 24 * 60 * 60 * 1000;
+const TOKEN_EXPIRY_MS = 15 * 60 * 1000; // 15 minutes — matches email template copy
 
 function jsonErr(res, status, message, extra = {}) {
   return res.status(status).json({ success: false, message, ...extra });
@@ -106,25 +108,28 @@ router.post('/forgot-password', passwordResetLimiter, async (req, res) => {
       return res.json({ success: true, message: 'Password reset link/OTP sent successfully.' });
     }
 
-    // Generate + hash + store OTP in MongoDB via service
-    const result = await sendOtp({
-      email: normalizedEmail,
-      purpose: 'password_reset',
-      firstName: user.firstName,
-      ipAddress: req.ip,
-      userAgent: req.get('user-agent')
-    });
+    // Generate secure reset token (raw → user, SHA-256 hash → DB)
+    const rawToken    = crypto.randomBytes(32).toString('hex');
+    const hashedToken = crypto.createHash('sha256').update(rawToken).digest('hex');
 
-    if (!result.ok) {
-      return res.status(result.status || 400).json({
-        success:           false,
-        message:           result.message,
-        retryAfterSeconds: result.retryAfterSeconds
-      });
-    }
+    // Store hashed token + expiry atomically (no pre-save hook triggered)
+    await User.updateOne(
+      { _id: user._id },
+      {
+        resetPasswordToken:   hashedToken,
+        resetPasswordExpires: new Date(Date.now() + TOKEN_EXPIRY_MS)
+      }
+    );
 
-    console.log(`✅ Password reset OTP dispatched → ${normalizedEmail}`);
-    return res.json({ success: true, message: 'Password reset link/OTP sent successfully.' });
+    // Build reset URL → backend-hosted reset-password.html
+    const baseUrl  = process.env.BACKEND_URL || 'https://api.humrah.in';
+    const resetUrl = `${baseUrl}/reset-password?token=${rawToken}`;
+
+    // Send email with clickable reset link
+    await sendPasswordResetEmail(normalizedEmail, user.firstName, resetUrl);
+
+    console.log(`✅ Password reset link dispatched → ${normalizedEmail}`);
+    return res.json({ success: true, message: 'If an account exists with this email, a password reset link has been sent.' });
 
   } catch (err) {
     console.error('❌ forgot-password error:', err);
@@ -170,40 +175,36 @@ router.post('/verify-reset-otp', verifyOtpLimiter, async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/auth/reset-password
-// Body: { email, otp, newPassword }
+// Body: { token, newPassword }
 //
 // Pipeline:
 //   1. Input validation
-//   2. OTP verify (MongoDB — cross-instance, survives restarts)
+//   2. Token verify (SHA-256 hash lookup, expiry check)
 //   3. Password strength
-//   4. Load user
-//   5. 30-day cooldown (second line of defense)
-//   6. Last-5 reuse check
-//   7. Rotate previousPasswords + save
+//   4. 30-day cooldown (second line of defense)
+//   5. Last-5 reuse check
+//   6. Rotate previousPasswords + save + clear token
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/reset-password', verifyOtpLimiter, async (req, res) => {
   try {
-    const { email, otp, newPassword } = req.body;
+    const { token, newPassword } = req.body;
 
-    if (!email || !otp || !newPassword) {
-      return jsonErr(res, 400, 'Email, OTP, and new password are required.');
-    }
-    if (typeof otp !== 'string' || !/^\d{6}$/.test(otp.trim())) {
-      return jsonErr(res, 400, 'OTP must be a 6-digit number.');
+    if (!token || !newPassword) {
+      return jsonErr(res, 400, 'Reset token and new password are required.', { code: 'INVALID_TOKEN' });
     }
 
-    // 2. Verify OTP
-    const otpResult = await verifyOtp({
-      email,
-      otp,
-      purpose: 'password_reset'
-    });
-    if (!otpResult.ok) {
-      return res.status(otpResult.status || 400).json({
+    // 2. Verify token — hash incoming token and look up in DB
+    const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
+    const user = await User.findOne({
+      resetPasswordToken:   hashedToken,
+      resetPasswordExpires: { $gt: new Date() }
+    }).select('+password +lastPasswordResetAt +resetPasswordCount +previousPasswords +resetPasswordToken +resetPasswordExpires');
+
+    if (!user) {
+      return res.status(400).json({
         success: false,
-        message: otpResult.message,
-        retryAfterSeconds: otpResult.retryAfterSeconds,
-        code: otpResult.status === 400 ? 'INVALID_OTP' : undefined
+        message: 'Reset link is invalid or has expired. Please request a new one from the Humrah app.',
+        code:    'INVALID_TOKEN'
       });
     }
 
@@ -216,15 +217,6 @@ router.post('/reset-password', verifyOtpLimiter, async (req, res) => {
       const check = isStrongPassword(newPassword);
       if (!check.valid) return jsonErr(res, 400, check.message);
     } catch (_) { /* validator not available — length check above is minimum gate */ }
-
-    // 4. Load user
-    const normalizedEmail = email.toLowerCase().trim();
-    const user = await User.findOne({ email: normalizedEmail })
-      .select('+password +lastPasswordResetAt +resetPasswordCount +previousPasswords');
-
-    if (!user) {
-      return jsonErr(res, 404, 'Account not found. Please contact support@humrah.in');
-    }
 
     // 5. 30-day cooldown (second line of defense after forgot-password check)
     if (user.lastPasswordResetAt) {
@@ -256,16 +248,18 @@ router.post('/reset-password', verifyOtpLimiter, async (req, res) => {
       }
     }
 
-    // 7. Rotate + save (pre-save hook in User.js bcrypts user.password)
+    // 7. Rotate + save + clear token (pre-save hook in User.js bcrypts user.password)
     //    Also increment tokenVersion so all existing JWTs are immediately invalidated.
     //    Anyone who had a stolen token can no longer use it after a password reset.
     if (user.password) {
       user.previousPasswords = [user.password, ...prevHashes].slice(0, 5);
     }
-    user.password            = newPassword;
-    user.lastPasswordResetAt = new Date();
-    user.resetPasswordCount  = (user.resetPasswordCount || 0) + 1;
-    user.tokenVersion        = (user.tokenVersion || 0) + 1;  // ✅ invalidate all old JWTs
+    user.password             = newPassword;
+    user.lastPasswordResetAt  = new Date();
+    user.resetPasswordCount   = (user.resetPasswordCount || 0) + 1;
+    user.tokenVersion         = (user.tokenVersion || 0) + 1;  // ✅ invalidate all old JWTs
+    user.resetPasswordToken   = null;   // ✅ single-use: clear token
+    user.resetPasswordExpires = null;   // ✅ clear expiry
     await user.save();
 
     console.log(`✅ Password reset success: ${user.email} (reset #${user.resetPasswordCount})`);
