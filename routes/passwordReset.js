@@ -195,27 +195,59 @@ router.post('/reset-password', verifyOtpLimiter, async (req, res) => {
     // 2. Verify token — hash incoming token and look up in DB
     const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
     const user = await User.findOne({
-      resetPasswordToken:   hashedToken,
-      resetPasswordExpires: { $gt: new Date() }
+      resetPasswordToken: hashedToken
     }).select('+password +lastPasswordResetAt +resetPasswordCount +previousPasswords +resetPasswordToken +resetPasswordExpires');
 
+    // Token not found — invalid or already used
     if (!user) {
       return res.status(400).json({
         success: false,
-        message: 'Reset link is invalid or has expired. Please request a new one from the Humrah app.',
+        message: 'Reset link is invalid. Please request a new one from the Humrah app.',
         code:    'INVALID_TOKEN'
       });
     }
 
-    // 3. Password strength
+    // Token found but expired
+    if (!user.resetPasswordExpires || user.resetPasswordExpires < new Date()) {
+      // Clear expired token so it can't be probed again
+      user.resetPasswordToken  = null;
+      user.resetPasswordExpires = null;
+      await user.save();
+      return res.status(400).json({
+        success: false,
+        message: 'This password reset link has expired. Please request a new one.',
+        code:    'TOKEN_EXPIRED'
+      });
+    }
+
+    // 3. Password validation — length
     if (typeof newPassword !== 'string' || newPassword.length < 8) {
       return jsonErr(res, 400, 'Password must be at least 8 characters.');
     }
+    if (newPassword.length > 64) {
+      return jsonErr(res, 400, 'Password must not exceed 64 characters.');
+    }
+
+    // 3b. Password validation — strength (always enforced, independent of optional validator)
+    if (!/[A-Z]/.test(newPassword)) {
+      return jsonErr(res, 400, 'Password must contain at least one uppercase letter.');
+    }
+    if (!/[a-z]/.test(newPassword)) {
+      return jsonErr(res, 400, 'Password must contain at least one lowercase letter.');
+    }
+    if (!/\d/.test(newPassword)) {
+      return jsonErr(res, 400, 'Password must contain at least one number.');
+    }
+    if (!/[@$!%*?&#^]/.test(newPassword)) {
+      return jsonErr(res, 400, 'Password must contain at least one special character (@$!%*?&#^).');
+    }
+
+    // 3c. Optional extended validator (if available)
     try {
       const { isStrongPassword } = require('../utils/passwordValidator');
       const check = isStrongPassword(newPassword);
       if (!check.valid) return jsonErr(res, 400, check.message);
-    } catch (_) { /* validator not available — length check above is minimum gate */ }
+    } catch (_) { /* validator not available — inline checks above are the gate */ }
 
     // 5. 30-day cooldown (second line of defense after forgot-password check)
     if (user.lastPasswordResetAt) {
