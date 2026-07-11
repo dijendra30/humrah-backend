@@ -116,37 +116,29 @@ router.post('/forgot-password', passwordResetLimiter, async (req, res) => {
     console.log('1. Generated raw token:', rawToken);
     console.log('2. Stored hashed token:', hashedToken);
 
-    // Store hashed token + expiry safely using standard save
+    // 🛡️ NUCLEAR OPTION #2: Bypass Mongoose completely. Use native MongoDB driver.
     const expiryDate = new Date(Date.now() + TOKEN_EXPIRY_MS);
-    
-    // We need to fetch the full user to safely call .save() without triggering validation errors on unselected fields
-    const fullUser = await User.findById(user._id);
-    if (!fullUser) {
-      console.error(`❌ forgot-password error: User disappeared during save for ${normalizedEmail}`);
-      return jsonErr(res, 500, 'Server error. Please try again later.');
-    }
-
-    // 🛡️ NUCLEAR OPTION: Bypasses all Mongoose strict-mode validation and saves directly
-    const updatedUser = await User.findByIdAndUpdate(
-      user._id,
+    const nativeUpdate = await User.collection.updateOne(
+      { _id: user._id },
       {
         $set: {
           resetPasswordToken: hashedToken,
           resetPasswordExpires: expiryDate
         }
-      },
-      { new: true, strict: false } // Force the save even if Mongoose thinks it shouldn't
-    ).select('+resetPasswordToken');
+      }
+    );
 
-    if (!updatedUser) {
-      console.error(`❌ forgot-password error: User disappeared during save for ${normalizedEmail}`);
+    if (nativeUpdate.modifiedCount === 0 && nativeUpdate.upsertedCount === 0) {
+      console.error(`❌ forgot-password error: MongoDB Native update failed for ${normalizedEmail}`);
       return jsonErr(res, 500, 'Server error. Please try again later.');
     }
 
-    // IMMEDIATE READ-BACK AUDIT
+    // IMMEDIATE READ-BACK AUDIT USING NATIVE DRIVER
+    const nativeRead = await User.collection.findOne({ _id: user._id });
     console.log('--- DB WRITE VERIFICATION ---');
-    console.log('Token physically in DB after save:', updatedUser.resetPasswordToken || 'NULL / STRIPPED');
-    console.log('Matches hashed token?', updatedUser.resetPasswordToken === hashedToken ? 'YES ✅' : 'NO ❌ (Database rejected the write!)');
+    console.log('Token physically in DB:', nativeRead ? nativeRead.resetPasswordToken : 'USER NOT FOUND');
+    console.log('Expiry physically in DB:', nativeRead ? nativeRead.resetPasswordExpires : 'NULL');
+    console.log('Matches hashed token?', nativeRead && nativeRead.resetPasswordToken === hashedToken ? 'YES ✅' : 'NO ❌');
     console.log('-----------------------------');
 
     console.log('3. Expiry timestamp:', expiryDate.toISOString());
@@ -237,10 +229,14 @@ router.post('/reset-password', verifyOtpLimiter, async (req, res) => {
       resetPasswordToken: hashedToken
     }).select('+password +lastPasswordResetAt +resetPasswordCount +previousPasswords +resetPasswordToken +resetPasswordExpires');
 
+    // NATIVE DRIVER LOOKUP TO BYPASS MONGOOSE STRIPPING
+    const nativeLookup = await User.collection.findOne({ resetPasswordToken: hashedToken });
     console.log('8. Database lookup result:', user ? `Found user (${user._id})` : 'NULL (No match found for hash)');
+    console.log('9. User token expiry in DB (Mongoose):', user && user.resetPasswordExpires ? user.resetPasswordExpires.toISOString() : 'NULL');
+    console.log('9b. User token expiry in DB (Native):', nativeLookup && nativeLookup.resetPasswordExpires ? nativeLookup.resetPasswordExpires.toISOString() : 'NULL');
 
     // Token not found — invalid or already used
-    if (!user) {
+    if (!user || !nativeLookup) {
       console.log('❌ Token lookup failed! Returning INVALID_TOKEN.');
       console.log('--------------------------------------');
       return res.status(400).json({
@@ -250,17 +246,17 @@ router.post('/reset-password', verifyOtpLimiter, async (req, res) => {
       });
     }
 
-    console.log('9. User token expiry in DB:', user.resetPasswordExpires ? user.resetPasswordExpires.toISOString() : 'NULL');
     console.log('10. Current server timestamp:', new Date().toISOString());
 
-    // Token found but expired
-    if (!user.resetPasswordExpires || user.resetPasswordExpires < new Date()) {
+    // Token found but expired (Use nativeLookup to bypass any Mongoose issues)
+    if (!nativeLookup.resetPasswordExpires || nativeLookup.resetPasswordExpires < new Date()) {
       console.log('❌ Token expired! Returning TOKEN_EXPIRED.');
       console.log('--------------------------------------');
       // Clear expired token so it can't be probed again
-      user.resetPasswordToken  = null;
-      user.resetPasswordExpires = null;
-      await user.save();
+      await User.collection.updateOne(
+        { _id: user._id },
+        { $set: { resetPasswordToken: null, resetPasswordExpires: null } }
+      );
       return res.status(400).json({
         success: false,
         message: 'This password reset link has expired. Please request a new one.',
