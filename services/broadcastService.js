@@ -202,8 +202,17 @@ async function sendToAudience(broadcastId) {
         title: broadcast.title,
         body:  broadcast.message,
         data: {
-          type:        'ADMIN_BROADCAST',
-          broadcastId: broadcast._id.toString(),
+          type:          'ADMIN_BROADCAST',
+          broadcastId:   broadcast._id.toString(),
+          broadcastType: broadcast.type || 'ANNOUNCEMENT',
+          title:         broadcast.title,
+          message:       broadcast.message,
+          language:      broadcast.language || 'en',
+          category:      broadcast.audienceType || 'EVERYONE',
+          sentAt:        new Date().toISOString(),
+          deepLink:      `humrah://broadcast/${broadcast._id.toString()}`,
+          priority:      'high',
+          expiresAt:     broadcast.expiresAt ? broadcast.expiresAt.toISOString() : ''
         },
       };
 
@@ -287,8 +296,17 @@ async function retryFailedSends(broadcastId) {
     title: broadcast.title,
     body:  broadcast.message,
     data: {
-      type:        'ADMIN_BROADCAST',
-      broadcastId: broadcast._id.toString(),
+      type:          'ADMIN_BROADCAST',
+      broadcastId:   broadcast._id.toString(),
+      broadcastType: broadcast.type || 'ANNOUNCEMENT',
+      title:         broadcast.title,
+      message:       broadcast.message,
+      language:      broadcast.language || 'en',
+      category:      broadcast.audienceType || 'EVERYONE',
+      sentAt:        new Date().toISOString(),
+      deepLink:      `humrah://broadcast/${broadcast._id.toString()}`,
+      priority:      'high',
+      expiresAt:     broadcast.expiresAt ? broadcast.expiresAt.toISOString() : ''
     },
   };
 
