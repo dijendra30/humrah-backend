@@ -7,6 +7,23 @@ const RandomBookingChat  = require('./models/RandomBookingChat');
 const EncryptionKey      = require('./models/EncryptionKey');
 
 // ══════════════════════════════════════════════════════════════════════════════
+// STARTUP RECOVERY — Resume Broadcasts
+// ══════════════════════════════════════════════════════════════════════════════
+(async () => {
+  try {
+    const Broadcast = require('./models/Broadcast');
+    const { sendToAudience } = require('./services/broadcastService');
+    const stuckBroadcasts = await Broadcast.find({ status: 'SENDING' }).lean();
+    for (const b of stuckBroadcasts) {
+      console.log(`[STARTUP] Resuming stuck broadcast: ${b._id}`);
+      sendToAudience(b._id).catch(e => console.error(`[STARTUP] Failed to resume broadcast ${b._id}:`, e.message));
+    }
+  } catch (err) {
+    console.error('[STARTUP] Error resuming broadcasts:', err.message);
+  }
+})();
+
+// ══════════════════════════════════════════════════════════════════════════════
 // EVERY MINUTE — Surprise Meetup reservation expiry
 //
 // Safety net: if the in-process setTimeout was lost (server restart, crash),
