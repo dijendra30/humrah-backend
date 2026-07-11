@@ -112,29 +112,39 @@ router.post('/forgot-password', passwordResetLimiter, async (req, res) => {
     const rawToken    = crypto.randomBytes(32).toString('hex');
     const hashedToken = crypto.createHash('sha256').update(rawToken).digest('hex');
 
+    console.log('--- PASSWORD RESET AUDIT (FORGOT) ---');
+    console.log('1. Generated raw token:', rawToken);
+    console.log('2. Stored hashed token:', hashedToken);
+
     // Store hashed token + expiry atomically
+    const expiryDate = new Date(Date.now() + TOKEN_EXPIRY_MS);
     const updateResult = await User.updateOne(
       { _id: user._id },
       {
         $set: {
           resetPasswordToken:   hashedToken,
-          resetPasswordExpires: new Date(Date.now() + TOKEN_EXPIRY_MS)
+          resetPasswordExpires: expiryDate
         }
       }
     );
 
+    console.log('3. Expiry timestamp:', expiryDate.toISOString());
+    console.log('4. Current server timestamp:', new Date().toISOString());
+
     if (updateResult.modifiedCount === 0) {
-      console.error(`❌ forgot-password error: Failed to save reset token for ${normalizedEmail}`);
+      console.error(`❌ forgot-password error: Failed to save reset token for ${normalizedEmail}. Update result:`, updateResult);
       return jsonErr(res, 500, 'Server error. Please try again later.');
     }
 
     // Build reset URL → static site reset page
     const resetUrl = `https://humrah.in/reset-password.html?token=${rawToken}`;
+    console.log('5. Generated Email URL:', resetUrl);
 
     // Send email with clickable reset link
     await sendPasswordResetEmail(normalizedEmail, user.firstName, resetUrl);
 
     console.log(`✅ Password reset link dispatched → ${normalizedEmail}`);
+    console.log('---------------------------------------');
     return res.json({ success: true, message: 'If an account exists with this email, a password reset link has been sent.' });
 
   } catch (err) {
@@ -199,14 +209,24 @@ router.post('/reset-password', verifyOtpLimiter, async (req, res) => {
       return jsonErr(res, 400, 'Reset token and new password are required.', { code: 'INVALID_TOKEN' });
     }
 
+    const cleanToken = token.trim();
     // 2. Verify token — hash incoming token and look up in DB
-    const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
+    const hashedToken = crypto.createHash('sha256').update(cleanToken).digest('hex');
+    
+    console.log('--- PASSWORD RESET AUDIT (RESET) ---');
+    console.log('6. Incoming raw token:', cleanToken);
+    console.log('7. Incoming hashed token:', hashedToken);
+    
     const user = await User.findOne({
       resetPasswordToken: hashedToken
     }).select('+password +lastPasswordResetAt +resetPasswordCount +previousPasswords +resetPasswordToken +resetPasswordExpires');
 
+    console.log('8. Database lookup result:', user ? `Found user (${user._id})` : 'NULL (No match found for hash)');
+
     // Token not found — invalid or already used
     if (!user) {
+      console.log('❌ Token lookup failed! Returning INVALID_TOKEN.');
+      console.log('--------------------------------------');
       return res.status(400).json({
         success: false,
         message: 'Reset link is invalid. Please request a new one from the Humrah app.',
@@ -214,8 +234,13 @@ router.post('/reset-password', verifyOtpLimiter, async (req, res) => {
       });
     }
 
+    console.log('9. User token expiry in DB:', user.resetPasswordExpires ? user.resetPasswordExpires.toISOString() : 'NULL');
+    console.log('10. Current server timestamp:', new Date().toISOString());
+
     // Token found but expired
     if (!user.resetPasswordExpires || user.resetPasswordExpires < new Date()) {
+      console.log('❌ Token expired! Returning TOKEN_EXPIRED.');
+      console.log('--------------------------------------');
       // Clear expired token so it can't be probed again
       user.resetPasswordToken  = null;
       user.resetPasswordExpires = null;
