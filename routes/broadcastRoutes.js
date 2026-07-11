@@ -62,6 +62,12 @@ router.post('/preview',
   ctrl.previewBroadcastAudience
 );
 
+// Send a test broadcast to the admin's device
+router.post('/:id/test',
+  validateBroadcastId,
+  ctrl.testBroadcast
+);
+
 // Send a broadcast to its audience
 router.post('/:id/send',
   validateBroadcastId,
