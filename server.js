@@ -592,6 +592,7 @@ app.use('/api/payment',           authenticate, enforceLegalAcceptance, paymentR
 app.use('/api/random-booking',    authenticate, enforceLegalAcceptance, require('./routes/randomBooking'));
 app.use('/api/verification',      authenticate, enforceLegalAcceptance, require('./routes/verification'));
 app.use('/api/settings',          authenticate, enforceLegalAcceptance, settingsRoutes);
+app.use('/api/notifications',     authenticate, enforceLegalAcceptance, require('./routes/notifications'));
 app.use('/api/profile-assistant', authenticate, profileAssistantRoutes);
 app.use('/api/admin',             authenticate, require('./routes/admin'));
 app.use('/api/admin-dashboard',   authenticate, require('./routes/adminDashboard'));
