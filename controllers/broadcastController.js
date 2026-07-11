@@ -340,6 +340,61 @@ exports.sendBroadcast = async (req, res) => {
 };
 
 // =============================================
+// TEST BROADCAST (Phase 2)
+// =============================================
+
+/**
+ * POST /api/admin/broadcasts/:id/test
+ * Sends the broadcast ONLY to the current admin user for testing.
+ */
+exports.testBroadcast = async (req, res) => {
+  try {
+    const broadcast = await Broadcast.findById(req.params.id);
+
+    if (!broadcast) {
+      return res.status(404).json({
+        success: false,
+        message: 'Broadcast not found',
+      });
+    }
+
+    const payload = {
+      title: broadcast.title,
+      body:  broadcast.message,
+      data: {
+        type:        'ADMIN_BROADCAST',
+        broadcastId: broadcast._id.toString(),
+        isTest:      'true'
+      },
+    };
+
+    // Send only to req.user._id (the admin requesting the test)
+    const broadcastFcm = require('../services/broadcastFcmService');
+    const result = await broadcastFcm.sendToSingleUser(req.user._id, payload);
+
+    if (result.success) {
+      console.log(`[Broadcast] Test broadcast ${broadcast._id} sent to admin ${req.user.email}`);
+      return res.json({
+        success: true,
+        message: 'Test notification sent to your device',
+      });
+    } else {
+      console.warn(`[Broadcast] Test broadcast failed for admin ${req.user.email}: ${result.reason}`);
+      return res.status(400).json({
+        success: false,
+        message: `Failed to send test notification: ${result.reason === 'no_tokens' ? 'No FCM tokens found for your account.' : result.reason}`,
+      });
+    }
+  } catch (err) {
+    console.error('[Broadcast] testBroadcast error:', err.message);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to send test broadcast',
+    });
+  }
+};
+
+// =============================================
 // PREVIEW BROADCAST AUDIENCE
 // =============================================
 
