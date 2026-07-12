@@ -51,7 +51,10 @@ exports.getNotifications = async (req, res) => {
 exports.getNotification = async (req, res) => {
   try {
     const notification = await Notification.findOne({
-      _id: req.params.id,
+      $or: [
+        { _id: req.params.id },
+        { broadcastId: req.params.id }
+      ],
       userId: req.user._id,
     }).populate('broadcastId').lean();
 
@@ -74,7 +77,10 @@ exports.getNotification = async (req, res) => {
 exports.markAsRead = async (req, res) => {
   try {
     const notification = await Notification.findOne({
-      _id: req.params.id,
+      $or: [
+        { _id: req.params.id },
+        { broadcastId: req.params.id }
+      ],
       userId: req.user._id,
     });
 
@@ -109,7 +115,10 @@ exports.markAsRead = async (req, res) => {
 exports.markAsClicked = async (req, res) => {
   try {
     const notification = await Notification.findOne({
-      _id: req.params.id,
+      $or: [
+        { _id: req.params.id },
+        { broadcastId: req.params.id }
+      ],
       userId: req.user._id,
     });
 
@@ -137,7 +146,10 @@ exports.markAsClicked = async (req, res) => {
 exports.markBroadcastAsClicked = async (req, res) => {
   try {
     const notification = await Notification.findOne({
-      broadcastId: req.params.id,
+      $or: [
+        { _id: req.params.id },
+        { broadcastId: req.params.id }
+      ],
       userId: req.user._id,
     });
 
