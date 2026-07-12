@@ -616,7 +616,6 @@ router.post('/reports/safety-ticket/:id/internal-notes', authenticate, adminOnly
 });
 
 const Notification = require('../models/Notification');
-const Broadcast = require('../models/Broadcast');
 
 // ==========================================
 // PROFILE COMPLETION ANALYTICS
