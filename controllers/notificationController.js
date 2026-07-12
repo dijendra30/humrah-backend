@@ -214,3 +214,39 @@ exports.getUnreadCount = async (req, res) => {
     res.status(500).json({ success: false, message: 'Failed to fetch unread count.' });
   }
 };
+
+/**
+ * DELETE /api/notifications/:id
+ * Delete a specific notification belonging to the authenticated user.
+ */
+exports.deleteNotification = async (req, res) => {
+  try {
+    const result = await Notification.deleteOne({
+      _id: req.params.id,
+      userId: req.user._id,
+    });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ success: false, message: 'Notification not found or unauthorized' });
+    }
+
+    res.json({ success: true, message: 'Notification deleted successfully' });
+  } catch (err) {
+    console.error('[NotificationController] deleteNotification error:', err);
+    res.status(500).json({ success: false, message: 'Failed to delete notification.' });
+  }
+};
+
+/**
+ * DELETE /api/notifications
+ * Delete all notifications belonging to the authenticated user.
+ */
+exports.deleteAllNotifications = async (req, res) => {
+  try {
+    await Notification.deleteMany({ userId: req.user._id });
+    res.json({ success: true, message: 'All notifications deleted successfully' });
+  } catch (err) {
+    console.error('[NotificationController] deleteAllNotifications error:', err);
+    res.status(500).json({ success: false, message: 'Failed to delete all notifications.' });
+  }
+};
