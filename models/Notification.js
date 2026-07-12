@@ -57,6 +57,22 @@ const notificationSchema = new mongoose.Schema({
   fcmMessageId: {
     type: String,
     default: null
+  },
+  androidVersion: {
+    type: String,
+    default: null
+  },
+  appVersion: {
+    type: String,
+    default: null
+  },
+  failureReason: {
+    type: String,
+    default: null
+  },
+  clickedAt: {
+    type: Date,
+    default: null
   }
 });
 

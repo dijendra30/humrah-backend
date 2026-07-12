@@ -144,6 +144,16 @@ const userSchema = new mongoose.Schema({
     default: [],
     select: false
   },
+  resetPasswordToken: {
+    type: String,
+    default: null,
+    select: false
+  },
+  resetPasswordExpires: {
+    type: Date,
+    default: null,
+    select: false
+  },
 
   // =============================================
   // TOKEN VERSION -- for forced logout / revocation
@@ -390,6 +400,15 @@ const userSchema = new mongoose.Schema({
   facebookId: String,
 
   fcmTokens: { type: [String], default: [] },
+  fcmDevices: { 
+    type: [{ 
+      token: String, 
+      androidVersion: String, 
+      appVersion: String, 
+      updatedAt: { type: Date, default: Date.now } 
+    }], 
+    default: [] 
+  },
 
   isPremium:       { type: Boolean, default: false },
   premiumExpiresAt:{ type: Date,    default: null },
