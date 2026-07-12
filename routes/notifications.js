@@ -5,6 +5,7 @@ const router = express.Router();
 const ctrl = require('../controllers/notificationController');
 
 router.get('/', ctrl.getNotifications);
+router.post('/', ctrl.restoreNotification);
 router.get('/unread-count', ctrl.getUnreadCount);
 router.get('/:id', ctrl.getNotification);
 router.post('/read-all', ctrl.markAllAsRead);
