@@ -170,10 +170,60 @@ const userSchema = new mongoose.Schema({
   requiresLegalReacceptance: { type: Boolean, default: false },
 
   notifications: {
+    // ── Legacy fields (backward compatible) ──
     activityRequests:  { type: Boolean, default: true },
     gamingAlerts:      { type: Boolean, default: true },
     communityActivity: { type: Boolean, default: true },
-    appUpdates:        { type: Boolean, default: true }
+    appUpdates:        { type: Boolean, default: true },
+
+    // ── General ──
+    pushNotifications: { type: Boolean, default: true },
+    sound:             { type: Boolean, default: true },
+    vibration:         { type: Boolean, default: true },
+    badge:             { type: Boolean, default: true },
+    previewContent:    { type: Boolean, default: true },
+
+    // ── Companion & Social ──
+    companionRequests:  { type: Boolean, default: true },
+    companionAccepted:  { type: Boolean, default: true },
+    companionRejected:  { type: Boolean, default: true },
+    friendRequests:     { type: Boolean, default: true },
+
+    // ── Activities ──
+    movieHangout:       { type: Boolean, default: true },
+    surpriseActivity:   { type: Boolean, default: true },
+    randomBooking:      { type: Boolean, default: true },
+    officialEvents:     { type: Boolean, default: true },
+    nearbyActivities:   { type: Boolean, default: true },
+
+    // ── Messages ──
+    chatMessages:       { type: Boolean, default: true },
+    letters:            { type: Boolean, default: true },
+    replies:            { type: Boolean, default: true },
+
+    // ── Safety (cannot be fully disabled) ──
+    safetyAlerts:       { type: Boolean, default: true },
+    emergencyAlerts:    { type: Boolean, default: true },
+    accountSecurity:    { type: Boolean, default: true },
+    verification:       { type: Boolean, default: true },
+
+    // ── Broadcasts ──
+    announcements:      { type: Boolean, default: true },
+    updates:            { type: Boolean, default: true },
+    promotions:         { type: Boolean, default: true },
+    featureReleases:    { type: Boolean, default: true },
+    maintenance:        { type: Boolean, default: true },
+
+    // ── Marketing ──
+    tips:               { type: Boolean, default: true },
+    recommendations:    { type: Boolean, default: true },
+    weeklySummary:      { type: Boolean, default: true },
+    premiumOffers:      { type: Boolean, default: true },
+
+    // ── Quiet Hours ──
+    quietHoursEnabled:  { type: Boolean, default: false },
+    quietHoursStart:    { type: String,  default: '23:00' },
+    quietHoursEnd:      { type: String,  default: '07:00' }
   },
 
   blockedUsers:  [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],

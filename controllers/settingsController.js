@@ -195,14 +195,42 @@ exports.updatePassword = async (req, res) => {
 // ══════════════════════════════════════════════════════════════════════════════
 exports.updateNotifications = async (req, res) => {
   try {
-    const { activityRequests, gamingAlerts, communityActivity, appUpdates } = req.body;
+    const booleanKeys = [
+      'activityRequests', 'gamingAlerts', 'communityActivity', 'appUpdates',
+      'pushNotifications', 'sound', 'vibration', 'badge', 'previewContent',
+      'companionRequests', 'companionAccepted', 'companionRejected', 'friendRequests',
+      'movieHangout', 'surpriseActivity', 'randomBooking', 'officialEvents', 'nearbyActivities',
+      'chatMessages', 'letters', 'replies',
+      'safetyAlerts', 'emergencyAlerts', 'accountSecurity', 'verification',
+      'announcements', 'updates', 'promotions', 'featureReleases', 'maintenance',
+      'tips', 'recommendations', 'weeklySummary', 'premiumOffers',
+      'quietHoursEnabled'
+    ];
 
-    // Build an explicit update so only valid fields are set
+    const stringKeys = [
+      'quietHoursStart', 'quietHoursEnd'
+    ];
+
+    // These safety items cannot be turned off by the user
+    const alwaysEnabled = ['safetyAlerts', 'emergencyAlerts', 'accountSecurity', 'verification'];
+
     const update = {};
-    if (typeof activityRequests  === 'boolean') update['notifications.activityRequests']  = activityRequests;
-    if (typeof gamingAlerts      === 'boolean') update['notifications.gamingAlerts']      = gamingAlerts;
-    if (typeof communityActivity === 'boolean') update['notifications.communityActivity'] = communityActivity;
-    if (typeof appUpdates        === 'boolean') update['notifications.appUpdates']        = appUpdates;
+
+    for (const key of booleanKeys) {
+      if (typeof req.body[key] === 'boolean') {
+        // Enforce safety keys
+        if (alwaysEnabled.includes(key) && req.body[key] === false) {
+          continue; // silently ignore attempts to disable safety notifications
+        }
+        update[`notifications.${key}`] = req.body[key];
+      }
+    }
+
+    for (const key of stringKeys) {
+      if (typeof req.body[key] === 'string' && /^\d{2}:\d{2}$/.test(req.body[key])) {
+        update[`notifications.${key}`] = req.body[key];
+      }
+    }
 
     if (Object.keys(update).length === 0) {
       return res.status(400).json({ success: false, message: 'No valid notification fields provided.' });
@@ -212,15 +240,26 @@ exports.updateNotifications = async (req, res) => {
       req.userId,
       { $set: update },
       { new: true }
-    );
+    ).select('notifications');
 
-    const defaults = { activityRequests: true, gamingAlerts: true, communityActivity: true, appUpdates: true };
+    const defaults = {
+      activityRequests: true, gamingAlerts: true, communityActivity: true, appUpdates: true,
+      pushNotifications: true, sound: true, vibration: true, badge: true, previewContent: true,
+      companionRequests: true, companionAccepted: true, companionRejected: true, friendRequests: true,
+      movieHangout: true, surpriseActivity: true, randomBooking: true, officialEvents: true, nearbyActivities: true,
+      chatMessages: true, letters: true, replies: true,
+      safetyAlerts: true, emergencyAlerts: true, accountSecurity: true, verification: true,
+      announcements: true, updates: true, promotions: true, featureReleases: true, maintenance: true,
+      tips: true, recommendations: true, weeklySummary: true, premiumOffers: true,
+      quietHoursEnabled: false, quietHoursStart: '23:00', quietHoursEnd: '07:00'
+    };
+
+    const stored = user.notifications?.toObject ? user.notifications.toObject() : (user.notifications || {});
     res.json({
       success: true,
       message: 'Notification preferences updated.',
-      notifications: { ...defaults, ...(user.notifications?.toObject ? user.notifications.toObject() : user.notifications) }
+      notifications: { ...defaults, ...stored }
     });
-
   } catch (err) {
     console.error('updateNotifications error:', err);
     res.status(500).json({ success: false, message: 'Failed to update notifications.' });
@@ -370,25 +409,35 @@ exports.reportBug = async (req, res) => {
 // ══════════════════════════════════════════════════════════════════════════════
 exports.getNotifications = async (req, res) => {
   try {
-    // If the notifications sub-doc is missing (user registered before the field was added),
-    // write defaults into the document so future saves work correctly.
-    const defaults = { activityRequests: true, gamingAlerts: true, communityActivity: true, appUpdates: true };
+    const defaults = {
+      // Legacy
+      activityRequests: true, gamingAlerts: true, communityActivity: true, appUpdates: true,
+      // General
+      pushNotifications: true, sound: true, vibration: true, badge: true, previewContent: true,
+      // Companion & Social
+      companionRequests: true, companionAccepted: true, companionRejected: true, friendRequests: true,
+      // Activities
+      movieHangout: true, surpriseActivity: true, randomBooking: true, officialEvents: true, nearbyActivities: true,
+      // Messages
+      chatMessages: true, letters: true, replies: true,
+      // Safety
+      safetyAlerts: true, emergencyAlerts: true, accountSecurity: true, verification: true,
+      // Broadcasts
+      announcements: true, updates: true, promotions: true, featureReleases: true, maintenance: true,
+      // Marketing
+      tips: true, recommendations: true, weeklySummary: true, premiumOffers: true,
+      // Quiet Hours
+      quietHoursEnabled: false, quietHoursStart: '23:00', quietHoursEnd: '07:00'
+    };
 
     let user = await User.findById(req.userId).select('notifications');
     if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
 
-    if (!user.notifications || Object.keys(user.notifications.toObject ? user.notifications.toObject() : user.notifications).length === 0) {
-      user = await User.findByIdAndUpdate(
-        req.userId,
-        { $set: { notifications: defaults } },
-        { new: true }
-      ).select('notifications');
-    }
+    // Merge defaults with whatever the user has stored — missing keys get defaults
+    const stored = user.notifications?.toObject ? user.notifications.toObject() : (user.notifications || {});
+    const merged = { ...defaults, ...stored };
 
-    res.json({
-      success: true,
-      notifications: user.notifications || defaults
-    });
+    res.json({ success: true, notifications: merged });
   } catch (err) {
     console.error('getNotifications error:', err);
     res.status(500).json({ success: false, message: 'Failed to fetch notification settings.' });
