@@ -103,6 +103,61 @@ exports.markAsRead = async (req, res) => {
 };
 
 /**
+ * POST /api/notifications/:id/click
+ * Mark the notification as clicked. Set clickedAt.
+ */
+exports.markAsClicked = async (req, res) => {
+  try {
+    const notification = await Notification.findOne({
+      _id: req.params.id,
+      userId: req.user._id,
+    });
+
+    if (!notification) {
+      return res.status(404).json({ success: false, message: 'Notification not found' });
+    }
+
+    if (!notification.clickedAt) {
+      notification.clickedAt = new Date();
+      await notification.save();
+    }
+
+    res.json({ success: true, message: 'Notification marked as clicked' });
+  } catch (err) {
+    console.error('[NotificationController] markAsClicked error:', err);
+    res.status(500).json({ success: false, message: 'Failed to mark notification as clicked.' });
+  }
+};
+
+
+/**
+ * POST /api/notifications/broadcast/:id/click
+ * Mark a notification as clicked using the broadcast ID. Set clickedAt.
+ */
+exports.markBroadcastAsClicked = async (req, res) => {
+  try {
+    const notification = await Notification.findOne({
+      broadcastId: req.params.id,
+      userId: req.user._id,
+    });
+
+    if (!notification) {
+      return res.status(404).json({ success: false, message: 'Notification not found' });
+    }
+
+    if (!notification.clickedAt) {
+      notification.clickedAt = new Date();
+      await notification.save();
+    }
+
+    res.json({ success: true, message: 'Notification marked as clicked' });
+  } catch (err) {
+    console.error('[NotificationController] markBroadcastAsClicked error:', err);
+    res.status(500).json({ success: false, message: 'Failed to mark notification as clicked.' });
+  }
+};
+
+/**
  * POST /api/notifications/read-all
  * Mark every unread notification as read for the authenticated user.
  */

@@ -535,3 +535,165 @@ exports.aiRephrase = async (req, res) => {
     });
   }
 };
+
+// =============================================
+// BROADCAST DRAFTS & HISTORY
+// =============================================
+
+exports.getDrafts = async (req, res) => {
+  req.query.status = 'DRAFT';
+  return exports.getBroadcastList(req, res);
+};
+
+exports.getHistory = async (req, res) => {
+  try {
+    const { page = 1, limit = 20 } = req.query;
+    const query = { status: { $in: ['SENDING', 'SENT', 'FAILED', 'CANCELLED'] } };
+    const skip = (parseInt(page, 10) - 1) * parseInt(limit, 10);
+    
+    const [broadcasts, total] = await Promise.all([
+      Broadcast.find(query)
+        .populate('createdBy', 'firstName lastName email')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit, 10))
+        .lean(),
+      Broadcast.countDocuments(query),
+    ]);
+    
+    return res.json({
+      success: true,
+      broadcasts,
+      pagination: {
+        page: parseInt(page, 10),
+        limit: parseInt(limit, 10),
+        total,
+        totalPages: Math.ceil(total / parseInt(limit, 10)),
+      },
+    });
+  } catch (err) {
+    console.error('[Broadcast] getHistory error:', err.message);
+    return res.status(500).json({ success: false, message: 'Failed to fetch history' });
+  }
+};
+
+// =============================================
+// BROADCAST ANALYTICS
+// =============================================
+
+exports.getAnalytics = async (req, res) => {
+  try {
+    const broadcast = await Broadcast.findById(req.params.id)
+      .populate('createdBy', 'firstName lastName email')
+      .lean();
+
+    if (!broadcast) {
+      return res.status(404).json({ success: false, message: 'Broadcast not found' });
+    }
+
+    const notifications = await Notification.find({ broadcastId: broadcast._id }).lean();
+    
+    let deliveredCount = 0;
+    let openedCount = 0;
+    let clickedCount = 0;
+    let pendingCount = 0;
+    let failedCount = broadcast.failedCount || 0;
+    
+    const deliveryTimeline = [];
+    const openTimeline = [];
+    const failureBreakdown = {};
+    const androidVersions = {};
+    const appVersions = {};
+
+    notifications.forEach(n => {
+      if (n.deliveredAt) {
+        deliveredCount++;
+        deliveryTimeline.push({ time: n.deliveredAt });
+      } else if (n.failureReason) {
+        failedCount++;
+        failureBreakdown[n.failureReason] = (failureBreakdown[n.failureReason] || 0) + 1;
+      } else {
+        pendingCount++;
+      }
+      
+      if (n.openedAt) {
+        openedCount++;
+        openTimeline.push({ time: n.openedAt });
+      }
+
+      if (n.clickedAt) {
+        clickedCount++;
+      }
+      
+      if (n.androidVersion) androidVersions[n.androidVersion] = (androidVersions[n.androidVersion] || 0) + 1;
+      if (n.appVersion) appVersions[n.appVersion] = (appVersions[n.appVersion] || 0) + 1;
+    });
+    
+    return res.json({
+      success: true,
+      analytics: {
+        general: broadcast,
+        delivery: {
+          totalRecipients: broadcast.totalRecipients,
+          delivered: deliveredCount,
+          failed: failedCount,
+          pending: pendingCount,
+          deliveryRate: broadcast.totalRecipients > 0 ? ((deliveredCount / broadcast.totalRecipients) * 100).toFixed(1) : 0
+        },
+        engagement: {
+          opened: openedCount,
+          clicked: clickedCount,
+          notOpened: deliveredCount - openedCount,
+          openRate: deliveredCount > 0 ? ((openedCount / deliveredCount) * 100).toFixed(1) : 0,
+          readRate: deliveredCount > 0 ? ((openedCount / deliveredCount) * 100).toFixed(1) : 0,
+          clickThroughRate: deliveredCount > 0 ? ((clickedCount / deliveredCount) * 100).toFixed(1) : 0
+        },
+        android: {
+          versions: androidVersions,
+          apps: appVersions,
+          devicesReached: deliveredCount
+        },
+        failures: failureBreakdown,
+        charts: {
+          deliveryTimeline,
+          openTimeline
+        }
+      }
+    });
+
+  } catch (err) {
+    console.error('[Broadcast] getAnalytics error:', err.message);
+    return res.status(500).json({ success: false, message: 'Failed to fetch analytics' });
+  }
+};
+
+// =============================================
+// SCHEDULE BROADCAST
+// =============================================
+
+exports.scheduleBroadcast = async (req, res) => {
+  try {
+    const { scheduledFor } = req.body;
+    if (!scheduledFor) {
+      return res.status(400).json({ success: false, message: 'scheduledFor date is required' });
+    }
+
+    const broadcast = await Broadcast.findById(req.params.id);
+    if (!broadcast) return res.status(404).json({ success: false, message: 'Broadcast not found' });
+    
+    if (broadcast.status !== 'DRAFT') {
+      return res.status(400).json({ success: false, message: 'Only DRAFT broadcasts can be scheduled' });
+    }
+
+    broadcast.status = 'SCHEDULED';
+    broadcast.scheduledFor = new Date(scheduledFor);
+    await broadcast.save();
+
+    console.log(`[Broadcast] Scheduled ${broadcast._id} for ${broadcast.scheduledFor}`);
+    
+    return res.json({ success: true, message: 'Broadcast scheduled', broadcast });
+  } catch (err) {
+    console.error('[Broadcast] scheduleBroadcast error:', err.message);
+    return res.status(500).json({ success: false, message: 'Failed to schedule broadcast' });
+  }
+};
