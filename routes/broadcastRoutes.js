@@ -31,6 +31,12 @@ router.get('/',
   ctrl.getBroadcastList
 );
 
+// Get Broadcast Drafts
+router.get('/view/drafts', ctrl.getDrafts);
+
+// Get Broadcast History
+router.get('/view/history', ctrl.getHistory);
+
 // Get single broadcast details with analytics
 router.get('/:id',
   validateBroadcastId,
@@ -51,12 +57,6 @@ router.delete('/:id',
   auditLog('DELETE_BROADCAST', 'SYSTEM'),
   ctrl.deleteBroadcast
 );
-
-// Get Broadcast Drafts
-router.get('/view/drafts', ctrl.getDrafts);
-
-// Get Broadcast History
-router.get('/view/history', ctrl.getHistory);
 
 // Get single broadcast details with analytics
 router.get('/:id/analytics',
