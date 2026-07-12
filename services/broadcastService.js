@@ -179,7 +179,7 @@ async function sendToAudience(broadcastId) {
       // Fetch users using cursor
       const users = await User.find(cursorQuery)
         .sort({ _id: 1 })
-        .select('_id fcmTokens')
+        .select('_id fcmTokens fcmDevices')
         .limit(BATCH_SIZE)
         .lean();
 
@@ -213,16 +213,28 @@ async function sendToAudience(broadcastId) {
       const batchResult = await broadcastFcm.sendToMultipleUsers(users, payload);
 
       // Create notification history records
-      const notificationDocs = batchResult.results.map(result => ({
-        userId:       result.userId,
-        title:        broadcast.title,
-        message:      broadcast.message,
-        type:         'ADMIN_BROADCAST',
-        broadcastId:  broadcast._id,
-        createdBy:    'admin',
-        deliveredAt:  result.success ? new Date() : null,
-        fcmMessageId: result.fcmMessageId || null,
-      }));
+      const notificationDocs = batchResult.results.map(result => {
+        const user = users.find(u => u._id.toString() === result.userId.toString());
+        let appVersion = null, androidVersion = null, reason = result.reason || null;
+        if (user && user.fcmDevices && user.fcmDevices.length > 0) {
+          const latestDevice = user.fcmDevices.sort((a,b) => new Date(b.updatedAt) - new Date(a.updatedAt))[0];
+          appVersion = latestDevice.appVersion;
+          androidVersion = latestDevice.androidVersion;
+        }
+        return {
+          userId:       result.userId,
+          title:        broadcast.title,
+          message:      broadcast.message,
+          type:         'ADMIN_BROADCAST',
+          broadcastId:  broadcast._id,
+          createdBy:    'admin',
+          deliveredAt:  result.success ? new Date() : null,
+          fcmMessageId: result.fcmMessageId || null,
+          androidVersion: androidVersion,
+          appVersion: appVersion,
+          failureReason: reason
+        };
+      });
 
       if (notificationDocs.length > 0) {
         await Notification.insertMany(notificationDocs, { ordered: false }).catch(insertErr => {
