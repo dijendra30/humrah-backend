@@ -250,3 +250,29 @@ exports.deleteAllNotifications = async (req, res) => {
     res.status(500).json({ success: false, message: 'Failed to delete all notifications.' });
   }
 };
+
+/**
+ * POST /api/notifications
+ * Restore a deleted notification.
+ */
+exports.restoreNotification = async (req, res) => {
+  try {
+    const { id, title, message, type, broadcastId, createdAt } = req.body;
+
+    const notification = new Notification({
+      _id: id,
+      userId: req.user._id, // Enforce current authenticated user
+      title,
+      message,
+      type: type || 'ADMIN_BROADCAST',
+      broadcastId: broadcastId || null,
+      createdAt: createdAt ? new Date(createdAt) : new Date()
+    });
+
+    await notification.save();
+    res.json({ success: true, message: 'Notification restored successfully', notification });
+  } catch (err) {
+    console.error('[NotificationController] restoreNotification error:', err);
+    res.status(500).json({ success: false, message: 'Failed to restore notification.' });
+  }
+};
