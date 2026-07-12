@@ -11,5 +11,7 @@ router.post('/read-all', ctrl.markAllAsRead);
 router.post('/broadcast/:id/click', ctrl.markBroadcastAsClicked);
 router.post('/:id/read', ctrl.markAsRead);
 router.post('/:id/click', ctrl.markAsClicked);
+router.delete('/:id', ctrl.deleteNotification);
+router.delete('/', ctrl.deleteAllNotifications);
 
 module.exports = router;
