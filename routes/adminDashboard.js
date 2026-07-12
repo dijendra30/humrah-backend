@@ -9,6 +9,7 @@ const UserReport = require('../models/UserReport');
 const AuditLog = require('../models/AuditLog');
 const Post = require('../models/Post');
 const Booking = require('../models/Booking'); // Assuming Booking model exists
+const Broadcast = require('../models/Broadcast');
 const { authenticate, adminOnly } = require('../middleware/auth');
 const { deleteImage, deleteVideo } = require('../config/cloudinary');
 
@@ -17,6 +18,10 @@ router.get('/dashboard/stats', authenticate, adminOnly, async (req, res) => {
   try {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
+
+    // Calculate broadcast start of week
+    const startOfWeek = new Date(today);
+    startOfWeek.setDate(today.getDate() - today.getDay());
 
     const [
       totalUsers,
@@ -32,7 +37,15 @@ router.get('/dashboard/stats', authenticate, adminOnly, async (req, res) => {
       resolvedToday,
       closedToday,
       openSafetyCases,
-      communityPostsToday
+      communityPostsToday,
+      broadcastDrafts,
+      broadcastScheduled,
+      broadcastSending,
+      broadcastCompleted,
+      broadcastFailed,
+      broadcastsToday,
+      broadcastsThisWeek,
+      totalPushNotifications
     ] = await Promise.all([
       User.countDocuments({ role: 'USER' }),
       User.countDocuments({ role: 'USER', lastActive: { $gte: today } }),
@@ -47,8 +60,24 @@ router.get('/dashboard/stats', authenticate, adminOnly, async (req, res) => {
       SafetyTicket.countDocuments({ status: { $in: ['RESOLVED_BY_ADMIN', 'RESOLVED_BY_USER', 'AUTO_RESOLVED', 'RESOLVED_BY_TEAM', 'RESOLVED'] }, updatedAt: { $gte: today } }),
       SafetyTicket.countDocuments({ status: 'CLOSED', updatedAt: { $gte: today } }),
       SafetyReport.countDocuments({ status: { $in: ['PENDING', 'UNDER_REVIEW'] } }),
-      Post.countDocuments({ createdAt: { $gte: today } })
+      Post.countDocuments({ createdAt: { $gte: today } }),
+      Broadcast.countDocuments({ status: 'DRAFT' }),
+      Broadcast.countDocuments({ status: 'SCHEDULED' }),
+      Broadcast.countDocuments({ status: 'SENDING' }),
+      Broadcast.countDocuments({ status: 'SENT' }),
+      Broadcast.countDocuments({ status: 'FAILED' }),
+      Broadcast.countDocuments({ status: 'SENT', sentAt: { $gte: today } }),
+      Broadcast.countDocuments({ status: 'SENT', sentAt: { $gte: startOfWeek } }),
+      Broadcast.aggregate([{ $group: { _id: null, total: { $sum: '$deliveredCount' }, opens: { $sum: '$openedCount' } } }])
     ]);
+
+    const broadcastTotals = totalPushNotifications.length > 0 ? totalPushNotifications[0] : { total: 0, opens: 0 };
+    const avgOpenRate = broadcastTotals.total > 0 ? ((broadcastTotals.opens / broadcastTotals.total) * 100).toFixed(1) : 0;
+
+    // Approximating Avg Delivery Rate: (totalDelivered / totalRecipients)
+    const broadcastDelivery = await Broadcast.aggregate([{ $group: { _id: null, delivered: { $sum: '$deliveredCount' }, recipients: { $sum: '$totalRecipients' } } }]);
+    const deliveryTotals = broadcastDelivery.length > 0 ? broadcastDelivery[0] : { delivered: 0, recipients: 0 };
+    const avgDeliveryRate = deliveryTotals.recipients > 0 ? ((deliveryTotals.delivered / deliveryTotals.recipients) * 100).toFixed(1) : 0;
 
     res.json({
       success: true,
@@ -68,6 +97,18 @@ router.get('/dashboard/stats', authenticate, adminOnly, async (req, res) => {
           escalated,
           resolvedToday,
           closedToday
+        },
+        broadcasts: {
+          drafts: broadcastDrafts,
+          scheduled: broadcastScheduled,
+          sending: broadcastSending,
+          completed: broadcastCompleted,
+          failed: broadcastFailed,
+          today: broadcastsToday,
+          thisWeek: broadcastsThisWeek,
+          totalSent: broadcastTotals.total,
+          avgOpenRate,
+          avgDeliveryRate
         }
       }
     });

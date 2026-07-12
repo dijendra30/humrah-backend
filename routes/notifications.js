@@ -8,6 +8,8 @@ router.get('/', ctrl.getNotifications);
 router.get('/unread-count', ctrl.getUnreadCount);
 router.get('/:id', ctrl.getNotification);
 router.post('/read-all', ctrl.markAllAsRead);
+router.post('/broadcast/:id/click', ctrl.markBroadcastAsClicked);
 router.post('/:id/read', ctrl.markAsRead);
+router.post('/:id/click', ctrl.markAsClicked);
 
 module.exports = router;

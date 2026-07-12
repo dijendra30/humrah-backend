@@ -15,21 +15,40 @@ const router  = express.Router();
 const User    = require("../models/User");
 
 // POST /api/auth/fcm-token
-// Body: { fcmToken: string }
+// Body: { fcmToken: string, androidVersion?: string, appVersion?: string }
 // Saves (or deduplicates) the FCM token for the authenticated user.
 router.post("/fcm-token", async (req, res) => {
   try {
-    const { fcmToken } = req.body;
+    const { fcmToken, androidVersion, appVersion } = req.body;
     if (!fcmToken || typeof fcmToken !== "string" || fcmToken.trim() === "") {
       return res.status(400).json({ success: false, message: "fcmToken is required" });
     }
 
-    // $addToSet prevents duplicates — safe to call on every app launch
-    await User.findByIdAndUpdate(
-      req.user._id,
-      { $addToSet: { fcmTokens: fcmToken.trim() } },
-      { new: false }
-    );
+    const tokenStr = fcmToken.trim();
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ success: false, message: "User not found" });
+
+    // Update fcmTokens array (backward compatibility)
+    if (!user.fcmTokens.includes(tokenStr)) {
+      user.fcmTokens.push(tokenStr);
+    }
+
+    // Update fcmDevices array (analytics)
+    const existingDeviceIndex = user.fcmDevices.findIndex(d => d.token === tokenStr);
+    if (existingDeviceIndex >= 0) {
+      user.fcmDevices[existingDeviceIndex].androidVersion = androidVersion || user.fcmDevices[existingDeviceIndex].androidVersion;
+      user.fcmDevices[existingDeviceIndex].appVersion = appVersion || user.fcmDevices[existingDeviceIndex].appVersion;
+      user.fcmDevices[existingDeviceIndex].updatedAt = new Date();
+    } else {
+      user.fcmDevices.push({
+        token: tokenStr,
+        androidVersion: androidVersion || "Unknown",
+        appVersion: appVersion || "Unknown",
+        updatedAt: new Date()
+      });
+    }
+
+    await user.save();
 
     console.log(`[FCM] token registered for user ${req.user._id}`);
     res.json({ success: true, message: "FCM token registered" });

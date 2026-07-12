@@ -52,6 +52,33 @@ router.delete('/:id',
   ctrl.deleteBroadcast
 );
 
+// Get Broadcast Drafts
+router.get('/view/drafts', ctrl.getDrafts);
+
+// Get Broadcast History
+router.get('/view/history', ctrl.getHistory);
+
+// Get single broadcast details with analytics
+router.get('/:id/analytics',
+  validateBroadcastId,
+  ctrl.getAnalytics
+);
+
+// Schedule a broadcast
+router.post('/:id/schedule',
+  validateBroadcastId,
+  auditLog('SCHEDULE_BROADCAST', 'SYSTEM'),
+  ctrl.scheduleBroadcast
+);
+
+// Alias PATCH to PUT for draft updates
+router.patch('/:id',
+  validateBroadcastId,
+  validateUpdateDraft,
+  auditLog('UPDATE_BROADCAST', 'SYSTEM'),
+  ctrl.updateDraft
+);
+
 // =============================================
 // BROADCAST ACTIONS
 // =============================================

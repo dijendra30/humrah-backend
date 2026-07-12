@@ -14,6 +14,8 @@ function getISTMidnightUTC() {
   return new Date(Date.UTC(istDate.getFullYear(), istDate.getMonth(), istDate.getDate(), -5, -30, 0, 0));
 }
 
+const Broadcast = require('../models/Broadcast');
+
 // 1. Core KPIs
 router.get('/kpis', authenticate, adminOnly, async (req, res) => {
   try {
@@ -30,7 +32,8 @@ router.get('/kpis', authenticate, adminOnly, async (req, res) => {
       pendingCompanions,
       totalBookings,
       openSafetyCases,
-      totalPosts
+      totalPosts,
+      activeBroadcasts
     ] = await Promise.all([
       User.countDocuments({ role: 'USER' }),
       User.countDocuments({ lastActive: { $gte: fifteenMinutesAgo } }),
@@ -41,14 +44,15 @@ router.get('/kpis', authenticate, adminOnly, async (req, res) => {
       User.countDocuments({ userType: 'COMPANION', status: 'PENDING_APPROVAL' }),
       RandomBooking ? RandomBooking.countDocuments() : Promise.resolve(0),
       SafetyTicket ? SafetyTicket.countDocuments({ status: { $in: ['OPEN', 'UNDER_REVIEW', 'ASSISTANCE_REQUESTED'] } }) : Promise.resolve(0),
-      Post ? Post.countDocuments() : Promise.resolve(0)
+      Post ? Post.countDocuments() : Promise.resolve(0),
+      Broadcast ? Broadcast.countDocuments({ status: { $in: ['SENDING', 'SCHEDULED'] } }) : Promise.resolve(0)
     ]);
 
     res.json({
       success: true,
       data: {
         totalUsers, activeUsersNow, newUsersToday, premiumUsers, verifiedUsers,
-        totalCompanions, pendingCompanions, totalBookings, openSafetyCases, totalPosts
+        totalCompanions, pendingCompanions, totalBookings, openSafetyCases, totalPosts, activeBroadcasts
       }
     });
   } catch (error) {
