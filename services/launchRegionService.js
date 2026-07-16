@@ -22,7 +22,8 @@ class LaunchRegionService {
     return {
       supported,
       regionStatus: status,
-      ...popupData
+      userType: user.launchPopupCompleted ? 'EXISTING' : 'NEW',
+      popup: popupData
     };
   }
 }

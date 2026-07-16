@@ -22,6 +22,10 @@ const regionDemandSchema = new mongoose.Schema({
   lastRequestedAt: {
     type: Date,
     default: Date.now
+  },
+  lastUserId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
   }
 }, { timestamps: true });
 

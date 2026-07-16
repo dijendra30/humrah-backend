@@ -13,9 +13,9 @@ const launchRegionSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['Supported', 'Beta', 'Coming Soon', 'Disabled'],
+    enum: ['SUPPORTED', 'LIMITED', 'COMING_SOON', 'DISABLED'],
     required: true,
-    default: 'Coming Soon'
+    default: 'COMING_SOON'
   },
   active: {
     type: Boolean,
