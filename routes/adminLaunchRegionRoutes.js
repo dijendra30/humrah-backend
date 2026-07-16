@@ -12,4 +12,9 @@ router.post('/', adminLaunchRegionController.createRegion);
 router.put('/:id', adminLaunchRegionController.updateRegion);
 router.delete('/:id', adminLaunchRegionController.deleteRegion);
 
+router.get('/config', adminLaunchRegionController.getConfig);
+router.put('/config', adminLaunchRegionController.updateConfig);
+
+router.post('/simulate', adminLaunchRegionController.simulate);
+
 module.exports = router;
