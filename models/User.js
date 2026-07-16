@@ -512,7 +512,24 @@ const userSchema = new mongoose.Schema({
       createdAt:      { type: Date, default: Date.now }
     }],
     default: []
-  }
+  }  },
+
+  // =============================================
+  // LAUNCH REGION FIELDS (PHASE 1)
+  // =============================================
+  homeRegion: {
+    state: String,
+    area: String
+  },
+  lastSupportedRegion: {
+    state: String,
+    area: String
+  },
+  launchPopupCompleted: { type: Boolean, default: false },
+  launchPopupCompletedAt: { type: Date, default: null },
+  unsupportedRegionAccepted: { type: Boolean, default: false },
+  regionStatus: { type: String },
+  popupVersionSeen: { type: Number, default: 0 }
 
 }, { timestamps: true });
 
