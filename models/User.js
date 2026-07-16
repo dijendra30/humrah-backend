@@ -512,7 +512,7 @@ const userSchema = new mongoose.Schema({
       createdAt:      { type: Date, default: Date.now }
     }],
     default: []
-  }  },
+  },
 
   // =============================================
   // LAUNCH REGION FIELDS (PHASE 1)
