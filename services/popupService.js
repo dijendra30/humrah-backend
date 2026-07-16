@@ -1,16 +1,6 @@
 class PopupService {
   buildPopupResponse(user, regionData, isSupported) {
-    if (!regionData) {
-      return {
-        required: false,
-        type: 'NONE',
-        version: 0,
-        title: null,
-        body: null
-      };
-    }
-
-    const currentVersion = regionData.popupVersion || 1;
+    const currentVersion = regionData?.popupVersion || 1;
     const userSeenVersion = user.popupVersionSeen || 0;
     
     let popupRequired = false;
@@ -36,12 +26,12 @@ class PopupService {
       type: popupType,
       version: currentVersion,
       title: {
-        en: isSupported ? (regionData.popupTitleEn || fallbackTitleEn) : fallbackTitleEn,
-        hi: isSupported ? (regionData.popupTitleHi || fallbackTitleHi) : fallbackTitleHi
+        en: isSupported ? (regionData?.popupTitleEn || fallbackTitleEn) : fallbackTitleEn,
+        hi: isSupported ? (regionData?.popupTitleHi || fallbackTitleHi) : fallbackTitleHi
       },
       body: {
-        en: isSupported ? (regionData.popupBodyEn || fallbackBodyEn) : fallbackBodyEn,
-        hi: isSupported ? (regionData.popupBodyHi || fallbackBodyHi) : fallbackBodyHi
+        en: isSupported ? (regionData?.popupBodyEn || fallbackBodyEn) : fallbackBodyEn,
+        hi: isSupported ? (regionData?.popupBodyHi || fallbackBodyHi) : fallbackBodyHi
       }
     };
   }
