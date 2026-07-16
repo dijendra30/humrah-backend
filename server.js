@@ -576,6 +576,7 @@ const { liveLocationPollLimiter } = require('./routes/liveLocationRoutes');
 app.get('/api/live-location/:sessionId', liveLocationPollLimiter, require('./controllers/liveLocationController').get);
 
 // ── Protected routes ───────────────────────────────────────────────────────────
+app.use('/api/launch-region',     require('./routes/launchRegionRoutes'));
 app.use('/api/users',             authenticate, enforceLegalAcceptance, userRoutes);
 app.use('/api/home-banners',      authenticate, require('./routes/homeBanners'));
 app.use('/api/events',            authenticate, enforceLegalAcceptance, eventRoutes);
@@ -598,6 +599,7 @@ app.use('/api/admin',             authenticate, require('./routes/admin'));
 app.use('/api/admin-dashboard',   authenticate, require('./routes/adminDashboard'));
 app.use('/api/admin-analytics',   authenticate, require('./routes/adminAnalytics'));
 app.use('/api/moderation',        authenticate, adminOnly, moderationRoutes);
+app.use('/api/admin/launch-regions', require('./routes/adminLaunchRegionRoutes'));
 app.use('/api/admin/places',      authenticate, adminOnly, require('./routes/adminPlaces')); // ✅ Google Places API
 app.use('/api/admin/broadcasts',  authenticate, adminOnly, require('./routes/broadcastRoutes')); // ✅ Phase 1: Broadcast Notification System
 app.use('/api/agora',             authenticate, enforceLegalAcceptance, require('./routes/agora'));
