@@ -4,5 +4,6 @@ const launchRegionController = require('../controllers/launchRegionController');
 const { authenticate } = require('../middleware/auth');
 
 router.get('/status', authenticate, launchRegionController.getLaunchRegionStatus);
+router.post('/complete', authenticate, launchRegionController.completeLaunchPopup);
 
 module.exports = router;
