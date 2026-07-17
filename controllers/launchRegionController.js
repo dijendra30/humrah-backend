@@ -15,3 +15,25 @@ exports.getLaunchRegionStatus = async (req, res) => {
     });
   }
 };
+
+exports.completeLaunchPopup = async (req, res) => {
+  try {
+    const payload = {
+      unsupportedRegionAccepted: req.body.unsupportedRegionAccepted,
+      popupVersionSeen: req.body.popupVersionSeen
+    };
+    
+    await launchRegionService.completeLaunchPopup(req.user.id, payload);
+    
+    res.status(200).json({
+      success: true,
+      message: 'Launch popup completed successfully'
+    });
+  } catch (error) {
+    console.error('Error completing launch popup:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to complete launch popup'
+    });
+  }
+};
