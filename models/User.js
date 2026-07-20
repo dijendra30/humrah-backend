@@ -548,6 +548,7 @@ userSchema.index({ 'liveLocation.city': 1 }); // Fallback if still needed for so
 userSchema.index({ 'dailyMood.expiresAt': 1, 'dailyMood.visible': 1 });
 userSchema.index({ 'moderationFlags.isFlagged': 1 });
 userSchema.index({ 'moderationFlags.strikeCount': 1 });
+userSchema.index({ blockedUsers: 1 });
 userSchema.index({ last_location_updated_at: 1 });
 userSchema.index({ 'bookingRefs.bookingId': 1 });
 userSchema.index({ 'bookingRefs.status': 1 });
