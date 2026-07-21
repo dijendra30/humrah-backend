@@ -674,7 +674,8 @@ router.post('/google-auth', publicApiLimiter, async (req, res) => {
     // ── Create new user using ONLY verified payload fields ──────────────────
     const nameParts  = verifiedName.trim().split(' ');
     const firstName  = nameParts[0] || 'User';
-    const lastName   = nameParts.slice(1).join(' ') || '';
+    // Mongoose requires lastName and an empty string fails validation, so provide a fallback.
+    const lastName   = nameParts.slice(1).join(' ') || '.';
 
     // Get current legal versions for auto-acceptance
     let termsVersion   = '1.0.0';
