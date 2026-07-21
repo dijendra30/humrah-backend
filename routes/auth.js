@@ -112,7 +112,8 @@ router.post('/register', registerLimiter, async (req, res) => {
     if (!firstName || !lastName || !email || !password) {
       return res.status(400).json({
         success: false,
-        message: 'All fields are required'
+        message: 'All fields are required',
+        debug: { hasFirstName: !!firstName, hasLastName: !!lastName, hasEmail: !!email, hasPassword: !!password }
       });
     }
 
