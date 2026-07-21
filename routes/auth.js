@@ -677,18 +677,24 @@ router.post('/google-auth', publicApiLimiter, async (req, res) => {
     // Mongoose requires lastName and an empty string fails validation, so provide a fallback.
     const lastName   = nameParts.slice(1).join(' ') || '.';
 
-    // Get current legal versions for auto-acceptance
+    // Use legal acceptance from request if available, otherwise fetch current defaults
     let termsVersion   = '1.0.0';
     let privacyVersion = '1.0.0';
-    try {
-      const [termsDoc, privacyDoc] = await Promise.all([
-        LegalVersion.findOne({ documentType: 'TERMS' }),
-        LegalVersion.findOne({ documentType: 'PRIVACY' })
-      ]);
-      if (termsDoc)   termsVersion   = termsDoc.currentVersion;
-      if (privacyDoc) privacyVersion = privacyDoc.currentVersion;
-    } catch (err) {
-      console.warn('⚠️ Could not fetch legal versions for Google user creation:', err.message);
+    
+    if (req.body.legalAcceptance) {
+      termsVersion   = req.body.legalAcceptance.termsVersion || termsVersion;
+      privacyVersion = req.body.legalAcceptance.privacyVersion || privacyVersion;
+    } else {
+      try {
+        const [termsDoc, privacyDoc] = await Promise.all([
+          LegalVersion.findOne({ documentType: 'TERMS' }),
+          LegalVersion.findOne({ documentType: 'PRIVACY' })
+        ]);
+        if (termsDoc)   termsVersion   = termsDoc.currentVersion;
+        if (privacyDoc) privacyVersion = privacyDoc.currentVersion;
+      } catch (err) {
+        console.warn('⚠️ Could not fetch legal versions for Google user creation:', err.message);
+      }
     }
 
     const newUser = new User({
@@ -700,7 +706,8 @@ router.post('/google-auth', publicApiLimiter, async (req, res) => {
       emailVerified:           true,               // Google ID tokens guarantee email ownership
       acceptedTermsVersion:    termsVersion,
       acceptedPrivacyVersion:  privacyVersion,
-      lastLegalAcceptanceDate: new Date()
+      lastLegalAcceptanceDate: new Date(),
+      questionnaire:           req.body.questionnaire || undefined
     });
 
     await newUser.save();
