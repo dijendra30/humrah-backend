@@ -225,8 +225,8 @@ exports.getNearbyUsers = async (req, res) => {
 
     // ── Splitting Users ─────────────────────────────────────────────────────
     
-    // People Nearby: all base users
-    const nearbyUsers = [...afterDistance];
+    // People Nearby: Companions only
+    const nearbyUsers = afterDistance.filter(u => u.userType === 'COMPANION');
 
     // Mood Matches: baseUsers.filter(hasActiveMood)
     const moodMatches = afterDistance.filter(u => u.mood != null);
