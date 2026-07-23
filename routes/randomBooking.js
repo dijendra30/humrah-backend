@@ -69,7 +69,7 @@ router.post('/create', authenticate, async (req, res) => {
       'random_trial_used verified photoVerificationStatus home_city questionnaire liveLocation'
     );
     const isVerified = user.verified === true || user.photoVerificationStatus === 'approved';
-    if (!isVerified) return res.status(403).json({ success: false, message: 'Only verified users can create a Surprise Meetup.' });
+    if (!isVerified) return res.status(403).json({ success: false, code: 'VERIFICATION_REQUIRED', message: 'Only verified users can create a Surprise Meetup.' });
     if (user.random_trial_used) return res.status(403).json({ success: false, message: 'You have already used your free trial.' });
 
     const { city, lat, lng, startTime, endTime, activityType, locationCategory, meetupEnergy, blurProfileUntilAccepted } = req.body;
@@ -734,7 +734,7 @@ router.post('/:bookingId/respond', authenticate, async (req, res) => {
 
     const user = await User.findById(req.userId).select('verified photoVerificationStatus');
     if (user.verified !== true && user.photoVerificationStatus !== 'approved') {
-      return res.status(403).json({ success: false, message: 'Only verified users can respond.' });
+      return res.status(403).json({ success: false, code: 'VERIFICATION_REQUIRED', message: 'Only verified users can respond.' });
     }
 
     const { handleCandidateResponse } = require('../utils/surpriseMeetupMatcher');
@@ -770,7 +770,7 @@ router.post('/:bookingId/accept', authenticate, async (req, res) => {
 
     const user = await User.findById(req.userId).select('verified photoVerificationStatus');
     if (user.verified !== true && user.photoVerificationStatus !== 'approved') {
-      return res.status(403).json({ success: false, message: 'Only verified users can accept.' });
+      return res.status(403).json({ success: false, code: 'VERIFICATION_REQUIRED', message: 'Only verified users can accept.' });
     }
 
     const booking = await RandomBooking.findOneAndUpdate(
