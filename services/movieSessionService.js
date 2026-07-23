@@ -29,10 +29,23 @@ const DEFAULT_LANGUAGE  = 'Hindi';
 const MAX_RADIUS_M      = 20_000;   // 20 km initial fetch
 const WIDE_RADIUS_M     = 50_000;   // 50 km fallback
 
+const INDIAN_LANGUAGES = new Set(['hi', 'ta', 'te', 'ml', 'kn', 'bn', 'mr', 'gu', 'pa']);
+
 // ── TMDB language code → session display label ────────────────────────────────
 // Used by generateSystemSessions() to derive session language from the movie.
-// Only Hindi and English are supported for system-generated sessions (Humrah spec).
-const _LANG_DISPLAY = { hi: 'Hindi', en: 'English' };
+// Only supported languages are displayed for system-generated sessions.
+const _LANG_DISPLAY = { 
+  hi: 'Hindi', 
+  en: 'English',
+  ta: 'Tamil',
+  te: 'Telugu',
+  ml: 'Malayalam',
+  kn: 'Kannada',
+  bn: 'Bengali',
+  mr: 'Marathi',
+  gu: 'Gujarati',
+  pa: 'Punjabi'
+};
 
 // ─── Fallback movies (used ONLY when TMDB key missing / request fails) ───────
 // Hindi-first per Humrah spec. Updated for 2024–2025 Indian theatrical slate.
@@ -110,10 +123,10 @@ function _shuffle(arr) {
 //   1, or 2 — the exact indices picked for the 3 daily slots. This function fixes
 //   that by making the shuffle language-aware.
 function _buildLangPriorityPool(src) {
-  const hi    = _shuffle(src.filter(m => m.language === 'hi'));
-  const en    = _shuffle(src.filter(m => m.language === 'en'));
-  const other = _shuffle(src.filter(m => m.language !== 'hi' && m.language !== 'en'));
-  return [...hi, ...en, ...other];
+  const indian = _shuffle(src.filter(m => INDIAN_LANGUAGES.has(m.language)));
+  const en     = _shuffle(src.filter(m => m.language === 'en'));
+  const other  = _shuffle(src.filter(m => !INDIAN_LANGUAGES.has(m.language) && m.language !== 'en'));
+  return [...indian, ...en, ...other];
 }
 
 // ─── Haversine (metres) ───────────────────────────────────────────────────────
@@ -412,12 +425,6 @@ async function fetchTrendingMovies() {
     cutoff.setMonth(cutoff.getMonth() - 3);
     const cutoffStr = cutoff.toISOString().slice(0, 10); // YYYY-MM-DD
 
-    // ── Global popularity exception threshold ─────────────────────────────
-    // Only truly mega-blockbusters (Avatar / Avengers / Mission Impossible scale)
-    // pass the Hindi/English language gate as exceptions. Set high intentionally —
-    // this exception should be rare and cover only globally dominant films.
-    const GLOBAL_POP_THRESHOLD = 200;
-
     // ── India + Language filter ───────────────────────────────────────────
     const filtered = merged.filter(m => {
       if (!m.poster_path)               return false; // no poster → broken UI card
@@ -427,28 +434,37 @@ async function fetchTrendingMovies() {
       // Recency: now_playing bypasses; popular/trending must be within 3-month window
       if (m._src !== 'now_playing' && m.release_date && m.release_date < cutoffStr) return false;
 
-      // Language gate — Hindi first, English second
-      const lang = m.original_language;
-      if (lang === 'hi' || lang === 'en') return true;
+      // Identify Indian movies
+      const isIndian = INDIAN_LANGUAGES.has(m.original_language) || (m.origin_country && m.origin_country.includes('IN'));
 
-      // Global exception: only mega-blockbusters regardless of language
-      return (m.popularity || 0) >= GLOBAL_POP_THRESHOLD;
+      if (isIndian) {
+        return true; // Indian movies pass if they meet the baseline gates above
+      }
+
+      // Stricter quality gates for International movies
+      const isHighQualityIntl = (m.vote_average || 0) >= 7.0 && (m.popularity || 0) >= 80 && (m.vote_count || 0) >= 100;
+      
+      if (isHighQualityIntl) {
+        return true; // Outstanding international movie
+      }
+
+      return false;
     });
 
     if (!filtered.length) throw new Error('0 movies after India/language filter');
 
     // ── Priority sort ─────────────────────────────────────────────────────
-    //  0 — Hindi   + now_playing  (current Hindi theatrical releases in IN)
-    //  1 — Hindi   + popular / trending
+    //  0 — Indian  + now_playing  (current Indian theatrical releases in IN)
+    //  1 — Indian  + popular / trending
     //  2 — English + now_playing  (current English theatrical releases in IN)
     //  3 — English + popular / trending
-    //  4 — Global exception (very high popularity, non-HI/EN)
+    //  4 — Other
     const _srcPriority = (m) => {
-      const hi = m.original_language === 'hi';
+      const isIndian = INDIAN_LANGUAGES.has(m.original_language) || (m.origin_country && m.origin_country.includes('IN'));
       const en = m.original_language === 'en';
       const np = m._src === 'now_playing';
-      if (hi && np) return 0;
-      if (hi)       return 1;
+      if (isIndian && np) return 0;
+      if (isIndian)       return 1;
       if (en && np) return 2;
       if (en)       return 3;
       return 4;
