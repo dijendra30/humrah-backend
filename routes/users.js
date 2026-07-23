@@ -304,7 +304,7 @@ router.post('/upload-profile-photo', authenticate, uploadLimiter, upload.single(
     user.photoRejectionReason = null;
     await user.save();
 
-    res.json({ success: true, message: 'Profile photo uploaded successfully', profilePhoto: user.profilePhoto, photoVerificationStatus: user.photoVerificationStatus, lastPhotoUpdate: user.profileEditStats.lastPhotoUpdate });
+    res.json({ success: true, message: 'Profile photo uploaded successfully', profilePhoto: user.profilePhoto, photoVerificationStatus: user.photoVerificationStatus, lastPhotoUpdate: user.profileEditStats.lastPhotoUpdate, profileCompletion: user.profileCompletion, profileCompletionBreakdown: user.profileCompletionBreakdown, missingFields: user.missingFields });
   } catch (error) {
     console.error('Upload profile photo error:', error);
     res.status(500).json({ success: false, message: 'Server error uploading photo' });
@@ -333,7 +333,7 @@ router.post('/upload-profile-photo-base64', authenticate, uploadLimiter, async (
     user.photoRejectionReason = null;
     await user.save();
 
-    res.json({ success: true, message: 'Profile photo uploaded successfully', profilePhoto: user.profilePhoto, photoVerificationStatus: user.photoVerificationStatus, lastPhotoUpdate: user.profileEditStats.lastPhotoUpdate });
+    res.json({ success: true, message: 'Profile photo uploaded successfully', profilePhoto: user.profilePhoto, photoVerificationStatus: user.photoVerificationStatus, lastPhotoUpdate: user.profileEditStats.lastPhotoUpdate, profileCompletion: user.profileCompletion, profileCompletionBreakdown: user.profileCompletionBreakdown, missingFields: user.missingFields });
   } catch (error) {
     console.error('Upload profile photo error:', error);
     res.status(500).json({ success: false, message: 'Server error uploading photo' });
@@ -357,7 +357,7 @@ router.post('/submit-verification-photo', authenticate, uploadLimiter, upload.si
     console.log(`[Upload Lifecycle] Saving verificationPhotoPublicId to MongoDB for user ${user._id}: ${user.verificationPhotoPublicId}`);
     await user.save();
 
-    res.json({ success: true, message: 'Verification photo submitted successfully. Our team will review it soon.', verificationPhoto: user.verificationPhoto, photoVerificationStatus: user.photoVerificationStatus });
+    res.json({ success: true, message: 'Verification photo submitted successfully. Our team will review it soon.', verificationPhoto: user.verificationPhoto, photoVerificationStatus: user.photoVerificationStatus, profileCompletion: user.profileCompletion, profileCompletionBreakdown: user.profileCompletionBreakdown, missingFields: user.missingFields });
   } catch (error) {
     console.error('Submit verification photo error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -382,7 +382,7 @@ router.post('/submit-verification-photo-base64', authenticate, uploadLimiter, as
     console.log(`[Upload Lifecycle] Saving verificationPhotoPublicId (base64) to MongoDB for user ${user._id}: ${user.verificationPhotoPublicId}`);
     await user.save();
 
-    res.json({ success: true, message: 'Verification photo submitted successfully. Our team will review it soon.', verificationPhoto: user.verificationPhoto, photoVerificationStatus: user.photoVerificationStatus });
+    res.json({ success: true, message: 'Verification photo submitted successfully. Our team will review it soon.', verificationPhoto: user.verificationPhoto, photoVerificationStatus: user.photoVerificationStatus, profileCompletion: user.profileCompletion, profileCompletionBreakdown: user.profileCompletionBreakdown, missingFields: user.missingFields });
   } catch (error) {
     console.error('Submit verification photo error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -666,7 +666,7 @@ router.put('/:userId/verify-photo', authenticate, adminOnly, auditLog('VERIFY_US
     user.verified         = user.isFullyVerified();
     await user.save();
 
-    res.json({ success: true, message: `Photo verification ${approved ? 'approved' : 'rejected'} successfully`, user: { id: user._id, photoVerificationStatus: user.photoVerificationStatus, verified: user.verified, photoVerifiedAt: user.photoVerifiedAt } });
+    res.json({ success: true, message: `Photo verification ${approved ? 'approved' : 'rejected'} successfully`, user: { id: user._id, photoVerificationStatus: user.photoVerificationStatus, verified: user.verified, photoVerifiedAt: user.photoVerifiedAt, profileCompletion: user.profileCompletion, profileCompletionBreakdown: user.profileCompletionBreakdown, missingFields: user.missingFields } });
   } catch (error) {
     console.error('Verify photo error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
