@@ -1094,6 +1094,7 @@ async function createSession(userId, data) {
     return {
       success: false,
       status:  403,
+      code:    'VERIFICATION_REQUIRED',
       message: 'Only verified users can create a Movie Hangout. Complete your profile verification to continue.',
     };
   }
@@ -1257,6 +1258,7 @@ async function joinSession(userId, sessionId, io) {
     return {
       success: false,
       status:  403,
+      code:    'VERIFICATION_REQUIRED',
       message: 'Only verified users can join a Movie Hangout. Complete your profile verification to continue.',
     };
   }
