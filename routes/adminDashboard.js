@@ -699,21 +699,24 @@ router.post('/broadcast/profile-completion', authenticate, adminOnly, async (req
     }
     // ALL_USERS just uses the default { role: 'USER' } filter
     
-    const users = await User.find(filter, '_id');
+    const users = await User.find(filter, '_id fcmTokens');
     const recipientCount = users.length;
     
     if (recipientCount === 0) {
       return res.status(400).json({ success: false, message: 'No users match the selected criteria' });
     }
     
+    // Determine audience text for metadata, but use valid ENUM for audienceType
+    const customTargetText = targetType === 'EXACT_PERCENTAGE' ? `EXACT_${percentage}%` : (targetType === 'RANGE' ? `RANGE_${minCompletion}-${maxCompletion}%` : targetType);
+
     // Create Broadcast record
-    const adminName = req.user.firstName + (req.user.lastName ? ' ' + req.user.lastName : '');
     const broadcast = await Broadcast.create({
       title,
       message,
-      targetAudience: targetType === 'EXACT_PERCENTAGE' ? `EXACT_${percentage}%` : (targetType === 'RANGE' ? `RANGE_${minCompletion}-${maxCompletion}%` : targetType),
-      recipientCount,
-      sentBy: adminName
+      audienceType: 'CUSTOM', // Required ENUM
+      totalRecipients: recipientCount,
+      createdBy: req.user._id, // Required ObjectId
+      targetState: customTargetText // Storing custom metadata safely without breaking schema
     });
     
     // Create Notification records
@@ -730,9 +733,43 @@ router.post('/broadcast/profile-completion', authenticate, adminOnly, async (req
     // Insert in batches if very large, but insertMany handles large arrays decently well
     await Notification.insertMany(notifications);
     
+    // FCM Delivery in Batches (Non-blocking)
+    const { sendDataFcm } = require('../utils/fcmHelper');
+    const fcmPayload = {
+      type: 'ADMIN_BROADCAST',
+      broadcastId: broadcast._id.toString(),
+      title,
+      message,
+      action: 'OPEN_PROFILE',
+      destination: 'PROFILE',
+      priority: 'high'
+    };
+    
+    // Fire and forget FCM dispatch (process asynchronously so it doesn't block response)
+    (async () => {
+      try {
+        let successCount = 0;
+        let failCount = 0;
+        for (const user of users) {
+          if (user.fcmTokens && user.fcmTokens.length > 0) {
+            try {
+              await sendDataFcm(user._id.toString(), user.fcmTokens, fcmPayload);
+              successCount++;
+            } catch (err) {
+              failCount++;
+              console.error(`[FCM] Failed to send broadcast to user ${user._id}:`, err.message);
+            }
+          }
+        }
+        console.log(`[BROADCAST FCM] Delivered: ${successCount}, Failed: ${failCount}, Total: ${recipientCount}`);
+      } catch (err) {
+        console.error('[BROADCAST FCM] Global error in background dispatcher:', err);
+      }
+    })();
+    
     res.json({ success: true, message: `Broadcast sent to ${recipientCount} users`, broadcast });
   } catch (error) {
-    console.error('Broadcast error:', error);
+    console.error('Broadcast error details:', error.errors || error);
     res.status(500).json({ success: false, message: 'Failed to send broadcast' });
   }
 });
