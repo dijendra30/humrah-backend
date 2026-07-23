@@ -398,15 +398,20 @@ async function processVerificationInBackground(sessionId, userId, io) {
     await session.save();
     
     // =============================================
-    // DELETE VIDEO FROM CLOUDINARY (CRITICAL)
+    // CLOUDINARY CLEANUP LIFECYCLE
     // =============================================
-    try {
-      await deleteVideo(session.cloudinaryPublicId);
-      session.videoDeletedAt = new Date();
-      await session.save();
-      console.log(`🗑️ [Verification] Video deleted from Cloudinary`);
-    } catch (deleteError) {
-      console.error('⚠️ [Verification] Failed to delete video:', deleteError);
+    if (result.decision === 'APPROVED' || result.decision === 'REJECTED') {
+      try {
+        console.log(`[Cleanup Decision] AI decision was ${result.decision}. Deleting Cloudinary video...`);
+        await deleteVideo(session.cloudinaryPublicId);
+        session.videoDeletedAt = new Date();
+        await session.save();
+        console.log(`🗑️ [Verification] Video deleted from Cloudinary`);
+      } catch (deleteError) {
+        console.error('⚠️ [Verification] Failed to delete video:', deleteError);
+      }
+    } else if (result.decision === 'MANUAL_REVIEW') {
+      console.log(`[Cleanup Decision] AI decision was MANUAL_REVIEW. Bypassing Cloudinary deletion to preserve asset for admin review.`);
     }
     
     console.log(`\n✅ [Verification] Processing complete for session ${session.sessionId}`);
