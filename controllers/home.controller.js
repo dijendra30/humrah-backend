@@ -149,23 +149,29 @@ exports.getNearbyUsers = async (req, res) => {
       // Use bounding box if we have coordinates
       const dLat = MAX_KM / 111.0;
       const dLng = MAX_KM / (111.0 * Math.cos(userLat * Math.PI / 180));
+      const radiusRadians = MAX_KM / 6378.1;
       
       // We also fallback to city for users without live coordinates if they share the same city
       if (userCity) {
+         const titleCity = userCity.charAt(0).toUpperCase() + userCity.slice(1);
          filter.$or = [
+            { 'liveLocation.coordinates': { $geoWithin: { $centerSphere: [ [userLng, userLat], radiusRadians ] } } },
             { last_known_lat: { $gte: userLat - dLat, $lte: userLat + dLat }, last_known_lng: { $gte: userLng - dLng, $lte: userLng + dLng } },
-            { 'liveLocation.city': { $regex: new RegExp(`^${userCity}$`, 'i') } },
-            { 'questionnaire.city': { $regex: new RegExp(`^${userCity}$`, 'i') } }
+            { 'liveLocation.city': { $in: [userCity, titleCity, userCity.toUpperCase()] } },
+            { 'questionnaire.city': { $in: [userCity, titleCity, userCity.toUpperCase()] } }
          ];
       } else {
-         filter.last_known_lat = { $gte: userLat - dLat, $lte: userLat + dLat };
-         filter.last_known_lng = { $gte: userLng - dLng, $lte: userLng + dLng };
+         filter.$or = [
+            { 'liveLocation.coordinates': { $geoWithin: { $centerSphere: [ [userLng, userLat], radiusRadians ] } } },
+            { last_known_lat: { $gte: userLat - dLat, $lte: userLat + dLat }, last_known_lng: { $gte: userLng - dLng, $lte: userLng + dLng } }
+         ];
       }
     } else if (userCity) {
        // City only fallback
+       const titleCity = userCity.charAt(0).toUpperCase() + userCity.slice(1);
        filter.$or = [
-         { 'liveLocation.city': { $regex: new RegExp(`^${userCity}$`, 'i') } },
-         { 'questionnaire.city': { $regex: new RegExp(`^${userCity}$`, 'i') } }
+         { 'liveLocation.city': { $in: [userCity, titleCity, userCity.toUpperCase()] } },
+         { 'questionnaire.city': { $in: [userCity, titleCity, userCity.toUpperCase()] } }
        ];
     } else {
        console.log(`[Nearby] User ${req.userId} missing both coordinates and city. Exiting.`);
