@@ -491,12 +491,16 @@ const userSchema = new mongoose.Schema({
     max: 100
   },
   profileCompletionBreakdown: {
-    basicInfo: { type: Boolean, default: false },
-    profilePhoto: { type: Boolean, default: false },
-    bio: { type: Boolean, default: false },
-    questionnaire: { type: Boolean, default: false },
-    trustSafety: { type: Boolean, default: false },
-    photoVerification: { type: Boolean, default: false }
+    type: mongoose.Schema.Types.Mixed,
+    default: {}
+  },
+  missingFields: {
+    type: [{
+      category: String,
+      key: String,
+      label: String
+    }],
+    default: []
   },
 
   // =============================================
@@ -556,7 +560,12 @@ userSchema.index({ 'bookingRefs.status': 1 });
 // Calculate Profile Completion before saving
 const { calculateProfileCompletion } = require('../utils/profileCompletion');
 userSchema.pre('save', function (next) {
-  this.profileCompletion = calculateProfileCompletion(this);
+  const result = calculateProfileCompletion(this);
+  this.profileCompletion = result.percentage;
+  this.profileCompletionBreakdown = result.breakdown;
+  this.missingFields = result.missingFields;
+  this.markModified('profileCompletionBreakdown');
+  this.markModified('missingFields');
   next();
 });
 
@@ -737,6 +746,9 @@ userSchema.methods.getPrivateProfile = function() {
     createdAt: this.createdAt,
     updatedAt: this.updatedAt,
     lastActive: this.lastActive,
+    profileCompletion: this.profileCompletion,
+    profileCompletionBreakdown: this.profileCompletionBreakdown,
+    missingFields: this.missingFields,
     guidelinesAccepted: this.guidelinesAccepted,
     guidelinesVersion: this.guidelinesVersion,
     needsGuidelinesAcceptance: !this.guidelinesAccepted || this.guidelinesVersion !== CURRENT_GUIDELINES_VERSION
