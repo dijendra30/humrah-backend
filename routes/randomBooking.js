@@ -62,6 +62,21 @@ function parseStartTime(startTime) {
 // STATIC ROUTES FIRST — must all come before /:bookingId
 // ══════════════════════════════════════════════════════════════════════════════
 
+// ── BOOKING WINDOW STATUS ─────────────────────────────────────────────────────
+router.get('/status', authenticate, async (req, res) => {
+  const now = new Date();
+  const nowIST = new Date(now.getTime() + 5.5 * 3600 * 1000);
+  const nowHour = nowIST.getUTCHours();
+  const nowMinute = nowIST.getUTCMinutes();
+  
+  const isClosed = nowHour < 6 || nowHour > 19 || (nowHour === 19 && nowMinute >= 40);
+  
+  if (isClosed) {
+    return res.status(400).json({ success: false, code: 'BOOKING_CLOSED', message: 'Bookings are closed' });
+  }
+  return res.json({ success: true, message: 'Bookings are open' });
+});
+
 // ── CREATE ────────────────────────────────────────────────────────────────────
 router.post('/create', authenticate, async (req, res) => {
   try {
@@ -84,16 +99,23 @@ router.post('/create', authenticate, async (req, res) => {
       if (bad.length) return res.status(400).json({ success: false, message: `Invalid meetupEnergy values: ${bad.join(', ')}` });
     }
 
-    const bookingStart    = parseStartTime(startTime);
-    const bookingStartIST = new Date(bookingStart.getTime() + 5.5 * 3600 * 1000);
-    const startHourIST    = bookingStartIST.getUTCHours();
-    const startMinuteIST  = bookingStartIST.getUTCMinutes();
-
-    if (startHourIST < 7 || startHourIST > 20 || (startHourIST === 20 && startMinuteIST > 0)) {
-      return res.status(400).json({ success: false, message: 'Meetup requests only allowed between 7 AM – 8 PM IST.' });
+    const now = new Date();
+    const nowIST = new Date(now.getTime() + 5.5 * 3600 * 1000);
+    const nowHour = nowIST.getUTCHours();
+    const nowMinute = nowIST.getUTCMinutes();
+    
+    // Booking is closed from 19:40 to 05:59.
+    const isClosed = nowHour < 6 || nowHour > 19 || (nowHour === 19 && nowMinute >= 40);
+    
+    if (isClosed) {
+      return res.status(400).json({ 
+        success: false, 
+        code: 'BOOKING_CLOSED', 
+        message: 'Bookings are open every day from 6:00 AM to 7:40 PM.' 
+      });
     }
 
-    const now = new Date();
+    const bookingStart = parseStartTime(startTime);
     if (bookingStart.getTime() - now.getTime() < 20 * 60 * 1000) {
       return res.status(400).json({ success: false, message: 'Please choose a time at least 20 minutes from now.' });
     }
