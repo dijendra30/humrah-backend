@@ -406,7 +406,7 @@ io.on('connection', (socket) => {
   socket.on('sendMovieMessage', async (data, callback) => {
     try {
       const { handleSocketMessage } = require('./services/movieHangoutService');
-      await handleSocketMessage(userId, data.sessionId, data.text, data.replyTo, io);
+      await handleSocketMessage(userId, data.sessionId, data.text, data.replyTo, data.clientMessageId, io);
       if (typeof callback === 'function') callback();
     } catch (err) { 
       console.error('sendMovieMessage error:', err);
