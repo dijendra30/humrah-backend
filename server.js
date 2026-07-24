@@ -406,8 +406,8 @@ io.on('connection', (socket) => {
   socket.on('sendMovieMessage', async (data, callback) => {
     try {
       const { handleSocketMessage } = require('./services/movieHangoutService');
-      await handleSocketMessage(userId, data.sessionId, data.text, data.replyTo, data.clientMessageId, io);
-      if (typeof callback === 'function') callback();
+      const msg = await handleSocketMessage(userId, data.sessionId, data.text, data.replyTo, data.clientMessageId, io);
+      if (typeof callback === 'function') callback(msg);
     } catch (err) { 
       console.error('sendMovieMessage error:', err);
       if (typeof callback === 'function') callback({ error: err.message });
@@ -417,8 +417,8 @@ io.on('connection', (socket) => {
     socket.on('sendVoiceNote', async (data, callback) => {
     try {
       const { handleSocketVoiceNote } = require('./services/movieHangoutService');
-      await handleSocketVoiceNote(userId, data.sessionId, data.voiceUrl, data.duration, data.replyTo, data.clientMessageId, io);
-      if (typeof callback === 'function') callback();
+      const msg = await handleSocketVoiceNote(userId, data.sessionId, data.voiceUrl, data.duration, data.replyTo, data.clientMessageId, io);
+      if (typeof callback === 'function') callback(msg);
     } catch (err) { 
       console.error('sendVoiceNote error:', err);
       if (typeof callback === 'function') callback({ error: err.message });
