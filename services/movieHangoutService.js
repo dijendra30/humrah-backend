@@ -21,9 +21,17 @@ async function validateAccess(userId, sessionId) {
 /**
  * Handle incoming text message via Socket
  */
-async function handleSocketMessage(userId, sessionId, text, replyTo, io) {
+async function handleSocketMessage(userId, sessionId, text, replyTo, clientMessageId, io) {
   if (!text?.trim()) throw new Error('Message text required');
   await validateAccess(userId, sessionId);
+
+  if (clientMessageId) {
+    const existingMsg = await MovieMessage.findOne({ clientMessageId, sessionId });
+    if (existingMsg) {
+      // Idempotency: Return existing message
+      return existingMsg;
+    }
+  }
 
   const sender = await User.findById(userId).select('firstName lastName profilePhoto').lean();
   const senderName = sender ? `${sender.firstName} ${sender.lastName || ''}`.trim() : 'User';
@@ -36,6 +44,7 @@ async function handleSocketMessage(userId, sessionId, text, replyTo, io) {
     type: 'text',
     text: text.trim(),
     replyTo: replyTo || null,
+    clientMessageId: clientMessageId || null,
     readBy: [userId],
   });
   await msg.save();
@@ -49,7 +58,20 @@ async function handleSocketMessage(userId, sessionId, text, replyTo, io) {
  */
 async function handleSocketVoiceNote(userId, sessionId, voiceUrl, duration, replyTo, clientMessageId, io) {
   if (!voiceUrl) throw new Error('Voice URL required');
+  
+  // Security validation: verify voiceUrl is a valid Firebase Storage URL for the project
+  const isValidFirebaseUrl = /^https:\/\/firebasestorage\.googleapis\.com\/v0\/b\/humrah-d926d\.firebasestorage\.app\/o\/voice-notes%2F[a-zA-Z0-9_-]+%2F.+\?alt=media/.test(voiceUrl);
+  if (!isValidFirebaseUrl) throw new Error('Invalid or unauthorized voice URL');
+
   await validateAccess(userId, sessionId);
+
+  if (clientMessageId) {
+    const existingMsg = await MovieMessage.findOne({ clientMessageId, sessionId });
+    if (existingMsg) {
+      // Idempotency: Return existing message
+      return existingMsg;
+    }
+  }
 
   const sender = await User.findById(userId).select('firstName lastName profilePhoto').lean();
   const senderName = sender ? `${sender.firstName} ${sender.lastName || ''}`.trim() : 'User';
