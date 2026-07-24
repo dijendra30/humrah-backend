@@ -51,6 +51,7 @@ async function handleSocketMessage(userId, sessionId, text, replyTo, clientMessa
 
   _broadcastMessage(io, sessionId, msg);
   _sendFCM(sessionId, msg, senderName, false);
+  return msg;
 }
 
 /**
@@ -92,6 +93,7 @@ async function handleSocketVoiceNote(userId, sessionId, voiceUrl, duration, repl
 
   _broadcastMessage(io, sessionId, msg);
   _sendFCM(sessionId, msg, senderName, true);
+  return msg;
 }
 
 /**
