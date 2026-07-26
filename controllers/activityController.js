@@ -259,5 +259,28 @@ exports.markAllRead = async (req, res) => {
   }
 };
 
+// DELETE /api/activity/:id
+exports.deleteActivity = async (req, res) => {
+  try {
+    const activityId = req.params.id;
+    const userId = req.userId;
+
+    // Verify activity exists and belongs to the user
+    const activity = await Activity.findOne({ _id: activityId, userId: userId });
+    
+    if (!activity) {
+      return res.status(404).json({ success: false, message: 'Activity not found or you do not have permission to delete it.' });
+    }
+
+    // Delete the activity
+    await Activity.deleteOne({ _id: activityId });
+    
+    res.json({ success: true, deleted: true });
+  } catch (err) {
+    console.error('[Activity] deleteActivity:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
 // Export helper for use in other controllers
 exports.createOrAggregateActivity = createOrAggregateActivity;
