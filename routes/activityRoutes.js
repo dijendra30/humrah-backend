@@ -16,5 +16,6 @@ router.get   ('/unread-count', ctrl.getUnreadCount);    // GET  /api/activity/un
 router.get   ('/',             ctrl.getActivities);     // GET  /api/activity
 router.patch ('/read/:id',     ctrl.markRead);          // PATCH /api/activity/read/:id
 router.patch ('/read-all',     ctrl.markAllRead);       // PATCH /api/activity/read-all
+router.delete('/:id',          ctrl.deleteActivity);    // DELETE /api/activity/:id
 
 module.exports = router;
