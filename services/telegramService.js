@@ -202,9 +202,37 @@ async function notifyTicketResolved(ticketId, riskLevel) {
     return sendMessage(token, chatId, text);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Bot 3 — Founder Inbox
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Fired when user submits a message to the CEO/Founder inbox.
+ */
+async function notifyFounderChannel(messageDoc) {
+    const token  = process.env.TELEGRAM_FOUNDER_BOT_TOKEN;
+    const chatId = process.env.TELEGRAM_FOUNDER_CHAT_ID;
+
+    const text = [
+        `📬 <b>NEW FOUNDER INBOX MESSAGE</b>`,
+        ``,
+        `User: <b>${esc(messageDoc.userSnapshot?.name)}</b>`,
+        `User ID: <code>${esc(messageDoc.user)}</code>`,
+        `Category: <b>${esc(messageDoc.category)}</b>`,
+        `App Version: ${esc(messageDoc.appVersion || 'N/A')}`,
+        `Time: ${esc(formatTs(messageDoc.createdAt))}`,
+        ``,
+        `<b>Preview:</b>`,
+        `<i>${esc(messageDoc.message.substring(0, 300))}${messageDoc.message.length > 300 ? '...' : ''}</i>`
+    ].join('\n');
+
+    return sendMessage(token, chatId, text);
+}
+
 module.exports = {
     notifySafetyChannel,
     notifyEmergencyChannel,
     notifyLocationShared,
-    notifyTicketResolved
+    notifyTicketResolved,
+    notifyFounderChannel
 };
