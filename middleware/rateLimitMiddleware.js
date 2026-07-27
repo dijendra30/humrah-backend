@@ -235,6 +235,17 @@ const searchLimiter = rateLimit({
   handler:  handler429('Too many search requests. Please wait a moment.'),
 });
 
+/**
+ * Founder Inbox — 1 / 5 min / user
+ * Burst protection for CEO inbox messages.
+ */
+const founderMessageBurstLimiter = rateLimit({
+  ...userBase,
+  windowMs: 5 * 60 * 1000,
+  max:      1,
+  handler:  handler429('You can only send one message to the founder every 5 minutes.'),
+});
+
 // =============================================================================
 // SPECIAL / MIXED LIMITERS
 // =============================================================================
@@ -313,6 +324,7 @@ module.exports = {
   nearbyMoodLimiter,
   uploadLimiter,
   searchLimiter,
+  founderMessageBurstLimiter,
 
   // Special
   createSessionIpLimiter,
