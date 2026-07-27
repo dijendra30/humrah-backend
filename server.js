@@ -616,6 +616,7 @@ app.use('/api/matching-mood',     authenticate, enforceLegalAcceptance, matching
 app.use('/api/mood-request',      authenticate, enforceLegalAcceptance, moodRequestRoutes);
 app.use('/api/safety-tools',      authenticate, enforceLegalAcceptance, safetyToolsRoutes);
 app.use('/api/safety-tickets',    authenticate, enforceLegalAcceptance, safetyTicketRoutes); // ✅ Phase 2
+app.use('/api/founder',           authenticate, enforceLegalAcceptance, require('./routes/founder')); // ✅ Founder Inbox
 app.use('/api/live-location',     authenticate, enforceLegalAcceptance, require('./routes/liveLocationRoutes'));
 app.use('/api',                   authenticate, enforceLegalAcceptance, require('./routes/moderation_route'));
 app.use('/api/official-events',   authenticate, enforceLegalAcceptance, require('./routes/officialEvents')); // ✅ Official Events Management System
