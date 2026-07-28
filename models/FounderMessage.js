@@ -32,7 +32,7 @@ const founderMessageSchema = new mongoose.Schema({
   }],
   status: {
     type: String,
-    enum: ['UNREAD', 'READING', 'REPLIED', 'CLOSED'],
+    enum: ['UNREAD', 'READING', 'REPLIED', 'DISCUSSION_STARTED', 'CLOSED'],
     default: 'UNREAD'
   },
   priority: {

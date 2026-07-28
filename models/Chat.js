@@ -5,7 +5,7 @@ const chatSchema = new mongoose.Schema({
   // Chat Type
   chatType: {
     type: String,
-    enum: ['BOOKING', 'SUPPORT'],
+    enum: ['BOOKING', 'SUPPORT', 'FOUNDER'],
     required: true,
     index: true
   },
@@ -48,10 +48,24 @@ const chatSchema = new mongoose.Schema({
     default: null
   },
   
+  // For FOUNDER chats - link to multiple Founder Messages over time
+  linkedFounderMessageIds: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'FounderMessage'
+  }],
+
+  // For FOUNDER/SUPPORT chats - assign a specific admin instead of adding them to participants
+  assignedAdminId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null
+  },
+
+  
   // Chat Status
   status: {
     type: String,
-    enum: ['ACTIVE', 'CLOSED', 'ARCHIVED'],
+    enum: ['ACTIVE', 'WAITING_FOR_FOUNDER', 'WAITING_FOR_USER', 'RESOLVED', 'CLOSED', 'ARCHIVED'],
     default: 'ACTIVE',
     index: true
   },
@@ -133,15 +147,20 @@ chatSchema.pre('save', function (next) {
     return next(new Error('Chat must have at least 2 participants'));
   }
   
-  // For SUPPORT chats, ensure at least one admin
-  if (this.chatType === 'SUPPORT') {
+  // For SUPPORT and FOUNDER chats, ensure at least one admin in participants
+  if (this.chatType === 'SUPPORT' || this.chatType === 'FOUNDER') {
     const hasAdmin = this.participants.some(p => 
       p.role === 'SAFETY_ADMIN' || p.role === 'SUPER_ADMIN'
     );
     
     if (!hasAdmin) {
-      return next(new Error('SUPPORT chats must have at least one admin'));
+      return next(new Error(`${this.chatType} chats must have at least one admin`));
     }
+  }
+
+  // For FOUNDER chats, ensure assignedAdminId is set
+  if (this.chatType === 'FOUNDER' && !this.assignedAdminId) {
+      return next(new Error('FOUNDER chats must have an assignedAdminId'));
   }
   
   next();
