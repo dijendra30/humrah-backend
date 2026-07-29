@@ -592,6 +592,7 @@ app.use('/api/reviews',           authenticate, enforceLegalAcceptance, reviewRo
 app.use('/api/payment',           authenticate, enforceLegalAcceptance, paymentRoutes);
 app.use('/api/random-booking',    authenticate, enforceLegalAcceptance, require('./routes/randomBooking'));
 app.use('/api/verification',      authenticate, enforceLegalAcceptance, require('./routes/verification'));
+app.use('/api/chats',             authenticate, enforceLegalAcceptance, require('./routes/chats')); // ✅ Unified Chat Inbox
 app.use('/api/settings',          authenticate, enforceLegalAcceptance, settingsRoutes);
 app.use('/api/notifications',     authenticate, enforceLegalAcceptance, require('./routes/notifications'));
 app.use('/api/profile-assistant', authenticate, profileAssistantRoutes);
