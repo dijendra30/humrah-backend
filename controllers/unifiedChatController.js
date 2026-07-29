@@ -168,7 +168,11 @@ async function fetchRandomBookingChats(userId) {
 
 // Helper: Fetch Mood Chats
 async function fetchMoodChats(userId) {
-  const chats = await MoodChat.find({ users: userId })
+  const chats = await MoodChat.find({ 
+    users: userId,
+    active: true,
+    expiresAt: { $gt: new Date() }
+  })
     .populate({
       path: 'users',
       select: 'firstName lastName profilePhoto verified questionnaire'
