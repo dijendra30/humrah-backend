@@ -41,8 +41,9 @@ exports.emitFounderEvent = async (userId, messageDocument, eventType) => {
         break;
 
       case 'DISCUSSION_READY':
-        // Reserved for Phase 5
-        return;
+        title = 'The Humrah Founder is ready to talk';
+        body = 'Your message has been reviewed and a discussion has been started. Tap to open the conversation.';
+        break;
 
       case 'EMAIL_SENT':
         title = 'Response Sent';
