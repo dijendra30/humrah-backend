@@ -27,11 +27,11 @@ exports.submitMessage = async (req, res) => {
   let uploadedAttachments = [];
   try {
     const userId = req.user._id;
-    const { category, subject, message, deviceInfo, appVersion } = req.body;
+    const { category, subject, message, replyPreference, deviceInfo, appVersion } = req.body;
 
     // 1. Validation
-    if (!category || !message) {
-      return res.status(400).json({ success: false, message: 'Category and message are required.' });
+    if (!category || !message || !replyPreference) {
+      return res.status(400).json({ success: false, message: 'Category, message, and replyPreference are required.' });
     }
     
     if (message.length > 5000) {
@@ -41,6 +41,11 @@ exports.submitMessage = async (req, res) => {
     const allowedCategories = ['FEEDBACK', 'BUG', 'FEATURE_REQUEST', 'COMPLAINT', 'OTHER'];
     if (!allowedCategories.includes(category)) {
       return res.status(400).json({ success: false, message: 'Invalid category.' });
+    }
+
+    const allowedPreferences = ['NO_REPLY', 'EMAIL', 'FOLLOW_UP'];
+    if (!allowedPreferences.includes(replyPreference)) {
+      return res.status(400).json({ success: false, message: 'Invalid replyPreference.' });
     }
 
     // 2. Daily Rate Limit Check (Max 10 per day per user)
@@ -92,6 +97,7 @@ exports.submitMessage = async (req, res) => {
       category,
       subject,
       message,
+      replyPreference,
       attachments: uploadedAttachments,
       deviceInfo,
       appVersion,
