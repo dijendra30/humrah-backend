@@ -7,6 +7,7 @@ const Message = require('../models/Message');
 const FounderMessage = require('../models/FounderMessage');
 const User = require('../models/User');
 const { sendDataFcm } = require('../utils/fcmHelper');
+const { validateWorkflowAction } = require('../utils/workflowValidator');
 
 // Helper to get the official founder account (first SUPER_ADMIN)
 async function getOfficialFounderUser() {
@@ -25,6 +26,11 @@ exports.startDiscussion = async (req, res) => {
     const founderMessage = await FounderMessage.findById(id);
     if (!founderMessage || founderMessage.isDeleted) {
       return res.status(404).json({ success: false, message: 'Founder Message not found.' });
+    }
+
+    const validation = validateWorkflowAction(founderMessage.replyPreference, 'START_DISCUSSION');
+    if (!validation.isValid) {
+      return res.status(409).json({ success: false, message: validation.message });
     }
 
     const userId = founderMessage.user;

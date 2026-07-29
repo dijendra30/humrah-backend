@@ -4,6 +4,7 @@ const FounderMessage = require('../models/FounderMessage');
 const User = require('../models/User');
 const { uploadBuffer, deleteImage } = require('../config/cloudinary');
 const { notifyFounderChannel } = require('../services/telegramService');
+const { validateWorkflowAction } = require('../utils/workflowValidator');
 
 /**
  * Helper to cleanup cloudinary uploads if DB save fails
@@ -307,6 +308,11 @@ exports.replyToMessage = async (req, res) => {
     const message = await FounderMessage.findById(id);
     if (!message || message.isDeleted) {
       return res.status(404).json({ success: false, message: 'Message not found.' });
+    }
+
+    const validation = validateWorkflowAction(message.replyPreference, 'REPLY_BY_EMAIL');
+    if (!validation.isValid) {
+      return res.status(409).json({ success: false, message: validation.message });
     }
 
     message.founderReply = replyText;
