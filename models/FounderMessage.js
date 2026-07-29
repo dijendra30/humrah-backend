@@ -20,6 +20,11 @@ const founderMessageSchema = new mongoose.Schema({
     required: true,
     enum: ['NO_REPLY', 'EMAIL', 'FOLLOW_UP']
   },
+  emailStatus: {
+    type: String,
+    enum: ['NONE', 'PENDING', 'SENDING', 'SENT', 'FAILED'],
+    default: 'NONE'
+  },
   subject: {
     type: String,
     trim: true,
