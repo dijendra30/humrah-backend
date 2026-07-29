@@ -6,6 +6,7 @@ const { uploadBuffer, deleteImage } = require('../config/cloudinary');
 const { notifyFounderChannel } = require('../services/telegramService');
 const { validateWorkflowAction } = require('../utils/workflowValidator');
 const { emitFounderEvent } = require('../services/founderNotificationService');
+const { sendFounderEmailReply } = require('../services/founderEmailService');
 
 /**
  * Helper to cleanup cloudinary uploads if DB save fails
@@ -336,20 +337,20 @@ exports.replyToMessage = async (req, res) => {
       return res.status(409).json({ success: false, message: validation.message });
     }
 
-    message.founderReply = replyText;
-    message.replyTimestamp = new Date();
-    message.status = 'REPLIED';
+    if (message.emailStatus === 'SENDING' || message.emailStatus === 'SENT') {
+      return res.status(409).json({ success: false, message: 'Email is already being sent or has been sent.' });
+    }
 
-    await message.save();
+    // Await provider confirmation as per requirements for synchronous sending
+    await sendFounderEmailReply(id, replyText);
 
     res.status(200).json({
       success: true,
-      message: 'Reply saved successfully.',
-      data: message
+      message: 'Reply sent successfully.'
     });
   } catch (error) {
     console.error('[FounderMessage] Admin Reply Error:', error);
-    res.status(500).json({ success: false, message: 'Server error.' });
+    res.status(500).json({ success: false, message: error.message || 'Server error.' });
   }
 };
 
