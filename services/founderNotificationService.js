@@ -44,6 +44,11 @@ exports.emitFounderEvent = async (userId, messageDocument, eventType) => {
         // Reserved for Phase 5
         return;
 
+      case 'EMAIL_SENT':
+        title = 'Response Sent';
+        body = 'The Humrah Founder has sent a reply to your registered email address.';
+        break;
+
       default:
         console.warn(`[FounderNotificationService] Unknown event type: ${eventType}`);
         return;
