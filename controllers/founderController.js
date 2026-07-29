@@ -5,6 +5,7 @@ const User = require('../models/User');
 const { uploadBuffer, deleteImage } = require('../config/cloudinary');
 const { notifyFounderChannel } = require('../services/telegramService');
 const { validateWorkflowAction } = require('../utils/workflowValidator');
+const { emitFounderEvent } = require('../services/founderNotificationService');
 
 /**
  * Helper to cleanup cloudinary uploads if DB save fails
@@ -109,6 +110,10 @@ exports.submitMessage = async (req, res) => {
 
     // 5. Fire and Forget Telegram Notification
     notifyFounderChannel(newMessage).catch(err => console.error('[Telegram] Founder Notification Error:', err));
+
+    emitFounderEvent(userId, newMessage, 'MESSAGE_SUBMITTED').catch(err => {
+      console.error('[FounderController] Notification error:', err.message);
+    });
 
     res.status(201).json({
       success: true,
@@ -249,10 +254,18 @@ exports.getMessageForAdmin = async (req, res) => {
     }
 
     // Auto-update to READING status if it was UNREAD
+    let wasUnread = false;
     if (message.status === 'UNREAD') {
       message.status = 'READING';
       message.readTimestamp = new Date();
       await message.save();
+      wasUnread = true;
+    }
+
+    if (wasUnread) {
+      emitFounderEvent(message.user, message, 'MESSAGE_READ_WORKFLOW').catch(err => {
+        console.error('[FounderController] Notification error:', err.message);
+      });
     }
 
     res.status(200).json({
@@ -276,6 +289,8 @@ exports.updateMessageStatus = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Message not found.' });
     }
 
+    const previousStatus = message.status;
+
     if (status !== undefined) message.status = status;
     if (priority !== undefined) message.priority = priority;
     if (isArchived !== undefined) message.isArchived = isArchived;
@@ -284,6 +299,12 @@ exports.updateMessageStatus = async (req, res) => {
     if (internalNotes !== undefined) message.internalNotes = internalNotes;
 
     await message.save();
+
+    if (previousStatus === 'UNREAD' && (status === 'READING' || status === 'READ' || status === 'REPLIED' || status === 'CLOSED')) {
+      emitFounderEvent(message.user, message, 'MESSAGE_READ_WORKFLOW').catch(err => {
+        console.error('[FounderController] Notification error:', err.message);
+      });
+    }
 
     res.status(200).json({
       success: true,
