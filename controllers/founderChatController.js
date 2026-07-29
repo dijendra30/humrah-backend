@@ -254,15 +254,25 @@ exports.sendMessage = async (req, res) => {
 
     // Format for socket
     const senderData = await User.findById(actualSenderId).select('firstName lastName profilePhoto');
+    let socketSenderFirstName = senderData ? senderData.firstName : '';
+    let socketSenderLastName = senderData ? senderData.lastName : '';
+    let socketSenderPhoto = senderData ? senderData.profilePhoto : '';
+
+    if (senderRole === 'ADMIN') {
+      socketSenderFirstName = 'Humrah';
+      socketSenderLastName = 'Founder';
+      socketSenderPhoto = 'HUMRAH_OFFICIAL_AVATAR';
+    }
+
     const payload = {
       _id: message._id.toString(),
       chatId: message.chatId.toString(),
       senderId: message.senderId.toString(),
       senderIdRaw: senderData ? {
         _id: senderData._id.toString(),
-        firstName: senderData.firstName,
-        lastName: senderData.lastName,
-        profilePhoto: senderData.profilePhoto
+        firstName: socketSenderFirstName,
+        lastName: socketSenderLastName,
+        profilePhoto: socketSenderPhoto
       } : null,
       senderRole: message.senderRole,
       content: message.content,
@@ -292,8 +302,8 @@ exports.sendMessage = async (req, res) => {
           type: 'NEW_CHAT_MESSAGE',
           chatId: chatId,
           chatType: 'FOUNDER',
-          senderName: senderData ? senderData.firstName : 'Founder',
-          senderPhotoUrl: senderData ? senderData.profilePhoto : ''
+          senderName: senderRole === 'ADMIN' ? 'Humrah Founder' : (senderData ? senderData.firstName : 'User'),
+          senderPhotoUrl: senderRole === 'ADMIN' ? 'HUMRAH_OFFICIAL_AVATAR' : (senderData ? senderData.profilePhoto : '')
         }).catch(err => console.error('[FCM] Founder chat push error:', err.message));
       }
     });

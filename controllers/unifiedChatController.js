@@ -75,7 +75,19 @@ async function fetchStandardChats(userId) {
     
     let title = chat.chatType;
     let avatar = null;
-    if (otherParticipants.length > 0) {
+    let subtitle = undefined;
+    let isOfficial = false;
+    let showVerifiedBadge = false;
+    let role = undefined;
+    
+    if (chat.chatType === 'FOUNDER') {
+      title = 'Humrah Founder';
+      avatar = 'HUMRAH_OFFICIAL_AVATAR'; // Sentinel value for the frontend to render the official logo
+      subtitle = 'Official Humrah Support';
+      isOfficial = true;
+      showVerifiedBadge = true;
+      role = 'FOUNDER';
+    } else if (otherParticipants.length > 0) {
       const otherUser = otherParticipants[0].userId;
       title = `${otherUser.firstName || ''} ${otherUser.lastName || ''}`.trim() || chat.chatType;
       avatar = otherUser.profilePhoto || null;
@@ -110,7 +122,11 @@ async function fetchStandardChats(userId) {
         status: chat.status,
         linkedReportId: chat.linkedReportId,
         linkedBookingId: chat.linkedBookingId,
-        linkedFounderMessageIds: chat.linkedFounderMessageIds
+        linkedFounderMessageIds: chat.linkedFounderMessageIds,
+        isOfficial: isOfficial,
+        showVerifiedBadge: showVerifiedBadge,
+        role: role,
+        subtitle: subtitle
       }
     };
   }));
