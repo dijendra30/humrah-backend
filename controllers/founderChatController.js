@@ -8,6 +8,7 @@ const FounderMessage = require('../models/FounderMessage');
 const User = require('../models/User');
 const { sendDataFcm } = require('../utils/fcmHelper');
 const { validateWorkflowAction } = require('../utils/workflowValidator');
+const { emitFounderEvent } = require('../services/founderNotificationService');
 
 // Helper to get the official founder account (first SUPER_ADMIN)
 async function getOfficialFounderUser() {
@@ -113,6 +114,9 @@ exports.startDiscussion = async (req, res) => {
       };
       io.to(chat._id.toString()).emit('new-message', payload);
     }
+
+    // Emit DISCUSSION_READY notification
+    await emitFounderEvent(userId.toString(), founderMessage, 'DISCUSSION_READY');
 
     res.status(200).json({
       success: true,
