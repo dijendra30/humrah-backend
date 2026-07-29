@@ -15,6 +15,11 @@ const founderMessageSchema = new mongoose.Schema({
     required: true,
     enum: ['FEEDBACK', 'BUG', 'FEATURE_REQUEST', 'COMPLAINT', 'OTHER']
   },
+  replyPreference: {
+    type: String,
+    required: true,
+    enum: ['NO_REPLY', 'EMAIL', 'FOLLOW_UP']
+  },
   subject: {
     type: String,
     trim: true,
