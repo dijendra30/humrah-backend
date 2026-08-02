@@ -178,9 +178,18 @@ exports.getChatMessages = async (req, res) => {
     const userId = req.userId || req.user?._id;
 
     const chat = await Chat.findById(chatId)
-      .populate({ path: 'participants.userId', select: 'firstName lastName profilePhoto verified' });
+      .populate({ path: 'participants.userId', select: 'firstName lastName profilePhoto verified' })
+      .populate('linkedFounderMessageIds');
 
     if (!chat) return res.status(404).json({ success: false, message: 'Chat not found.' });
+
+    let effectiveCanSend = !chat.isReadOnly();
+    if (chat.linkedFounderMessageIds && chat.linkedFounderMessageIds.length > 0) {
+      const hasClosedMessage = chat.linkedFounderMessageIds.some(msg => msg.status === 'CLOSED');
+      if (hasClosedMessage) {
+        effectiveCanSend = false;
+      }
+    }
 
     const uid = userId.toString();
     const isParticipant = chat.participants.some(p => p.userId?._id?.toString() === uid || p.userId?.toString() === uid);
@@ -213,7 +222,7 @@ exports.getChatMessages = async (req, res) => {
       attachmentType: msg.attachmentType
     }));
 
-    res.json({ success: true, chat, messages: transformed });
+    res.json({ success: true, chat, messages: transformed, canSendMessages: effectiveCanSend });
   } catch (error) {
     console.error('[FounderChat] getChatMessages Error:', error);
     res.status(500).json({ success: false, message: 'Server error while fetching messages.' });
@@ -233,9 +242,18 @@ exports.sendMessage = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Message content or attachment required.' });
     }
 
-    const chat = await Chat.findById(chatId);
+    const chat = await Chat.findById(chatId).populate('linkedFounderMessageIds');
     if (!chat) return res.status(404).json({ success: false, message: 'Chat not found.' });
-    if (chat.isReadOnly()) return res.status(403).json({ success: false, message: 'Chat is read-only.' });
+    
+    let effectiveCanSend = !chat.isReadOnly();
+    if (chat.linkedFounderMessageIds && chat.linkedFounderMessageIds.length > 0) {
+      const hasClosedMessage = chat.linkedFounderMessageIds.some(msg => msg.status === 'CLOSED');
+      if (hasClosedMessage) {
+        effectiveCanSend = false;
+      }
+    }
+    
+    if (!effectiveCanSend) return res.status(403).json({ success: false, message: 'This conversation is closed.' });
 
     const uid = userId.toString();
     const isParticipant = chat.participants.some(p => p.userId.toString() === uid);
