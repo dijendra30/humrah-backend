@@ -14,5 +14,6 @@ router.get('/', auth, unifiedChatController.getUnifiedChats);
 // @access  Private
 const founderChatController = require('../controllers/founderChatController');
 router.get('/:chatId/messages', auth, founderChatController.getChatMessages);
+router.post('/:chatId/messages', auth, founderChatController.sendMessage);
 
 module.exports = router;
