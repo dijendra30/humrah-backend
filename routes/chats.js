@@ -9,4 +9,10 @@ const { auth } = require('../middleware/auth');
 // @access  Private
 router.get('/', auth, unifiedChatController.getUnifiedChats);
 
+// @route   GET /api/chats/:chatId/messages
+// @desc    Get messages for a specific Chat
+// @access  Private
+const founderChatController = require('../controllers/founderChatController');
+router.get('/:chatId/messages', auth, founderChatController.getChatMessages);
+
 module.exports = router;
