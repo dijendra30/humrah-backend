@@ -196,7 +196,17 @@ exports.listMessages = async (req, res) => {
 
     let query = { isDeleted: false };
 
-    if (category) query.category = category;
+    if (category) {
+      if (category === 'BUG_REPORT') {
+        query.category = { $in: ['BUG_REPORT', 'BUG'] };
+      } else if (category === 'FEATURE_IDEA') {
+        query.category = { $in: ['FEATURE_IDEA', 'FEATURE_REQUEST'] };
+      } else if (category === 'SAFETY_CONCERN') {
+        query.category = { $in: ['SAFETY_CONCERN', 'COMPLAINT'] };
+      } else {
+        query.category = category;
+      }
+    }
     if (status) query.status = status;
     if (priority) query.priority = priority;
     if (isArchived !== undefined) query.isArchived = isArchived === 'true';

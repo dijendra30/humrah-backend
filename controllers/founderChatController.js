@@ -420,6 +420,18 @@ exports.updateChatStatus = async (req, res) => {
         timestamp: sysMessage.timestamp.toISOString(),
         deliveryStatus: 'SENT'
       });
+
+      // Emit Phase 3 canonical chat_updated event to sync closed-state real-time
+      chat.participants.forEach(p => {
+        if (p.userId) {
+          io.to(`user_${p.userId.toString()}`).emit('chat_updated', {
+            chatId: chat._id.toString(),
+            chatType: chat.chatType,
+            status: chat.status,
+            canSendMessages: !chat.isReadOnly()
+          });
+        }
+      });
     }
 
     res.json({ success: true, message: 'Status updated.', chat });
