@@ -13,7 +13,12 @@ const founderMessageSchema = new mongoose.Schema({
   category: {
     type: String,
     required: true,
-    enum: ['FEEDBACK', 'BUG', 'FEATURE_REQUEST', 'COMPLAINT', 'OTHER']
+    enum: [
+      // Canonical
+      'BUG_REPORT', 'FEATURE_IDEA', 'FEEDBACK', 'SAFETY_CONCERN', 'APPRECIATION', 'PARTNERSHIP', 'OTHER',
+      // Legacy compatibility
+      'BUG', 'FEATURE_REQUEST', 'COMPLAINT'
+    ]
   },
   replyPreference: {
     type: String,
