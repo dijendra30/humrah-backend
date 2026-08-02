@@ -185,8 +185,10 @@ exports.getChatMessages = async (req, res) => {
         lastName: msg.senderId.lastName,
         profilePhoto: msg.senderId.profilePhoto
       } : null,
+      senderName: msg.senderId?.firstName ? `${msg.senderId.firstName} ${msg.senderId.lastName || ''}`.trim() : (msg.senderRole === 'ADMIN' ? 'Humrah Founder' : 'Unknown'),
       senderRole: msg.senderRole,
       content: msg.content,
+      readBy: [],
       messageType: msg.messageType,
       isSystemMessage: msg.isSystemMessage,
       timestamp: msg.timestamp.toISOString(),
