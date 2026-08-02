@@ -113,6 +113,22 @@ exports.startDiscussion = async (req, res) => {
         deliveryStatus: 'SENT'
       };
       io.to(chat._id.toString()).emit('new-message', payload);
+
+      // Emit chat_updated to participants
+      const notifyIds = chat.participants.map(p => p.userId.toString());
+      if (chat.assignedAdminId) notifyIds.push(chat.assignedAdminId.toString());
+      const allIds = [...new Set(notifyIds)];
+      
+      allIds.forEach(pId => {
+        io.to(`user:${pId}`).emit('chat_updated', {
+          chatId: chat._id.toString(),
+          chatType: 'FOUNDER',
+          lastMessage: sysMessage.content,
+          lastMessageAt: chat.lastMessageAt.toISOString(),
+          senderId: adminId.toString(),
+          unreadCount: chat.unreadCounts.get(pId) || 0
+        });
+      });
     }
 
     // Emit DISCUSSION_READY notification
@@ -252,6 +268,22 @@ exports.sendMessage = async (req, res) => {
     });
 
     chat.lastMessageAt = new Date();
+
+    // Increment unread counts for all participants except the sender
+    const senderIdStr = actualSenderId.toString();
+    chat.participants.forEach(p => {
+      const pIdStr = p.userId.toString();
+      if (pIdStr !== senderIdStr) {
+        const current = chat.unreadCounts.get(pIdStr) || 0;
+        chat.unreadCounts.set(pIdStr, current + 1);
+      }
+    });
+    if (chat.assignedAdminId && chat.assignedAdminId.toString() !== senderIdStr) {
+      const adminIdStr = chat.assignedAdminId.toString();
+      const current = chat.unreadCounts.get(adminIdStr) || 0;
+      chat.unreadCounts.set(adminIdStr, current + 1);
+    }
+
     await chat.save();
 
     // Format for socket
@@ -295,7 +327,24 @@ exports.sendMessage = async (req, res) => {
     const notifyIds = chat.participants.map(p => p.userId.toString());
     if (chat.assignedAdminId) notifyIds.push(chat.assignedAdminId.toString());
     
+    // We notify everyone except the HTTP requester.
+    // The HTTP requester will just get the 201 response.
     const uniqueNotifyIds = [...new Set(notifyIds)].filter(id => id !== uid);
+
+    if (io) {
+      // Emit chat_updated to all participants' personal rooms
+      const allIds = [...new Set(notifyIds)];
+      allIds.forEach(pId => {
+        io.to(`user:${pId}`).emit('chat_updated', {
+          chatId: chat._id.toString(),
+          chatType: 'FOUNDER',
+          lastMessage: message.content,
+          lastMessageAt: chat.lastMessageAt.toISOString(),
+          senderId: actualSenderId.toString(),
+          unreadCount: chat.unreadCounts.get(pId) || 0
+        });
+      });
+    }
 
     uniqueNotifyIds.forEach(async pId => {
       const recipient = await User.findById(pId).select('fcmTokens');
