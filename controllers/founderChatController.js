@@ -261,7 +261,7 @@ exports.sendMessage = async (req, res) => {
     if (senderRole === 'ADMIN') {
       socketSenderFirstName = 'Humrah';
       socketSenderLastName = 'Founder';
-      socketSenderPhoto = 'HUMRAH_OFFICIAL_AVATAR';
+      socketSenderPhoto = 'founder.png';
     }
 
     const payload = {
@@ -303,7 +303,7 @@ exports.sendMessage = async (req, res) => {
           chatId: chatId,
           chatType: 'FOUNDER',
           senderName: senderRole === 'ADMIN' ? 'Humrah Founder' : (senderData ? senderData.firstName : 'User'),
-          senderPhotoUrl: senderRole === 'ADMIN' ? 'HUMRAH_OFFICIAL_AVATAR' : (senderData ? senderData.profilePhoto : '')
+          senderPhotoUrl: senderRole === 'ADMIN' ? 'founder.png' : (senderData ? senderData.profilePhoto : '')
         }).catch(err => console.error('[FCM] Founder chat push error:', err.message));
       }
     });

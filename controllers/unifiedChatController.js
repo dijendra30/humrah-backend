@@ -82,7 +82,7 @@ async function fetchStandardChats(userId) {
     
     if (chat.chatType === 'FOUNDER') {
       title = 'Humrah Founder';
-      avatar = 'HUMRAH_OFFICIAL_AVATAR'; // Sentinel value for the frontend to render the official logo
+      avatar = 'founder.png';
       subtitle = 'Official Humrah Support';
       isOfficial = true;
       showVerifiedBadge = true;
