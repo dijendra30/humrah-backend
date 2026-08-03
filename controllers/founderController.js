@@ -3,7 +3,6 @@
 const FounderMessage = require('../models/FounderMessage');
 const Chat = require('../models/Chat');
 const User = require('../models/User');
-const { getIO } = require('../utils/socket');
 const { uploadBuffer, deleteImage } = require('../config/cloudinary');
 const { notifyFounderChannel } = require('../services/telegramService');
 const { validateWorkflowAction } = require('../utils/workflowValidator');
@@ -332,15 +331,17 @@ exports.updateMessageStatus = async (req, res) => {
           
           // Emit socket event to the user
           try {
-            const io = getIO();
-            const p = chat.participants.find(p => p.role === 'USER');
-            if (p && p.userId) {
-              io.to(`user:${p.userId.toString()}`).emit('chat_updated', {
-                chatId: chat._id,
-                chatType: 'FOUNDER',
-                status: 'CLOSED',
-                canSendMessages: false
-              });
+            const io = req.app.get('io');
+            if (io) {
+                const p = chat.participants.find(p => p.role === 'USER');
+                if (p && p.userId) {
+                io.to(`user:${p.userId.toString()}`).emit('chat_updated', {
+                    chatId: chat._id,
+                    chatType: 'FOUNDER',
+                    status: 'CLOSED',
+                    canSendMessages: false
+                });
+                }
             }
           } catch (ioErr) {
             console.error('[FounderController] Error emitting chat_updated on close:', ioErr);
