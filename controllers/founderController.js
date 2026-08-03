@@ -1,7 +1,9 @@
 'use strict';
 
 const FounderMessage = require('../models/FounderMessage');
+const Chat = require('../models/Chat');
 const User = require('../models/User');
+const { getIO } = require('../utils/socket');
 const { uploadBuffer, deleteImage } = require('../config/cloudinary');
 const { notifyFounderChannel } = require('../services/telegramService');
 const { validateWorkflowAction } = require('../utils/workflowValidator');
@@ -318,6 +320,34 @@ exports.updateMessageStatus = async (req, res) => {
     if (internalNotes !== undefined) message.internalNotes = internalNotes;
 
     await message.save();
+
+    if (status === 'CLOSED' && previousStatus !== 'CLOSED') {
+      const chats = await Chat.find({ linkedFounderMessageIds: message._id });
+      for (let chat of chats) {
+        if (chat.status !== 'CLOSED') {
+          chat.status = 'CLOSED';
+          chat.closedAt = new Date();
+          chat.closedBy = req.user._id;
+          await chat.save();
+          
+          // Emit socket event to the user
+          try {
+            const io = getIO();
+            const p = chat.participants.find(p => p.role === 'USER');
+            if (p && p.userId) {
+              io.to(`user:${p.userId.toString()}`).emit('chat_updated', {
+                chatId: chat._id,
+                chatType: 'FOUNDER',
+                status: 'CLOSED',
+                canSendMessages: false
+              });
+            }
+          } catch (ioErr) {
+            console.error('[FounderController] Error emitting chat_updated on close:', ioErr);
+          }
+        }
+      }
+    }
 
     if (previousStatus === 'UNREAD' && (status === 'READING' || status === 'READ' || status === 'REPLIED' || status === 'CLOSED')) {
       emitFounderEvent(message.user, message, 'MESSAGE_READ_WORKFLOW').catch(err => {

@@ -41,21 +41,35 @@ exports.startDiscussion = async (req, res) => {
       chatType: 'FOUNDER',
       'participants.userId': userId,
       status: { $in: ['ACTIVE', 'WAITING_FOR_FOUNDER', 'WAITING_FOR_USER'] }
-    });
+    }).populate('linkedFounderMessageIds');
 
     let isNewChat = false;
 
     if (chat) {
+      // Defensive validation: Do not reuse if logically closed
+      let isLogicallyClosed = chat.isReadOnly();
+      if (!isLogicallyClosed && chat.linkedFounderMessageIds && chat.linkedFounderMessageIds.length > 0) {
+        isLogicallyClosed = chat.linkedFounderMessageIds.some(msg => msg.status === 'CLOSED');
+      }
+
+      if (isLogicallyClosed) {
+        chat = null; // Force creation of a new chat
+      }
+    }
+
+    if (chat) {
       // Add message reference if not already present
-      if (!chat.linkedFounderMessageIds.includes(founderMessage._id)) {
+      const messageIdStr = founderMessage._id.toString();
+      const hasLink = chat.linkedFounderMessageIds.some(msg => msg._id && msg._id.toString() === messageIdStr);
+      if (!hasLink) {
         chat.linkedFounderMessageIds.push(founderMessage._id);
       }
       
       // Ensure the admin who clicked "Start Discussion" is assigned to the chat
       if (chat.assignedAdminId?.toString() !== adminId.toString()) {
         chat.assignedAdminId = adminId;
-        await chat.save();
       }
+      await chat.save();
     } else {
       isNewChat = true;
       // Get official founder account
