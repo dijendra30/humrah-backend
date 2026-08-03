@@ -41,7 +41,15 @@ exports.submitMessage = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Message exceeds 5000 characters limit.' });
     }
 
-    const allowedCategories = ['FEEDBACK', 'BUG', 'FEATURE_REQUEST', 'COMPLAINT', 'OTHER'];
+    const allowedCategories = [
+        'BUG_REPORT', 
+        'FEATURE_IDEA', 
+        'FEEDBACK', 
+        'SAFETY_CONCERN', 
+        'APPRECIATION', 
+        'PARTNERSHIP', 
+        'OTHER'
+    ];
     if (!allowedCategories.includes(category)) {
       return res.status(400).json({ success: false, message: 'Invalid category.' });
     }
