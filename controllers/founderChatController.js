@@ -351,10 +351,16 @@ exports.sendMessage = async (req, res) => {
 
     const io = req.app.get('io');
     if (io) {
-      console.log(`[FOUNDER_SOCKET] message persisted messageId=${message._id} chatId=${chatId}`);
+      console.log(`[FOUNDER MESSAGE SAVED] messageId=${message._id} chatId=${chatId} senderId=${senderId}`);
+      
+      const chatRoomMembers = Array.from(io.sockets.adapter.rooms.get(chatId.toString()) || []);
+      console.log(`[FOUNDER EMIT] event=new-message chatId=${chatId} targetRoom=${chatId} messageId=${message._id}`);
+      console.log(`[ROOM MEMBERS] room=${chatId} count=${chatRoomMembers.length} socketIds=`, chatRoomMembers);
       io.to(chatId).emit('new-message', payload);
       
-      console.log(`[FOUNDER_SOCKET] emitting founder:new-message room=founder-admins messageId=${message._id}`);
+      const adminRoomMembers = Array.from(io.sockets.adapter.rooms.get('founder-admins') || []);
+      console.log(`[FOUNDER EMIT] event=founder:new-message chatId=${chatId} targetRoom=founder-admins messageId=${message._id}`);
+      console.log(`[ROOM MEMBERS] room=founder-admins count=${adminRoomMembers.length} socketIds=`, adminRoomMembers);
       io.to('founder-admins').emit('founder:new-message', payload);
     }
 
