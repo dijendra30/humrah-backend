@@ -89,6 +89,19 @@ exports.startDiscussion = async (req, res) => {
       await chat.save();
     }
 
+    // Idempotency guard: if this ticket is already linked and active, return early
+    const messageIdStr = founderMessage._id.toString();
+    const alreadyLinked = chat.linkedFounderMessageIds.some(
+      id => (id._id ? id._id.toString() : id.toString()) === messageIdStr
+    );
+    if (founderMessage.status === 'DISCUSSION_STARTED' && alreadyLinked) {
+      return res.status(200).json({
+        success: true,
+        message: 'Already linked to discussion.',
+        chatId: chat._id
+      });
+    }
+
     // Update the FounderMessage status
     founderMessage.status = 'DISCUSSION_STARTED';
     await founderMessage.save();
@@ -351,17 +364,17 @@ exports.sendMessage = async (req, res) => {
 
     const io = req.app.get('io');
     if (io) {
-      console.log(`[FOUNDER MESSAGE SAVED] messageId=${message._id} chatId=${chatId} senderId=${senderId}`);
+      console.log(`[FOUNDER SEND START] messageId=${message._id} chatId=${chatId} senderId=${actualSenderId}`);
       
       const chatRoomMembers = Array.from(io.sockets.adapter.rooms.get(chatId.toString()) || []);
-      console.log(`[FOUNDER EMIT] event=new-message chatId=${chatId} targetRoom=${chatId} messageId=${message._id}`);
-      console.log(`[ROOM MEMBERS] room=${chatId} count=${chatRoomMembers.length} socketIds=`, chatRoomMembers);
+      console.log(`[FOUNDER EMIT CHAT ROOM] room=${chatId} count=${chatRoomMembers.length} socketIds=`, chatRoomMembers);
       io.to(chatId).emit('new-message', payload);
       
       const adminRoomMembers = Array.from(io.sockets.adapter.rooms.get('founder-admins') || []);
-      console.log(`[FOUNDER EMIT] event=founder:new-message chatId=${chatId} targetRoom=founder-admins messageId=${message._id}`);
-      console.log(`[ROOM MEMBERS] room=founder-admins count=${adminRoomMembers.length} socketIds=`, adminRoomMembers);
+      console.log(`[FOUNDER EMIT ADMIN ROOM] room=founder-admins count=${adminRoomMembers.length} socketIds=`, adminRoomMembers);
       io.to('founder-admins').emit('founder:new-message', payload);
+      
+      console.log(`[FOUNDER SEND COMPLETE] messageId=${message._id}`);
     }
 
     // Push notification to all other participants (and assigned admin)
