@@ -190,7 +190,11 @@ io.on('connection', (socket) => {
   const userId   = socket.userId;
   const userName = socket.userName;
 
+  console.log(`[SOCKET CONNECT] socketId=${socket.id} userId=${userId} role=${socket.userRole} transport=${socket.conn.transport.name}`);
+
   socket.join(`user:${userId}`);
+  console.log(`[SOCKET JOIN] socketId=${socket.id} userId=${userId} role=${socket.userRole} room=user:${userId}`);
+  console.log(`[ROOM MEMBERS] room=user:${userId} members=`, Array.from(io.sockets.adapter.rooms.get(`user:${userId}`) || []));
 
   userPresence.set(userId, {
     socketId: socket.id,
@@ -202,10 +206,21 @@ io.on('connection', (socket) => {
 
   if (socket.userRole === 'ADMIN' || socket.userRole === 'SUPER_ADMIN') {
     socket.join('founder-admins');
-    console.log(`[FOUNDER_SOCKET] admin joined founder-admins socketId=${socket.id} role=${socket.userRole}`);
+    console.log(`[SOCKET JOIN] socketId=${socket.id} userId=${userId} role=${socket.userRole} room=founder-admins`);
+    console.log(`[ROOM MEMBERS] room=founder-admins members=`, Array.from(io.sockets.adapter.rooms.get('founder-admins') || []));
   }
 
   io.emit('user-online', { userId, userName });
+
+  socket.on('disconnect', (reason) => {
+    console.log(`[SOCKET DISCONNECT] socketId=${socket.id} userId=${userId} reason=${reason}`);
+    const presence = userPresence.get(userId);
+    if (presence && presence.socketId === socket.id) {
+      presence.status = 'OFFLINE';
+      presence.lastSeen = new Date();
+      io.emit('user-offline', { userId, lastSeen: presence.lastSeen.toISOString() });
+    }
+  });
 
   socket.on('join-chat', async (data) => {
     try {
