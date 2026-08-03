@@ -351,7 +351,11 @@ exports.sendMessage = async (req, res) => {
 
     const io = req.app.get('io');
     if (io) {
+      console.log(`[FOUNDER_SOCKET] message persisted messageId=${message._id} chatId=${chatId}`);
       io.to(chatId).emit('new-message', payload);
+      
+      console.log(`[FOUNDER_SOCKET] emitting founder:new-message room=founder-admins messageId=${message._id}`);
+      io.to('founder-admins').emit('founder:new-message', payload);
     }
 
     // Push notification to all other participants (and assigned admin)
