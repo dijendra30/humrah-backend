@@ -200,11 +200,45 @@ io.on('connection', (socket) => {
     photo:    socket.userPhoto
   });
 
+  if (socket.userRole === 'ADMIN' || socket.userRole === 'SUPER_ADMIN') {
+    socket.join('founder-admins');
+    console.log(`[FOUNDER_SOCKET] admin joined founder-admins socketId=${socket.id} role=${socket.userRole}`);
+  }
+
   io.emit('user-online', { userId, userName });
 
   socket.on('join-chat', async (data) => {
     try {
       const { chatId } = data;
+
+      // Ensure user is authorized to join this chat room
+      const RandomBookingChat = mongoose.model('RandomBookingChat');
+      const MoodChatRoom = mongoose.model('MoodChatRoom');
+      const Chat = mongoose.model('Chat');
+      
+      let isAuthorized = false;
+      let chat = await Chat.findById(chatId);
+      if (chat) {
+        if (chat.participants.some(p => p.userId.toString() === userId) || (chat.assignedAdminId && chat.assignedAdminId.toString() === userId) || socket.userRole === 'ADMIN') {
+          isAuthorized = true;
+        }
+      } else {
+        chat = await RandomBookingChat.findById(chatId);
+        if (chat && chat.participants.some(p => p.userId.toString() === userId)) {
+          isAuthorized = true;
+        } else {
+          chat = await MoodChatRoom.findById(chatId);
+          if (chat && (chat.participants.includes(userId) || chat.participant1?.toString() === userId || chat.participant2?.toString() === userId)) {
+             isAuthorized = true;
+          }
+        }
+      }
+
+      if (!isAuthorized) {
+        console.warn(`Unauthorized socket join-chat attempt by user ${userId} for chat ${chatId}`);
+        return; // Reject join
+      }
+
       socket.join(chatId);
       socket.chatId = chatId;
       if (!chatUsers.has(chatId)) chatUsers.set(chatId, new Set());
@@ -212,9 +246,8 @@ io.on('connection', (socket) => {
 
       socket.to(chatId).emit('user-online', { userId, userName });
 
-      const RandomBookingChat = mongoose.model('RandomBookingChat');
-      const chat = await RandomBookingChat.findById(chatId);
-      if (chat) {
+      // Only run legacy pending message delivery for RandomBookingChat if needed
+      if (chat && chat.participants && chat.participants.length > 0 && chat.constructor.modelName === 'RandomBookingChat') {
         const otherParticipant = chat.participants.find(p => p.userId.toString() !== userId);
         if (otherParticipant) {
           const otherId = otherParticipant.userId.toString();
