@@ -259,6 +259,9 @@ io.on('connection', (socket) => {
       if (!chatUsers.has(chatId)) chatUsers.set(chatId, new Set());
       chatUsers.get(chatId).add(socket.id);
 
+      console.log(`[SOCKET JOIN] socketId=${socket.id} userId=${userId} role=${socket.userRole} room=${chatId}`);
+      console.log(`[ROOM MEMBERS] room=${chatId}`, Array.from(io.sockets.adapter.rooms.get(chatId) || []));
+
       socket.to(chatId).emit('user-online', { userId, userName });
 
       // Only run legacy pending message delivery for RandomBookingChat if needed
