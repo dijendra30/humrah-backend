@@ -323,29 +323,39 @@ exports.updateMessageStatus = async (req, res) => {
     if (status === 'CLOSED' && previousStatus !== 'CLOSED') {
       const chats = await Chat.find({ linkedFounderMessageIds: message._id });
       for (let chat of chats) {
-        if (chat.status !== 'CLOSED') {
-          chat.status = 'CLOSED';
-          chat.closedAt = new Date();
-          chat.closedBy = req.user._id;
-          await chat.save();
-          
-          // Emit socket event to the user
-          try {
-            const io = req.app.get('io');
-            if (io) {
-                const p = chat.participants.find(p => p.role === 'USER');
-                if (p && p.userId) {
-                io.to(`user:${p.userId.toString()}`).emit('chat_updated', {
-                    chatId: chat._id,
-                    chatType: 'FOUNDER',
-                    status: 'CLOSED',
-                    canSendMessages: false
-                });
-                }
-            }
-          } catch (ioErr) {
-            console.error('[FounderController] Error emitting chat_updated on close:', ioErr);
+        // Recalculate if any other linked ticket is still active
+        const activeTicketsCount = await FounderMessage.countDocuments({
+          _id: { $in: chat.linkedFounderMessageIds },
+          status: 'DISCUSSION_STARTED'
+        });
+        
+        const effectiveCanSend = activeTicketsCount > 0;
+
+        if (!effectiveCanSend) {
+          if (chat.status !== 'CLOSED') {
+            chat.status = 'CLOSED';
+            chat.closedAt = new Date();
+            chat.closedBy = req.user._id;
+            await chat.save();
           }
+        }
+
+        // Emit socket event to the user
+        try {
+          const io = req.app.get('io');
+          if (io) {
+              const p = chat.participants.find(p => p.role === 'USER');
+              if (p && p.userId) {
+              io.to(`user:${p.userId.toString()}`).emit('chat_updated', {
+                  chatId: chat._id,
+                  chatType: 'FOUNDER',
+                  status: chat.status,
+                  canSendMessages: effectiveCanSend
+              });
+              }
+          }
+        } catch (ioErr) {
+          console.error('[FounderController] Error emitting chat_updated on close:', ioErr);
         }
       }
     }

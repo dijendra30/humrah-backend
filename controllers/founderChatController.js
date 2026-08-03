@@ -16,6 +16,12 @@ async function getOfficialFounderUser() {
   return founder;
 }
 
+exports.calculateFounderWritability = (chat) => {
+  if (chat.chatType !== 'FOUNDER') return !chat.isReadOnly();
+  if (!chat.linkedFounderMessageIds || chat.linkedFounderMessageIds.length === 0) return false;
+  return chat.linkedFounderMessageIds.some(msg => msg.status === 'DISCUSSION_STARTED');
+};
+
 // ============================================================================
 // ADMIN: Start Discussion
 // ============================================================================
@@ -36,24 +42,17 @@ exports.startDiscussion = async (req, res) => {
 
     const userId = founderMessage.user;
 
-    // Check if an active Founder chat already exists for this user
+    // Check if a permanent Founder chat already exists for this user
     let chat = await Chat.findOne({
       chatType: 'FOUNDER',
-      'participants.userId': userId,
-      status: { $in: ['ACTIVE', 'WAITING_FOR_FOUNDER', 'WAITING_FOR_USER'] }
-    }).populate('linkedFounderMessageIds');
+      'participants.userId': userId
+    }).sort({ createdAt: 1 }).populate('linkedFounderMessageIds');
 
     let isNewChat = false;
 
     if (chat) {
-      // Defensive validation: Do not reuse if logically closed
-      let isLogicallyClosed = chat.isReadOnly();
-      if (!isLogicallyClosed && chat.linkedFounderMessageIds && chat.linkedFounderMessageIds.length > 0) {
-        isLogicallyClosed = chat.linkedFounderMessageIds.some(msg => msg.status === 'CLOSED');
-      }
-
-      if (isLogicallyClosed) {
-        chat = null; // Force creation of a new chat
+      if (chat.status === 'CLOSED' || chat.status === 'ARCHIVED') {
+        chat.status = 'ACTIVE';
       }
     }
 
@@ -140,7 +139,9 @@ exports.startDiscussion = async (req, res) => {
           lastMessage: sysMessage.content,
           lastMessageAt: chat.lastMessageAt.toISOString(),
           senderId: adminId.toString(),
-          unreadCount: chat.unreadCounts.get(pId) || 0
+          unreadCount: chat.unreadCounts.get(pId) || 0,
+          canSendMessages: true,
+          status: chat.status
         });
       });
     }
@@ -197,12 +198,11 @@ exports.getChatMessages = async (req, res) => {
 
     if (!chat) return res.status(404).json({ success: false, message: 'Chat not found.' });
 
-    let effectiveCanSend = !chat.isReadOnly();
-    if (chat.linkedFounderMessageIds && chat.linkedFounderMessageIds.length > 0) {
-      const hasClosedMessage = chat.linkedFounderMessageIds.some(msg => msg.status === 'CLOSED');
-      if (hasClosedMessage) {
-        effectiveCanSend = false;
-      }
+    let effectiveCanSend = false;
+    if (chat.chatType === 'FOUNDER') {
+      effectiveCanSend = exports.calculateFounderWritability(chat);
+    } else {
+      effectiveCanSend = !chat.isReadOnly();
     }
 
     const uid = userId.toString();
@@ -259,12 +259,11 @@ exports.sendMessage = async (req, res) => {
     const chat = await Chat.findById(chatId).populate('linkedFounderMessageIds');
     if (!chat) return res.status(404).json({ success: false, message: 'Chat not found.' });
     
-    let effectiveCanSend = !chat.isReadOnly();
-    if (chat.linkedFounderMessageIds && chat.linkedFounderMessageIds.length > 0) {
-      const hasClosedMessage = chat.linkedFounderMessageIds.some(msg => msg.status === 'CLOSED');
-      if (hasClosedMessage) {
-        effectiveCanSend = false;
-      }
+    let effectiveCanSend = false;
+    if (chat.chatType === 'FOUNDER') {
+      effectiveCanSend = exports.calculateFounderWritability(chat);
+    } else {
+      effectiveCanSend = !chat.isReadOnly();
     }
     
     if (!effectiveCanSend) return res.status(403).json({ success: false, message: 'This conversation is closed.' });
