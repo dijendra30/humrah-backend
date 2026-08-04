@@ -57,6 +57,11 @@ const auditLogSchema = new mongoose.Schema({
       'RESTRICT_USER',
       'UNRESTRICT_USER',
       'UPDATE_USER_STATUS',
+
+      // Post Moderation Actions
+      'HOLD_POST',
+      'REMOVE_POST',
+      'RESTORE_POST',
       
       // Admin Management (SUPER_ADMIN only)
       'CREATE_ADMIN',
@@ -93,7 +98,7 @@ const auditLogSchema = new mongoose.Schema({
   // Target (what the action was performed on)
   targetType: {
     type: String,
-    enum: ['USER', 'REPORT', 'CHAT', 'MESSAGE', 'BOOKING', 'ADMIN', 'SYSTEM'],
+    enum: ['USER', 'REPORT', 'CHAT', 'MESSAGE', 'BOOKING', 'ADMIN', 'SYSTEM', 'POST'],
     required: true
   },
   
@@ -119,6 +124,11 @@ const auditLogSchema = new mongoose.Schema({
   relatedBookingId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Booking'
+  },
+  
+  relatedPostId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Post'
   },
   
   // Action details
@@ -205,6 +215,7 @@ auditLogSchema.statics.logAction = async function (data) {
       relatedReportId: data.relatedReportId,
       relatedChatId: data.relatedChatId,
       relatedBookingId: data.relatedBookingId,
+      relatedPostId: data.relatedPostId,
       details: data.details || {},
       reason: data.reason,
       previousState: data.previousState,
@@ -486,7 +497,10 @@ auditLogSchema.methods.getDescription = function () {
     'CLOSE_CHAT': 'closed chat',
     'CREATE_ADMIN': 'created admin account',
     'UPDATE_ADMIN_PERMISSIONS': 'updated admin permissions',
-    'VIEW_USER_FULL_PROFILE': 'viewed full user profile'
+    'VIEW_USER_FULL_PROFILE': 'viewed full user profile',
+    'HOLD_POST': 'held post',
+    'REMOVE_POST': 'removed post',
+    'RESTORE_POST': 'restored post'
   };
   
   const actionDesc = actionDescriptions[this.action] || this.action.toLowerCase().replace(/_/g, ' ');

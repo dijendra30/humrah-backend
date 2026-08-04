@@ -59,7 +59,20 @@ const postSchema = new mongoose.Schema(
       }
     ],
 
-    isActive: { type: Boolean, default: true }
+    isActive: { type: Boolean, default: true },
+
+    // 🛡️ Moderation
+    moderationStatus: {
+      type: String,
+      enum: ['ACTIVE', 'HELD', 'REMOVED'],
+      default: 'ACTIVE',
+      index: true
+    },
+    reportCount: {
+      type: Number,
+      default: 0,
+      min: 0
+    }
   },
   { timestamps: true }
 );
@@ -77,6 +90,10 @@ postSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
 postSchema.methods.isVisible = function () {
   if (!this.isActive) return false;
+  
+  // Exclude held/removed posts
+  if (this.moderationStatus === 'HELD' || this.moderationStatus === 'REMOVED') return false;
+
   if (this.disappearMode === 'PERMANENT') return true;
   if (!this.expiresAt) return true;
   return new Date() < this.expiresAt;

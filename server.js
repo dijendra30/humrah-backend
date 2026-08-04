@@ -651,6 +651,8 @@ app.use('/api/admin',             authenticate, require('./routes/admin'));
 app.use('/api/admin-dashboard',   authenticate, require('./routes/adminDashboard'));
 app.use('/api/admin-analytics',   authenticate, require('./routes/adminAnalytics'));
 app.use('/api/moderation',        authenticate, adminOnly, moderationRoutes);
+const adminModerationRoutes = require('./routes/adminModeration');
+app.use('/api/admin/moderation',  authenticate, adminOnly, adminModerationRoutes);
 app.use('/api/admin/launch-regions', require('./routes/adminLaunchRegionRoutes'));
 app.use('/api/admin/places',      authenticate, adminOnly, require('./routes/adminPlaces')); // ✅ Google Places API
 app.use('/api/admin/broadcasts',  authenticate, adminOnly, require('./routes/broadcastRoutes')); // ✅ Phase 1: Broadcast Notification System

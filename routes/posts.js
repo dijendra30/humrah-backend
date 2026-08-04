@@ -136,7 +136,13 @@ router.get('/feed', auth, async (req, res) => {
     const limit      = Math.min(parseInt(req.query.limit) || 15, 30);
     const cursor     = req.query.cursor || req.query.before; // support both param names
 
-    const query = { isActive: true };
+    const query = { 
+      isActive: true,
+      $or: [
+        { moderationStatus: 'ACTIVE' },
+        { moderationStatus: { $exists: false } }
+      ]
+    };
 
     // Cursor filter: only posts OLDER than the cursor timestamp
     if (cursor) {
@@ -232,7 +238,7 @@ router.get('/:id', auth, async (req, res) => {
     const post = await Post.findById(req.params.id)
       .populate('userId', 'firstName lastName profilePhoto');
 
-    if (!post || !post.isActive) {
+    if (!post || !post.isActive || (post.moderationStatus && post.moderationStatus !== 'ACTIVE')) {
       return res.status(404).json({ success: false, message: 'Post not found' });
     }
 
@@ -264,7 +270,14 @@ router.get('/:id', auth, async (req, res) => {
 
 router.get('/user/:userId', auth, async (req, res) => {
   try {
-    const posts = await Post.find({ userId: req.params.userId, isActive: true })
+    const posts = await Post.find({ 
+      userId: req.params.userId, 
+      isActive: true,
+      $or: [
+        { moderationStatus: 'ACTIVE' },
+        { moderationStatus: { $exists: false } }
+      ]
+    })
       .populate('userId', 'firstName lastName profilePhoto')
       .sort({ createdAt: -1 });
 
@@ -563,6 +576,9 @@ router.post('/:id/report', auth, async (req, res) => {
         reason,
         status:       'manual_review'
       });
+      
+      // Increment report count on the post
+      await Post.findByIdAndUpdate(post._id, { $inc: { reportCount: 1 } });
     } catch (err) {
       if (err.code === 11000) {
         return res.status(409).json({ success: false, message: 'You have already reported this post' });
@@ -748,7 +764,14 @@ router.get('/saved', auth, async (req, res) => {
     const user = await User.findById(req.userId).select('savedPosts');
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
-    const posts = await Post.find({ _id: { $in: user.savedPosts || [] }, isActive: true })
+    const posts = await Post.find({ 
+      _id: { $in: user.savedPosts || [] }, 
+      isActive: true,
+      $or: [
+        { moderationStatus: 'ACTIVE' },
+        { moderationStatus: { $exists: false } }
+      ]
+    })
       .populate('userId', 'firstName lastName profilePhoto')
       .sort({ createdAt: -1 });
 

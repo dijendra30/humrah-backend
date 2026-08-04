@@ -36,6 +36,9 @@ const activitySchema = new mongoose.Schema(
         'JOIN_GAMING',
         'WARNING',
         'SYSTEM',
+        'POST_HELD',
+        'POST_REMOVED',
+        'POST_RESTORED'
       ],
       required: true,
       index: true,
