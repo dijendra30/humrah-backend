@@ -1,4 +1,4 @@
-<<<<<<< HEAD
+
 // controllers/unifiedChatController.js
 const Chat = require('../models/Chat');
 const RandomBookingChat = require('../models/RandomBookingChat');
