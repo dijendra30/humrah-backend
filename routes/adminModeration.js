@@ -45,9 +45,21 @@ router.get('/posts', async (req, res) => {
 
     const total = await Post.countDocuments(query);
 
+    const enrichedPosts = posts.map(post => {
+      const p = post.toObject();
+      return {
+        ...p,
+        metrics: {
+          likesCount: p.likeCount || 0,
+          commentsCount: p.commentCount || 0,
+          reportsCount: p.reportCount || 0
+        }
+      };
+    });
+
     res.json({
       success: true,
-      posts,
+      posts: enrichedPosts,
       pagination: {
         currentPage: parseInt(page),
         totalPages: Math.ceil(total / parseInt(limit)),
@@ -79,9 +91,17 @@ router.get('/posts/:id', async (req, res) => {
       .populate('actorId', 'firstName lastName email role')
       .sort({ timestamp: -1 });
 
+    const p = post.toObject();
     res.json({
       success: true,
-      post,
+      post: {
+        ...p,
+        metrics: {
+          likesCount: p.likeCount || 0,
+          commentsCount: p.commentCount || 0,
+          reportsCount: p.reportCount || 0
+        }
+      },
       reports,
       history: auditHistory
     });
