@@ -227,22 +227,31 @@ io.on('connection', (socket) => {
     try {
       const { chatId } = data;
 
-      // Ensure user is authorized to join this chat room
-      const RandomBookingChat = mongoose.model('RandomBookingChat');
-      const MoodChatRoom = mongoose.model('MoodChatRoom');
-      const Chat = mongoose.model('Chat');
+      // Safely get models without throwing MissingSchemaError if not registered yet
+      const Chat = mongoose.models.Chat;
+      const RandomBookingChat = mongoose.models.RandomBookingChat;
+      const MoodChatRoom = mongoose.models.MoodChatRoom;
       
       let isAuthorized = false;
-      let chat = await Chat.findById(chatId);
+      let chat = null;
+
+      if (Chat) {
+        chat = await Chat.findById(chatId);
+      }
+      
       if (chat) {
         if (chat.participants.some(p => p.userId.toString() === userId) || (chat.assignedAdminId && chat.assignedAdminId.toString() === userId) || socket.userRole === 'ADMIN' || socket.userRole === 'SUPER_ADMIN') {
           isAuthorized = true;
         }
       } else {
-        chat = await RandomBookingChat.findById(chatId);
-        if (chat && chat.participants.some(p => p.userId.toString() === userId)) {
-          isAuthorized = true;
-        } else {
+        if (RandomBookingChat) {
+          chat = await RandomBookingChat.findById(chatId);
+          if (chat && chat.participants.some(p => p.userId.toString() === userId)) {
+            isAuthorized = true;
+          }
+        }
+        
+        if (!isAuthorized && MoodChatRoom) {
           chat = await MoodChatRoom.findById(chatId);
           if (chat && (chat.participants.includes(userId) || chat.participant1?.toString() === userId || chat.participant2?.toString() === userId)) {
              isAuthorized = true;
