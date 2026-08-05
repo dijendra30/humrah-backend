@@ -255,13 +255,15 @@ io.on('connection', (socket) => {
         return; // Reject join
       }
 
-      socket.join(chatId);
-      socket.chatId = chatId;
-      if (!chatUsers.has(chatId)) chatUsers.set(chatId, new Set());
-      chatUsers.get(chatId).add(socket.id);
+      console.log(`[SOCKET JOIN RECEIVED] socketId=${socket.id} userId=${userId} requestedChatId=${chatId}`);
 
-      const roomMembers = Array.from(io.sockets.adapter.rooms.get(chatId) || []);
-      console.log(`[FOUNDER ROOM JOIN SUCCESS] socketId=${socket.id} userId=${userId} chatId=${chatId} memberCount=${roomMembers.length} members=`, roomMembers);
+      socket.join(chatId.toString());
+      socket.chatId = chatId.toString();
+      if (!chatUsers.has(chatId.toString())) chatUsers.set(chatId.toString(), new Set());
+      chatUsers.get(chatId.toString()).add(socket.id);
+
+      const roomMembers = Array.from(io.sockets.adapter.rooms.get(chatId.toString()) || []);
+      console.log(`[SOCKET JOIN SUCCESS] socketId=${socket.id} userId=${userId} room=${chatId.toString()} memberCount=${roomMembers.length} members=`, roomMembers);
 
       socket.to(chatId).emit('user-online', { userId, userName });
 

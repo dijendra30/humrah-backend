@@ -364,11 +364,12 @@ exports.sendMessage = async (req, res) => {
 
     const io = req.app.get('io');
     if (io) {
-      console.log(`[FOUNDER SEND START] messageId=${message._id} chatId=${chatId} senderId=${actualSenderId}`);
+      console.log(`[FOUNDER ADMIN SEND SAVED] messageId=${message._id} chatId=${chatId} senderId=${actualSenderId} senderRole=${senderRole}`);
       
       const chatRoomMembers = Array.from(io.sockets.adapter.rooms.get(chatId.toString()) || []);
-      console.log(`[FOUNDER EMIT CHAT ROOM] room=${chatId} count=${chatRoomMembers.length} socketIds=`, chatRoomMembers);
-      io.to(chatId).emit('new-message', payload);
+      console.log(`[FOUNDER EMIT CHAT ROOM] event=new-message room=${chatId.toString()} count=${chatRoomMembers.length} messageId=${message._id} senderRole=${senderRole} socketIds=`, chatRoomMembers);
+      
+      io.to(chatId.toString()).emit('new-message', payload);
       
       const adminRoomMembers = Array.from(io.sockets.adapter.rooms.get('founder-admins') || []);
       console.log(`[FOUNDER EMIT ADMIN ROOM] room=founder-admins count=${adminRoomMembers.length} socketIds=`, adminRoomMembers);
