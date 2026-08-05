@@ -206,8 +206,9 @@ io.on('connection', (socket) => {
 
   if (socket.userRole === 'ADMIN' || socket.userRole === 'SUPER_ADMIN') {
     socket.join('founder-admins');
-    console.log(`[SOCKET JOIN] socketId=${socket.id} userId=${userId} role=${socket.userRole} room=founder-admins`);
-    console.log(`[ROOM MEMBERS] room=founder-admins members=`, Array.from(io.sockets.adapter.rooms.get('founder-admins') || []));
+    console.log(`[FOUNDER ADMIN AUTH] userId=${userId} role=${socket.userRole} socketId=${socket.id}`);
+    const adminMembers = Array.from(io.sockets.adapter.rooms.get('founder-admins') || []);
+    console.log(`[FOUNDER ADMIN ROOM JOIN] socketId=${socket.id} role=${socket.userRole} joined=true memberCount=${adminMembers.length} members=`, adminMembers);
   }
 
   io.emit('user-online', { userId, userName });
@@ -234,7 +235,7 @@ io.on('connection', (socket) => {
       let isAuthorized = false;
       let chat = await Chat.findById(chatId);
       if (chat) {
-        if (chat.participants.some(p => p.userId.toString() === userId) || (chat.assignedAdminId && chat.assignedAdminId.toString() === userId) || socket.userRole === 'ADMIN') {
+        if (chat.participants.some(p => p.userId.toString() === userId) || (chat.assignedAdminId && chat.assignedAdminId.toString() === userId) || socket.userRole === 'ADMIN' || socket.userRole === 'SUPER_ADMIN') {
           isAuthorized = true;
         }
       } else {
@@ -259,8 +260,8 @@ io.on('connection', (socket) => {
       if (!chatUsers.has(chatId)) chatUsers.set(chatId, new Set());
       chatUsers.get(chatId).add(socket.id);
 
-      console.log(`[SOCKET JOIN] socketId=${socket.id} userId=${userId} role=${socket.userRole} room=${chatId}`);
-      console.log(`[ROOM MEMBERS] room=${chatId}`, Array.from(io.sockets.adapter.rooms.get(chatId) || []));
+      const roomMembers = Array.from(io.sockets.adapter.rooms.get(chatId) || []);
+      console.log(`[FOUNDER ROOM JOIN SUCCESS] socketId=${socket.id} userId=${userId} chatId=${chatId} memberCount=${roomMembers.length} members=`, roomMembers);
 
       socket.to(chatId).emit('user-online', { userId, userName });
 
