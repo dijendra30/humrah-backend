@@ -11,6 +11,7 @@ const PostLike                    = require('../models/PostLike');
 const Comment                     = require('../models/Comment');
 const CommentLike                 = require('../models/CommentLike');
 const User                        = require('../models/User');
+const SavedPost                   = require('../models/SavedPost');
 const { cloudinary, uploadBase64, deleteImage } = require('../config/cloudinary');
 const PostReport = require('../models/PostReport');
 
@@ -224,6 +225,75 @@ router.get('/feed', auth, async (req, res) => {
 
   } catch (error) {
     console.error('Feed error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  GET SAVED POSTS (paginated)
+//  GET /api/posts/saved
+// ─────────────────────────────────────────────────────────────
+
+router.get('/saved', auth, async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit) || 15, 30);
+    const cursor = req.query.cursor;
+    const query = { userId: req.userId };
+
+    if (cursor) {
+      query.createdAt = { $lt: new Date(cursor) };
+    }
+
+    const savedDocs = await SavedPost.find(query)
+      .sort({ createdAt: -1 })
+      .limit(limit + 1)
+      .populate({
+        path: 'postId',
+        match: {
+          isActive: true,
+          $or: [
+            { moderationStatus: 'ACTIVE' },
+            { moderationStatus: { $exists: false } }
+          ]
+        },
+        populate: { path: 'userId', select: 'firstName lastName profilePhoto' }
+      });
+
+    const hasMore = savedDocs.length > limit;
+    const resultDocs = hasMore ? savedDocs.slice(0, limit) : savedDocs;
+
+    // Filter out null posts (deleted/moderated)
+    const validSavedPosts = resultDocs.filter(doc => doc.postId != null);
+    const posts = validSavedPosts.map(doc => doc.postId);
+
+    const nextCursor = hasMore && resultDocs.length > 0
+      ? resultDocs[resultDocs.length - 1].createdAt.toISOString()
+      : null;
+
+    res.json({
+      success: true,
+      posts,
+      nextCursor,
+      hasMore
+    });
+  } catch (error) {
+    console.error('Get saved posts error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  GET SAVED POST IDS (Lightweight for Feed state)
+//  GET /api/posts/saved/ids
+// ─────────────────────────────────────────────────────────────
+
+router.get('/saved/ids', auth, async (req, res) => {
+  try {
+    const savedDocs = await SavedPost.find({ userId: req.userId }).select('postId');
+    const savedPostIds = savedDocs.map(doc => doc.postId.toString());
+    res.json({ success: true, savedPostIds });
+  } catch (error) {
+    console.error('Get saved post ids error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -732,52 +802,29 @@ router.patch('/:id/toggle-comments', auth, async (req, res) => {
 router.post('/:id/save', auth, async (req, res) => {
   try {
     const post = await Post.findById(req.params.id);
-    if (!post) return res.status(404).json({ success: false, message: 'Post not found' });
-
-    const user = await User.findById(req.userId);
-    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
-
-    const savedPosts = user.savedPosts || [];
-    const alreadySaved = savedPosts.some(id => id.toString() === post._id.toString());
-
-    if (alreadySaved) {
-      user.savedPosts = savedPosts.filter(id => id.toString() !== post._id.toString());
-    } else {
-      user.savedPosts = [...savedPosts, post._id];
+    if (!post || !post.isActive || (post.moderationStatus && post.moderationStatus !== 'ACTIVE')) {
+      return res.status(404).json({ success: false, message: 'Post not found or unavailable' });
     }
 
-    await user.save();
-    res.json({ success: true, saved: !alreadySaved });
+    const existingSave = await SavedPost.findOne({ userId: req.userId, postId: post._id });
+
+    if (existingSave) {
+      await SavedPost.deleteOne({ _id: existingSave._id });
+      res.json({ success: true, saved: false });
+    } else {
+      try {
+        await SavedPost.create({ userId: req.userId, postId: post._id });
+        res.json({ success: true, saved: true });
+      } catch (err) {
+        if (err.code === 11000) {
+          // Already saved concurrently
+          return res.json({ success: true, saved: true });
+        }
+        throw err;
+      }
+    }
   } catch (error) {
     console.error('Save post error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// ─────────────────────────────────────────────────────────────
-//  GET SAVED POST IDS
-//  GET /api/posts/saved
-// ─────────────────────────────────────────────────────────────
-
-router.get('/saved', auth, async (req, res) => {
-  try {
-    const user = await User.findById(req.userId).select('savedPosts');
-    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
-
-    const posts = await Post.find({ 
-      _id: { $in: user.savedPosts || [] }, 
-      isActive: true,
-      $or: [
-        { moderationStatus: 'ACTIVE' },
-        { moderationStatus: { $exists: false } }
-      ]
-    })
-      .populate('userId', 'firstName lastName profilePhoto')
-      .sort({ createdAt: -1 });
-
-    res.json({ success: true, posts });
-  } catch (error) {
-    console.error('Get saved posts error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -924,7 +971,8 @@ router.delete('/:id', auth, async (req, res) => {
     await Promise.all([
       PostLike.deleteMany({ postId: post._id }),
       Comment.deleteMany({ postId: post._id }),
-      CommentLike.deleteMany({ commentId: { $in: commentIdList } })
+      CommentLike.deleteMany({ commentId: { $in: commentIdList } }),
+      SavedPost.deleteMany({ postId: post._id })
     ]);
 
     // 4. Delete the post itself
