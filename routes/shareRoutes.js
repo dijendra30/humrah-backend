@@ -10,13 +10,20 @@ const generateHtml = (ogTitle, ogDescription, ogImage, ogUrl, deepLink) => {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>${ogTitle}</title>
+    <meta name="theme-color" content="#0b0f19">
+    <link rel="canonical" href="${ogUrl}">
     
     <!-- Open Graph Meta Tags -->
     <meta property="og:title" content="${ogTitle}">
     <meta property="og:description" content="${ogDescription}">
     <meta property="og:image" content="${ogImage}">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="og:image:type" content="image/jpeg">
     <meta property="og:url" content="${ogUrl}">
     <meta property="og:type" content="website">
+    <meta property="og:site_name" content="Humrah">
+    <meta property="og:locale" content="en_US">
 
     <!-- Twitter Card Meta Tags -->
     <meta name="twitter:card" content="summary_large_image">
@@ -144,10 +151,20 @@ router.get('/post/:postId', async (req, res) => {
             return res.send(generateHtml('Humrah Post', 'This post is unavailable or has been removed.', '', 'https://humrah.in', 'humrah://home'));
         }
 
-        const authorName = post.userId ? `${post.userId.firstName} ${post.userId.lastName}`.trim() : 'a Humrah user';
-        const ogTitle = `Post by ${authorName} on Humrah`;
-        const ogDescription = post.caption || 'Check out this post on Humrah!';
-        const ogImage = post.imageUrl || (post.userId ? post.userId.profilePhotoUrl : '');
+        const authorName = post.userId ? `${post.userId.firstName} ${post.userId.lastName}`.trim() : 'A Humrah user';
+        
+        let ogTitle = '❤️ A post was shared with you on Humrah';
+        let ogDescription = 'Someone shared a moment with you.\\nOpen it in Humrah.';
+        
+        if (post.caption && post.caption.trim().length > 0) {
+            ogTitle = `${authorName} shared a post on Humrah`;
+            ogDescription = post.caption.trim().substring(0, 140);
+            if (post.caption.length > 140) {
+                ogDescription += '...';
+            }
+        }
+        
+        const ogImage = post.imageUrl || 'https://humrah.in/assets/humrah-community-banner.png';
         const ogUrl = `https://humrah.in/post/${post._id}`;
         const deepLink = `humrah://post/${post._id}`;
 
