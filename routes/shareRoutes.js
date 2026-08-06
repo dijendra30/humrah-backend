@@ -114,7 +114,7 @@ const generateHtml = (ogTitle, ogDescription, ogImage, ogUrl, deepLink) => {
         <div class="description">${ogDescription}</div>
         
         <a href="${deepLink}" class="btn btn-primary" onclick="tryOpenApp(event)">Open in Humrah</a>
-        <a href="https://play.google.com/store/apps/details?id=com.humrah.app" class="btn btn-secondary">Get Humrah</a>
+        <a href="https://play.google.com/store/apps/details?id=in.humrah.app" class="btn btn-secondary">Get Humrah</a>
     </div>
 
     <script>
