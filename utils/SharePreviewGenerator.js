@@ -1,5 +1,4 @@
 const generateProfilePreview = (user) => {
-    // Premium Libraries
     const titles = [
         "Someone worth meeting ✨",
         "A genuine companion awaits",
@@ -66,7 +65,6 @@ const generateProfilePreview = (user) => {
         "Someone interesting is waiting to connect."
     ];
 
-    // Context Map
     const contextMap = [
         {
             keywords: ['coffee', 'cafe', 'tea'],
@@ -117,7 +115,6 @@ const generateProfilePreview = (user) => {
 
     const name = user.firstName ? user.firstName.trim() : 'Someone';
     
-    // Simple deterministic PRNG based on user ID string
     const seedString = user._id ? user._id.toString() : 'default';
     let seed = 0;
     for (let i = 0; i < seedString.length; i++) {
@@ -129,7 +126,6 @@ const generateProfilePreview = (user) => {
     let finalTitle = null;
     let finalDesc = null;
 
-    // 1. Try Context Generation
     if (user.questionnaire) {
         const interests = [
             ...(user.questionnaire.interests || []),
@@ -150,12 +146,10 @@ const generateProfilePreview = (user) => {
         }
     }
 
-    // 2. Fallback to Premium Library with personalization
     if (!finalTitle || !finalDesc) {
         const titleIndex = absSeed % titles.length;
         const descIndex = absSeed % descriptions.length;
         
-        // Personalize some titles
         let rawTitle = titles[titleIndex];
         if (user.isCompanion && absSeed % 3 === 0) {
             rawTitle = "Meet a Community Companion";
@@ -179,6 +173,54 @@ const generateProfilePreview = (user) => {
     };
 };
 
+const generatePostPreview = (post) => {
+    const postTitles = [
+        "A moment shared on Humrah ✨",
+        "Check out this post",
+        "Join the conversation",
+        "Someone shared an update",
+        "A new post to explore",
+        "See what's happening on Humrah",
+        "Discover this moment",
+        "A community update",
+        "Explore this post",
+        "Someone shared something special"
+    ];
+
+    const authorName = post.userId ? `${post.userId.firstName} ${post.userId.lastName}`.trim() : 'Someone';
+    
+    const seedString = post._id ? post._id.toString() : 'default';
+    let seed = 0;
+    for (let i = 0; i < seedString.length; i++) {
+        seed = (seed << 5) - seed + seedString.charCodeAt(i);
+        seed |= 0; 
+    }
+    const absSeed = Math.abs(seed);
+
+    let rawTitle = postTitles[absSeed % postTitles.length];
+    
+    if (absSeed % 3 === 0 && authorName !== 'Someone') {
+        rawTitle = `${authorName} shared a post ✨`;
+    } else if (absSeed % 4 === 0 && authorName !== 'Someone') {
+        rawTitle = `See what ${authorName} is up to`;
+    }
+
+    let finalDesc = "Join Humrah to see this post and connect with the community.";
+    
+    if (post.caption && post.caption.trim().length > 0) {
+        finalDesc = post.caption.trim().substring(0, 97);
+        if (post.caption.length > 97) finalDesc += '...';
+    }
+
+    return {
+        title: rawTitle,
+        description: finalDesc,
+        image: post.imageUrl || 'https://humrah.in/assets/humrah-community-banner.png',
+        url: `https://humrah.in/post/${post._id}`
+    };
+};
+
 module.exports = {
-    generateProfilePreview
+    generateProfilePreview,
+    generatePostPreview
 };
