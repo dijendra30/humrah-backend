@@ -427,10 +427,14 @@ async function fetchTrendingMovies() {
     // Hindi popular is placed before general popular so Hindi movies win dedup
     // when they appear in both lists (ensures _src stays 'popular' for both,
     // but the dedicated Hindi source runs first so its richer metadata wins).
-    const seen   = new Set();
+    const seenIds    = new Set();
+    const seenTitles = new Set();
     const merged = [...nowPlayingRaw, ...hindiPopRaw, ...popularRaw, ...trendingRaw].filter(m => {
-      if (seen.has(m.id)) return false;
-      seen.add(m.id);
+      if (!m.id || !m.title) return false;
+      const titleKey = m.title.trim().toLowerCase();
+      if (seenIds.has(m.id) || seenTitles.has(titleKey)) return false;
+      seenIds.add(m.id);
+      seenTitles.add(titleKey);
       return true;
     });
 
@@ -492,8 +496,8 @@ async function fetchTrendingMovies() {
       return (b.popularity || 0) - (a.popularity || 0); // within tier: most popular first
     });
 
-    // ── Build pool of up to 30 movies ─────────────────────────────────────
-    const pool = filtered.slice(0, 30).map(m => _mapTmdbMovie(m));
+    // ── Build pool of up to 10 movies ─────────────────────────────────────
+    const pool = filtered.slice(0, 10).map(m => _mapTmdbMovie(m));
 
     _moviesCache = { data: pool, ts: now };
 
