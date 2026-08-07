@@ -2,7 +2,6 @@ const express = require('express');
 const router = express.Router();
 const Post = require('../models/Post');
 const User = require('../models/User');
-const { generateProfilePreview, generatePostPreview } = require('../utils/SharePreviewGenerator');
 
 const generateHtml = (ogTitle, ogDescription, ogImage, ogUrl, deepLink) => {
     return `<!DOCTYPE html>
@@ -152,10 +151,24 @@ router.get('/post/:postId', async (req, res) => {
             return res.send(generateHtml('Humrah Post', 'This post is unavailable or has been removed.', '', 'https://humrah.in', 'humrah://home'));
         }
 
-        const previewData = generatePostPreview(post);
+        const authorName = post.userId ? `${post.userId.firstName} ${post.userId.lastName}`.trim() : 'A Humrah user';
+        
+        let ogTitle = '❤️ A post was shared with you on Humrah';
+        let ogDescription = 'Someone shared a moment with you.\\nOpen it in Humrah.';
+        
+        if (post.caption && post.caption.trim().length > 0) {
+            ogTitle = `${authorName} shared a post on Humrah`;
+            ogDescription = post.caption.trim().substring(0, 140);
+            if (post.caption.length > 140) {
+                ogDescription += '...';
+            }
+        }
+        
+        const ogImage = post.imageUrl || 'https://humrah.in/assets/humrah-community-banner.png';
+        const ogUrl = `https://humrah.in/post/${post._id}`;
         const deepLink = `humrah://post/${post._id}`;
 
-        const html = generateHtml(previewData.title, previewData.description, previewData.image, previewData.url, deepLink);
+        const html = generateHtml(ogTitle, ogDescription, ogImage, ogUrl, deepLink);
         res.send(html);
 
     } catch (err) {
@@ -168,16 +181,20 @@ router.get('/post/:postId', async (req, res) => {
 // GET /profile/:userId
 router.get('/profile/:userId', async (req, res) => {
     try {
-        const user = await User.findById(req.params.userId).select('firstName lastName bio profilePhotoUrl isProfileActive questionnaire isCompanion');
+        const user = await User.findById(req.params.userId).select('firstName lastName bio profilePhotoUrl isProfileActive');
         
         if (!user || !user.isProfileActive) {
             return res.send(generateHtml('Humrah Profile', 'This profile is unavailable.', '', 'https://humrah.in', 'humrah://home'));
         }
 
-        const previewData = generateProfilePreview(user);
+        const name = `${user.firstName} ${user.lastName}`.trim();
+        const ogTitle = `${name}'s Profile on Humrah`;
+        const ogDescription = user.bio || `Connect with ${name} on Humrah!`;
+        const ogImage = user.profilePhotoUrl || '';
+        const ogUrl = `https://humrah.in/profile/${user._id}`;
         const deepLink = `humrah://profile/${user._id}`;
 
-        const html = generateHtml(previewData.title, previewData.description, previewData.image, previewData.url, deepLink);
+        const html = generateHtml(ogTitle, ogDescription, ogImage, ogUrl, deepLink);
         res.send(html);
 
     } catch (err) {
