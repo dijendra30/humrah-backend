@@ -30,6 +30,19 @@ exports.getMovies = async (req, res) => {
 };
 
 // =============================================================================
+// GET /api/movies/search?q=&page=
+// =============================================================================
+exports.searchMovies = async (req, res) => {
+  try {
+    const { q, page } = req.query;
+    return send(res, { success: true, movies: await svc.searchMovies(q, page) });
+  } catch (err) {
+    console.error('[ctrl] searchMovies:', err.message);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+// =============================================================================
 // GET /api/theatres?lat=&lng=&radius=
 // Returns top 5 nearby cinemas, rating >= 3.0
 // lat/lng optional — service falls back to user's DB-stored location

@@ -10,6 +10,10 @@ const ctrl    = require('../controllers/movieSessionController');
 // Trending India movies from TMDB (cached 15 min)
 router.get('/movies', ctrl.getMovies);
 
+// GET /api/movies/search?q=&page=
+// TMDB Search API with normalization and caching
+router.get('/movies/search', ctrl.searchMovies);
+
 // ── Theatres ──────────────────────────────────────────────────────────────────
 // GET /api/theatres?lat=&lng=&radius=
 // Top 5 nearby cinemas, rating >= 3.0, sorted by distance+rating

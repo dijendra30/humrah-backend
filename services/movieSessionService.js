@@ -140,6 +140,22 @@ function _haversine(lat1, lng1, lat2, lng2) {
   return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+// ─── Shared TMDB Movie Mapper ─────────────────────────────────────────────────
+function _mapTmdbMovie(m, defaultSource = null) {
+  return {
+    id:         m.id,
+    title:      m.title,
+    posterPath: m.poster_path || null,
+    overview:   m.overview || '',
+    rating:     Math.round((m.vote_average || 0) * 10) / 10,
+    releaseDate: m.release_date || null,
+    genreIds:   m.genre_ids || [],
+    language:   m.original_language,  // 'hi' | 'en' | other
+    source:     m._src || defaultSource,
+    popularity: m.popularity || 0,
+  };
+}
+
 // ─── Fetch user language + saved location from DB ────────────────────────────
 async function _fetchUserContext(userId) {
   try {
@@ -477,15 +493,7 @@ async function fetchTrendingMovies() {
     });
 
     // ── Build pool of up to 30 movies ─────────────────────────────────────
-    const pool = filtered.slice(0, 30).map(m => ({
-      id:         m.id,
-      title:      m.title,
-      posterPath: m.poster_path || null,
-      rating:     Math.round((m.vote_average || 0) * 10) / 10,
-      language:   m.original_language,  // 'hi' | 'en' | other — used by generateSystemSessions
-      source:     m._src,               // 'now_playing' | 'popular' | 'trending'
-      popularity: m.popularity || 0,
-    }));
+    const pool = filtered.slice(0, 30).map(m => _mapTmdbMovie(m));
 
     _moviesCache = { data: pool, ts: now };
 
@@ -631,6 +639,71 @@ async function searchTheatres(query, lat = null, lng = null) {
     return { success: false, theatres: [], message: 'Search failed' };
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// searchMovies — TMDB Search API
+// Normalizes query, supports pagination, and maps response identically to Trending.
+// Uses short-lived caching for responsiveness.
+// ─────────────────────────────────────────────────────────────────────────────
+const _movieSearchCache = new Map();
+const MOVIE_SEARCH_TTL  = 5 * 60 * 1000; // 5 min TTL for searches
+
+async function searchMovies(query, page = 1) {
+  if (!query) return [];
+  const normalizedQuery = query.trim().replace(/\s+/g, ' ').toLowerCase();
+  if (!normalizedQuery) return [];
+  
+  const pageInt = Math.max(1, Math.min(parseInt(page) || 1, 100)); // Cap page to 100
+  const cacheKey = `${normalizedQuery}:${pageInt}`;
+
+  // Prune cache logic
+  const now = Date.now();
+  for (const [k, v] of _movieSearchCache.entries()) {
+    if (now - v.ts > MOVIE_SEARCH_TTL) {
+      _movieSearchCache.delete(k);
+    }
+  }
+
+  if (_movieSearchCache.has(cacheKey)) {
+    return _movieSearchCache.get(cacheKey).data;
+  }
+
+  const KEY = process.env.TMDB_API_KEY;
+  if (!KEY) {
+    console.warn('[searchMovies] TMDB_API_KEY not set');
+    return [];
+  }
+
+  try {
+    const BASE = process.env.TMDB_BASE_URL || 'https://api.tmdb.org/3';
+    const params = new URLSearchParams({
+      api_key: KEY,
+      query: normalizedQuery,
+      page: pageInt,
+      language: 'en-US',
+      region: 'IN',
+      include_adult: 'false'
+    });
+    
+    const res = await fetch(`${BASE}/search/movie?${params}`);
+    if (!res.ok) {
+      console.warn(`[searchMovies] TMDB HTTP ${res.status}`);
+      return [];
+    }
+
+    const data = await res.json();
+    const results = (data.results || [])
+      .filter(m => m.poster_path) // Require poster for UI integrity
+      .map(m => _mapTmdbMovie(m, 'search'));
+
+    _movieSearchCache.set(cacheKey, { data: results, ts: now });
+    return results;
+  } catch (err) {
+    console.warn(`[searchMovies] TMDB error: ${err.message}`);
+    return [];
+  }
+}
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SYSTEM_SHOW_TIMES — fixed daily schedule for auto-generated sessions
@@ -1735,6 +1808,7 @@ module.exports = {
   sendMessage,
   sendPostSessionNotifications,
   debugSessions,
+  searchMovies,
   getMySessions,
   getSuggestionForMovie,
   // Exported for use by expiry job
