@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const Post = require('../models/Post');
 const User = require('../models/User');
+const { generateProfilePreview } = require('../utils/SharePreviewGenerator');
 
 const generateHtml = (ogTitle, ogDescription, ogImage, ogUrl, deepLink) => {
     return `<!DOCTYPE html>
@@ -181,20 +182,16 @@ router.get('/post/:postId', async (req, res) => {
 // GET /profile/:userId
 router.get('/profile/:userId', async (req, res) => {
     try {
-        const user = await User.findById(req.params.userId).select('firstName lastName bio profilePhotoUrl isProfileActive');
+        const user = await User.findById(req.params.userId).select('firstName lastName bio profilePhotoUrl isProfileActive questionnaire isCompanion');
         
         if (!user || !user.isProfileActive) {
             return res.send(generateHtml('Humrah Profile', 'This profile is unavailable.', '', 'https://humrah.in', 'humrah://home'));
         }
 
-        const name = `${user.firstName} ${user.lastName}`.trim();
-        const ogTitle = `${name}'s Profile on Humrah`;
-        const ogDescription = user.bio || `Connect with ${name} on Humrah!`;
-        const ogImage = user.profilePhotoUrl || '';
-        const ogUrl = `https://humrah.in/profile/${user._id}`;
+        const previewData = generateProfilePreview(user);
         const deepLink = `humrah://profile/${user._id}`;
 
-        const html = generateHtml(ogTitle, ogDescription, ogImage, ogUrl, deepLink);
+        const html = generateHtml(previewData.title, previewData.description, previewData.image, previewData.url, deepLink);
         res.send(html);
 
     } catch (err) {
