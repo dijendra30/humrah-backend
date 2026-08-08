@@ -1,19 +1,27 @@
 const AppConfig = require('../models/AppConfig');
 const { uploadBuffer } = require('../config/cloudinary');
 
+const getOrCreateConfig = async () => {
+  let config = await AppConfig.findOne({});
+  if (!config) {
+    config = new AppConfig();
+    await config.save();
+  } else if (config.logoUrl !== undefined) {
+    // Trigger migration hook
+    await config.save();
+  }
+  return config;
+};
+
 // GET /api/admin/branding
 const getBranding = async (req, res) => {
   try {
-    const config = await AppConfig.findOne({});
+    const config = await getOrCreateConfig();
     return res.status(200).json({
       success: true,
-      data: {
-        logoUrl: config?.logoUrl || '',
-        logoVersion: config?.logoVersion || 1,
-        draftLogoUrl: config?.draftLogoUrl || '',
-        draftCreatedAt: config?.draftCreatedAt || null,
-        publishedAt: config?.publishedAt || null,
-        publishedBy: config?.publishedBy || null
+      config: {
+        branding: config.branding,
+        draft: config.draft
       }
     });
   } catch (error) {
@@ -37,7 +45,6 @@ const uploadLogo = async (req, res) => {
       return res.status(400).json({ success: false, message: 'No image file provided' });
     }
 
-    // Validation
     const allowedMimeTypes = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp'];
     if (!allowedMimeTypes.includes(req.file.mimetype)) {
       return res.status(400).json({ success: false, message: 'Unsupported file format' });
@@ -47,23 +54,18 @@ const uploadLogo = async (req, res) => {
       return res.status(400).json({ success: false, message: 'File too large. Maximum 2MB' });
     }
 
-    // Upload to Cloudinary
     const result = await uploadBuffer(req.file.buffer, 'humrah-branding');
 
-    // Upsert AppConfig to store draft
-    let config = await AppConfig.findOne({});
-    if (!config) {
-      config = new AppConfig();
-    }
+    let config = await getOrCreateConfig();
     
-    config.draftLogoUrl = result.url;
-    config.draftCreatedAt = new Date();
+    config.draft.splashLogoUrl = result.url;
+    config.draft.createdAt = new Date();
     await config.save();
 
     return res.status(200).json({
       success: true,
-      message: 'Logo uploaded as draft',
-      draftLogoUrl: config.draftLogoUrl
+      message: 'Splash logo uploaded as draft',
+      draftLogoUrl: config.draft.splashLogoUrl
     });
   } catch (error) {
     console.error('Error uploading logo:', error);
@@ -74,29 +76,29 @@ const uploadLogo = async (req, res) => {
 // POST /api/admin/branding/publish
 const publishLogo = async (req, res) => {
   try {
-    let config = await AppConfig.findOne({});
-    if (!config || !config.draftLogoUrl) {
+    let config = await getOrCreateConfig();
+    if (!config.draft || !config.draft.splashLogoUrl) {
       return res.status(400).json({ success: false, message: 'No draft logo to publish' });
     }
 
-    config.logoUrl = config.draftLogoUrl;
-    config.logoVersion += 1;
-    config.publishedAt = new Date();
-    config.publishedBy = req.user?._id || null;
+    config.branding.remoteBrandingEnabled = true;
+    config.branding.splash.enabled = true;
+    config.branding.splash.logoUrl = config.draft.splashLogoUrl;
+    config.branding.splash.version = config.branding.activeVersion + 1;
+    config.branding.activeVersion += 1;
+    config.branding.updatedAt = new Date();
     
     // Clear draft
-    config.draftLogoUrl = '';
-    config.draftCreatedAt = null;
+    config.draft.splashLogoUrl = null;
+    config.draft.createdAt = null;
 
     await config.save();
 
     return res.status(200).json({
       success: true,
       message: 'Logo published successfully',
-      data: {
-        logoUrl: config.logoUrl,
-        logoVersion: config.logoVersion,
-        publishedAt: config.publishedAt
+      config: {
+        branding: config.branding
       }
     });
   } catch (error) {
@@ -105,8 +107,85 @@ const publishLogo = async (req, res) => {
   }
 };
 
+// POST /api/admin/branding/stop
+const stopRemoteBranding = async (req, res) => {
+  try {
+    let config = await getOrCreateConfig();
+    config.branding.remoteBrandingEnabled = false;
+    config.branding.updatedAt = new Date();
+    await config.save();
+
+    return res.status(200).json({
+      success: true,
+      message: 'Remote branding stopped',
+      config: {
+        branding: config.branding
+      }
+    });
+  } catch (error) {
+    console.error('Error stopping remote branding:', error);
+    return res.status(500).json({ success: false, message: 'Failed to stop remote branding' });
+  }
+};
+
+// POST /api/admin/branding/restore-default
+const restoreDefaultBranding = async (req, res) => {
+  try {
+    let config = await getOrCreateConfig();
+    config.branding.remoteBrandingEnabled = false;
+    config.branding.launcher.mode = 'DEFAULT';
+    config.branding.launcher.variantId = null;
+    config.branding.splash.enabled = false;
+    config.branding.splash.logoUrl = null;
+    config.branding.activeVersion += 1;
+    config.branding.splash.version = config.branding.activeVersion;
+    config.branding.updatedAt = new Date();
+    
+    config.draft.splashLogoUrl = null;
+    config.draft.createdAt = null;
+
+    await config.save();
+
+    return res.status(200).json({
+      success: true,
+      message: 'Restored default branding',
+      config: {
+        branding: config.branding
+      }
+    });
+  } catch (error) {
+    console.error('Error restoring default branding:', error);
+    return res.status(500).json({ success: false, message: 'Failed to restore default branding' });
+  }
+};
+
+// POST /api/admin/branding/delete-draft
+const deleteDraft = async (req, res) => {
+  try {
+    let config = await getOrCreateConfig();
+    config.draft.splashLogoUrl = null;
+    config.draft.createdAt = null;
+    await config.save();
+
+    return res.status(200).json({
+      success: true,
+      message: 'Draft deleted',
+      config: {
+        branding: config.branding,
+        draft: config.draft
+      }
+    });
+  } catch (error) {
+    console.error('Error deleting draft:', error);
+    return res.status(500).json({ success: false, message: 'Failed to delete draft' });
+  }
+};
+
 module.exports = {
   getBranding,
   uploadLogo,
-  publishLogo
+  publishLogo,
+  stopRemoteBranding,
+  restoreDefaultBranding,
+  deleteDraft
 };
