@@ -618,6 +618,9 @@ const liveLocationMatchmakingRoutes = require('./routes/liveLocationMatchmaking'
 const appLinksRoutes = require('./routes/appLinksRoutes');
 app.use('/', appLinksRoutes);
 
+// ✅ Public App Configuration (must be before authenticated routes)
+app.use('/api/app-config', require('./routes/appConfig.route'));
+
 // Health check must stay public and before broad authenticated /api routes.
 // ── Public routes ──────────────────────────────────────────────────────────────
 app.get('/api/health', (req, res) => {
