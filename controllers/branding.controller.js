@@ -25,6 +25,14 @@ const getBranding = async (req, res) => {
 // POST /api/admin/branding/logo (Requires multipart upload middleware)
 const uploadLogo = async (req, res) => {
   try {
+    console.log("Upload request received");
+    console.log("req.file:", req.file ? {
+        fieldname: req.file.fieldname,
+        originalname: req.file.originalname,
+        mimetype: req.file.mimetype,
+        size: req.file.size
+    } : null);
+
     if (!req.file) {
       return res.status(400).json({ success: false, message: 'No image file provided' });
     }
