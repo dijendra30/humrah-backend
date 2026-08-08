@@ -618,6 +618,9 @@ const liveLocationMatchmakingRoutes = require('./routes/liveLocationMatchmaking'
 const appLinksRoutes = require('./routes/appLinksRoutes');
 app.use('/', appLinksRoutes);
 
+// ✅ Public App Configuration (must be before authenticated routes)
+app.use('/api/app-config', require('./routes/appConfig.route'));
+
 // Health check must stay public and before broad authenticated /api routes.
 // ── Public routes ──────────────────────────────────────────────────────────────
 app.get('/api/health', (req, res) => {
@@ -660,6 +663,7 @@ app.use('/api/settings',          authenticate, enforceLegalAcceptance, settings
 app.use('/api/notifications',     authenticate, enforceLegalAcceptance, require('./routes/notifications'));
 app.use('/api/profile-assistant', authenticate, profileAssistantRoutes);
 app.use('/api/admin',             authenticate, require('./routes/admin'));
+app.use('/api/admin/branding',    require('./routes/branding.route'));
 app.use('/api/admin-dashboard',   authenticate, require('./routes/adminDashboard'));
 app.use('/api/admin-analytics',   authenticate, require('./routes/adminAnalytics'));
 app.use('/api/moderation',        authenticate, adminOnly, moderationRoutes);
