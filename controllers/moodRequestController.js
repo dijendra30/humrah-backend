@@ -324,6 +324,7 @@ exports.sendMessage = async (req, res) => {
     // parses them with the same listener (reads 'content', 'timestamp'/'createdAt').
     const otherId = chat.users.find(u => u.toString() !== req.userId.toString());
     try {
+      console.log(`[MESSAGE_SAVED] Message saved to MongoDB for chat ${chatRoomId}`);
       const { io } = require('../server');
       const msgId = chat.messages[chat.messages.length - 1]?._id?.toString() ?? chatRoomId;
       io.to(chatRoomId).emit('new-message', {
@@ -337,6 +338,7 @@ exports.sendMessage = async (req, res) => {
         isSystemMessage: false,
         deliveryStatus:  'SENT',
       });
+      console.log(`[MESSAGE_BROADCAST] Message broadcasted to Socket room ${chatRoomId}`);
     } catch {}
 
     // FCM push — always sent so app-killed/backgrounded users get the notification.
