@@ -190,7 +190,8 @@ io.on('connection', (socket) => {
   const userId   = socket.userId;
   const userName = socket.userName;
 
-  console.log(`[SOCKET CONNECT] socketId=${socket.id} userId=${userId} role=${socket.userRole} transport=${socket.conn.transport.name}`);
+  console.log(`[SOCKET_CONNECTED] socketId=${socket.id} userId=${userId} role=${socket.userRole} transport=${socket.conn.transport.name}`);
+  console.log(`[SOCKET_AUTH_SUCCESS] User ${userId} authenticated successfully`);
 
   socket.join(`user:${userId}`);
   console.log(`[SOCKET JOIN] socketId=${socket.id} userId=${userId} role=${socket.userRole} room=user:${userId}`);
@@ -230,7 +231,7 @@ io.on('connection', (socket) => {
       // Safely get models without throwing MissingSchemaError if not registered yet
       const Chat = mongoose.models.Chat;
       const RandomBookingChat = mongoose.models.RandomBookingChat;
-      const MoodChatRoom = mongoose.models.MoodChatRoom;
+      const MoodChat = mongoose.models.MoodChat;
       
       let isAuthorized = false;
       let chat = null;
@@ -251,20 +252,19 @@ io.on('connection', (socket) => {
           }
         }
         
-        if (!isAuthorized && MoodChatRoom) {
-          chat = await MoodChatRoom.findById(chatId);
-          if (chat && (chat.participants.includes(userId) || chat.participant1?.toString() === userId || chat.participant2?.toString() === userId)) {
+        if (!isAuthorized && MoodChat) {
+          chat = await MoodChat.findById(chatId);
+          if (chat && chat.users && chat.users.some(u => u.toString() === userId)) {
              isAuthorized = true;
           }
         }
       }
 
+      console.log(`[JOIN_CHAT_REQUEST] socketId=${socket.id} userId=${userId} requestedChatId=${chatId}`);
       if (!isAuthorized) {
-        console.warn(`Unauthorized socket join-chat attempt by user ${userId} for chat ${chatId}`);
+        console.warn(`[JOIN_CHAT_REJECTED] Unauthorized socket join-chat attempt by user ${userId} for chat ${chatId}`);
         return; // Reject join
       }
-
-      console.log(`[SOCKET JOIN RECEIVED] socketId=${socket.id} userId=${userId} requestedChatId=${chatId}`);
 
       socket.join(chatId.toString());
       socket.chatId = chatId.toString();
@@ -272,7 +272,7 @@ io.on('connection', (socket) => {
       chatUsers.get(chatId.toString()).add(socket.id);
 
       const roomMembers = Array.from(io.sockets.adapter.rooms.get(chatId.toString()) || []);
-      console.log(`[SOCKET JOIN SUCCESS] socketId=${socket.id} userId=${userId} room=${chatId.toString()} memberCount=${roomMembers.length} members=`, roomMembers);
+      console.log(`[JOIN_CHAT_SUCCESS] socketId=${socket.id} userId=${userId} room=${chatId.toString()} memberCount=${roomMembers.length} members=`, roomMembers);
 
       socket.to(chatId).emit('user-online', { userId, userName });
 
