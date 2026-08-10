@@ -176,7 +176,7 @@ async function fetchRandomBookingChats(userId) {
       unreadCount: 0,
       metadata: {
         status: chat.status,
-        booking: chat.bookingId,
+        booking: chat.bookingId ? (chat.bookingId._id ? chat.bookingId._id.toString() : chat.bookingId.toString()) : null,
         expiresAt: chat.expiresAt
       }
     };
