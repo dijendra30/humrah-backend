@@ -127,7 +127,8 @@ async function fetchStandardChats(userId) {
         isOfficial: isOfficial,
         showVerifiedBadge: showVerifiedBadge,
         role: role,
-        subtitle: subtitle
+        subtitle: subtitle,
+        closedAt: chat.closedAt
       }
     };
   }));
