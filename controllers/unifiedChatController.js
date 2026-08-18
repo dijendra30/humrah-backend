@@ -68,7 +68,18 @@ async function fetchStandardChats(userId) {
     })
     .lean();
 
-  return Promise.all(chats.map(async chat => {
+  const mapped = await Promise.all(chats.map(async chat => {
+    // 5-minute grace period business rule for closed Founder chats:
+    // If closed > 5 minutes ago, hide from the user's unified chat inbox.
+    if (chat.chatType === 'FOUNDER' && (chat.status === 'CLOSED' || chat.status === 'RESOLVED')) {
+      if (chat.closedAt) {
+        const closedMs = new Date(chat.closedAt).getTime();
+        if (Date.now() - closedMs > 5 * 60 * 1000) {
+          return null; // Exceeds 5-min grace period -> hide from user UI
+        }
+      }
+    }
+
     // Determine chat title/avatar based on other participants
     const otherParticipants = chat.participants.filter(p => 
       p.userId && p.userId._id.toString() !== userId.toString()
@@ -121,6 +132,7 @@ async function fetchStandardChats(userId) {
       unreadCount: unreadCount,
       metadata: {
         status: chat.status,
+        closedAt: chat.closedAt,
         linkedReportId: chat.linkedReportId,
         linkedBookingId: chat.linkedBookingId,
         linkedFounderMessageIds: chat.linkedFounderMessageIds,
@@ -131,6 +143,8 @@ async function fetchStandardChats(userId) {
       }
     };
   }));
+
+  return mapped.filter(Boolean);
 }
 
 // Helper: Fetch Random Booking Chats
