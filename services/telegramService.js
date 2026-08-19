@@ -229,10 +229,37 @@ async function notifyFounderChannel(messageDoc) {
     return sendMessage(token, chatId, text);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Bot 4 — Verification Reviews
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Fired when a new verification video is submitted and requires manual review.
+ */
+async function notifyVerificationReview(user, session) {
+    const token  = process.env.TELEGRAM_VERIFICATION_BOT_TOKEN;
+    const chatId = process.env.TELEGRAM_VERIFICATION_CHAT_ID;
+
+    const text = [
+        `🔔 <b>Humrah Verification Review Required</b>`,
+        ``,
+        `User: <b>${esc(user.firstName)} ${esc(user.lastName)}</b>`,
+        `Session: <code>${esc(session.sessionId)}</code>`,
+        `Submitted: ${esc(formatTs(session.createdAt))}`,
+        ``,
+        `Status: <b>MANUAL_REVIEW</b>`,
+        ``,
+        `Action: Open Admin Dashboard and review manually.`
+    ].join('\n');
+
+    return sendMessage(token, chatId, text);
+}
+
 module.exports = {
     notifySafetyChannel,
     notifyEmergencyChannel,
     notifyLocationShared,
     notifyTicketResolved,
-    notifyFounderChannel
+    notifyFounderChannel,
+    notifyVerificationReview
 };
