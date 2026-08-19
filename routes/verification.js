@@ -249,7 +249,7 @@ router.post('/upload-video', auth, (req, res, next) => {
     // Notify UI that video was received and is processing
     const io = req.app.get('io');
     if (io) {
-      io.to(req.userId.toString()).emit('verification_status_updated', {
+      io.to(`user:${req.userId.toString()}`).emit('verification_status_updated', {
         status: 'MANUAL_REVIEW'
       });
     }
@@ -378,7 +378,7 @@ async function processVerificationInBackground(sessionId, userId, io) {
 
       // ✅ Emit real-time socket event to user's private room
       if (io) {
-        io.to(user._id.toString()).emit('verification_status_updated', {
+        io.to(`user:${user._id.toString()}`).emit('verification_status_updated', {
           status: 'approved',
           reviewDeadline: null,
           rejectionReason: null
@@ -400,7 +400,7 @@ async function processVerificationInBackground(sessionId, userId, io) {
 
       // ✅ Emit real-time socket event to user's private room
       if (io) {
-        io.to(user._id.toString()).emit('verification_status_updated', {
+        io.to(`user:${user._id.toString()}`).emit('verification_status_updated', {
           status: 'rejected',
           reviewDeadline: null,
           rejectionReason: result.rejectionReason || 'Verification rejected'
@@ -433,7 +433,7 @@ async function processVerificationInBackground(sessionId, userId, io) {
 
       // ✅ Emit real-time socket event to user's private room
       if (io) {
-        io.to(user._id.toString()).emit('verification_status_updated', {
+        io.to(`user:${user._id.toString()}`).emit('verification_status_updated', {
           status: 'pending',
           reviewDeadline: reviewDeadline.toISOString(),
           rejectionReason: null
@@ -601,7 +601,7 @@ router.post('/admin/approve/:sessionId', auth, async (req, res) => {
     // ✅ Emit real-time socket event on admin approval
     const io = req.app.get('io');
     if (io) {
-      io.to(user._id.toString()).emit('verification_status_updated', {
+      io.to(`user:${user._id.toString()}`).emit('verification_status_updated', {
         status: 'approved',
         reviewDeadline: null,
         rejectionReason: null
@@ -657,7 +657,7 @@ router.post('/admin/reject/:sessionId', auth, async (req, res) => {
     if (user) {
       const io = req.app.get('io');
       if (io) {
-        io.to(user._id.toString()).emit('verification_status_updated', {
+        io.to(`user:${user._id.toString()}`).emit('verification_status_updated', {
           status: 'rejected',
           reviewDeadline: null,
           rejectionReason: session.rejectionReason

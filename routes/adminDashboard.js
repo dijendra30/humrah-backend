@@ -269,6 +269,18 @@ router.post('/verifications/:userId/:action', authenticate, adminOnly, async (re
       return res.status(400).json({ success: false, message: 'Invalid action' });
     }
 
+    // Emit real-time status update to the user
+    const io = req.app.get('io');
+    if (io) {
+      const socketPayload = {
+        sessionId: session ? session.sessionId : null,
+        status: action === 'approve' ? 'APPROVED' : 'REJECTED',
+        rejectionReason: action === 'reject' ? reason : null
+      };
+      io.to(`user:${userId.toString()}`).emit('verification_status_updated', socketPayload);
+      console.log(`[Socket] Emitted verification_status_updated: ${socketPayload.status} to room user:${userId}`);
+    }
+
     // Capture media IDs for async cleanup before clearing them from DB
     const photoIdToDelete = user.verificationPhotoPublicId;
     const videoIdToDelete = session ? session.cloudinaryPublicId : null;
