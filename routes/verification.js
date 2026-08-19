@@ -14,9 +14,9 @@ const { notifyVerificationReview } = require('../services/telegramService');
 // MULTER SETUP FOR VIDEO UPLOAD
 // =============================================
 const upload = multer({
-  storage: multer.memoryStorage(),
+  storage: multer.memoryStorage(), // Note: 50MB max per concurrent upload in Node heap
   limits: {
-    fileSize: 15 * 1024 * 1024 // 15MB limit
+    fileSize: 50 * 1024 * 1024 // 50MB limit (Increased to safely accommodate CameraX verification videos)
   },
   fileFilter: (req, file, cb) => {
     if (file.mimetype.startsWith('video/')) {
@@ -121,7 +121,25 @@ router.post('/start', auth, async (req, res) => {
 // @route   POST /api/verification/upload-video
 // @desc    Upload verification video from Android
 // @access  Private
-router.post('/upload-video', auth, upload.single('video'), async (req, res) => {
+router.post('/upload-video', auth, (req, res, next) => {
+  upload.single('video')(req, res, (err) => {
+    if (err instanceof multer.MulterError) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        console.error(`❌ [Upload] File too large error for user ${req.userId}`);
+        return res.status(413).json({ 
+          success: false, 
+          message: 'Verification video is too large. Maximum allowed size is 50 MB.' 
+        });
+      }
+      console.error(`❌ [Upload] Multer error:`, err);
+      return res.status(400).json({ success: false, message: `Upload error: ${err.message}` });
+    } else if (err) {
+      console.error(`❌ [Upload] Unknown error:`, err);
+      return res.status(500).json({ success: false, message: err.message || 'Unknown upload error' });
+    }
+    next();
+  });
+}, async (req, res) => {
   try {
     console.log("========== VIDEO REQUEST ==========");
     console.log("sessionId:", req.body.sessionId);
