@@ -8,6 +8,7 @@ const { uploadVerificationVideo, deleteVideo } = require('../config/cloudinary')
 const crypto = require('crypto');
 const multer = require('multer');
 const { processVerificationVideo } = require('../services/verificationProcessor');
+const { notifyVerificationReview } = require('../services/telegramService');
 
 // =============================================
 // MULTER SETUP FOR VIDEO UPLOAD
@@ -196,29 +197,38 @@ router.post('/upload-video', auth, upload.single('video'), async (req, res) => {
     session.videoUrl = cloudinaryResult.url;
     session.cloudinaryPublicId = cloudinaryResult.publicId;
     session.cloudinaryUrl = cloudinaryResult.url;
-    session.status = 'PROCESSING';
+    session.status = 'MANUAL_REVIEW'; // Bypass AI, go straight to manual review
     
     console.log("Saving session:");
     console.log({
        videoUrl: session.videoUrl,
-       cloudinaryPublicId: session.cloudinaryPublicId
+       cloudinaryPublicId: session.cloudinaryPublicId,
+       status: session.status
     });
 
     await session.save();
 
-    console.log("Saved session:");
-    console.log(session);
+    // Synchronize User profile status so Android UI knows it's pending review
+    const updatedUser = await User.findByIdAndUpdate(
+      req.userId,
+      { photoVerificationStatus: 'pending' },
+      { new: true }
+    );
+
+    console.log("Saved session and updated user status to 'pending'");
     
-    // Start processing in background (don't wait)
-    // ✅ Pass the app's io instance so background job can emit socket events
-    const io = req.app.get('io');
-    processVerificationInBackground(session._id, req.userId, io);
+    // Notify admin team via Telegram (fire and forget)
+    if (updatedUser) {
+        notifyVerificationReview(updatedUser, session).catch(err => 
+            console.error('[Telegram] Failed to notify verification review:', err)
+        );
+    }
     
     res.json({
       success: true,
-      message: 'Video uploaded successfully. Processing started.',
+      message: 'Video uploaded successfully. Sent for manual review.',
       sessionId: session.sessionId,
-      status: 'PROCESSING'
+      status: 'MANUAL_REVIEW'
     });
     
   } catch (error) {
