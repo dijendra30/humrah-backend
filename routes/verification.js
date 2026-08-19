@@ -242,7 +242,10 @@ router.post('/upload-video', auth, (req, res, next) => {
     // Synchronize User profile status so Android UI knows it's pending review
     const updatedUser = await User.findByIdAndUpdate(
       req.userId,
-      { photoVerificationStatus: 'pending' },
+      { 
+        photoVerificationStatus: 'pending',
+        verificationStatus: 'pending' 
+      },
       { new: true }
     );
 

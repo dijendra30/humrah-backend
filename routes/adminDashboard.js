@@ -27,7 +27,8 @@ router.get('/dashboard/stats', authenticate, adminOnly, async (req, res) => {
       totalUsers,
       activeUsersToday,
       verifiedUsers,
-      pendingVerifications,
+      legacyPendingCount,
+      videoPendingCount,
       totalCompanions,
       activeBookings,
       waitingForSafetyTeam,
@@ -49,8 +50,9 @@ router.get('/dashboard/stats', authenticate, adminOnly, async (req, res) => {
     ] = await Promise.all([
       User.countDocuments({ role: 'USER' }),
       User.countDocuments({ role: 'USER', lastActive: { $gte: today } }),
-      User.countDocuments({ role: 'USER', photoVerificationStatus: 'approved' }),
-      User.countDocuments({ role: 'USER', 'verificationInfo.status': 'PENDING' }), // Assuming this field exists
+      User.countDocuments({ role: 'USER', $or: [{ photoVerificationStatus: 'approved' }, { verificationStatus: 'approved' }] }),
+      User.countDocuments({ role: 'USER', $or: [{ photoVerificationStatus: 'pending' }, { verificationStatus: 'pending' }] }),
+      VerificationSession.countDocuments({ status: 'MANUAL_REVIEW' }),
       User.countDocuments({ role: 'COMPANION' }), // Assuming role COMPANION or similar exists
       Booking ? Booking.countDocuments({ status: 'CONFIRMED' }) : 0,
       SafetyTicket.countDocuments({ status: 'WAITING_FOR_SAFETY_TEAM' }),
@@ -71,6 +73,9 @@ router.get('/dashboard/stats', authenticate, adminOnly, async (req, res) => {
       Broadcast.aggregate([{ $group: { _id: null, total: { $sum: '$deliveredCount' }, opens: { $sum: '$openedCount' } } }])
     ]);
 
+    // Calculate total pending
+    const pendingVerifications = legacyPendingCount + videoPendingCount;
+    
     const broadcastTotals = totalPushNotifications.length > 0 ? totalPushNotifications[0] : { total: 0, opens: 0 };
     const avgOpenRate = broadcastTotals.total > 0 ? ((broadcastTotals.opens / broadcastTotals.total) * 100).toFixed(1) : 0;
 
@@ -244,6 +249,7 @@ router.post('/verifications/:userId/:action', authenticate, adminOnly, async (re
 
     if (action === 'approve') {
       user.photoVerificationStatus = 'approved';
+      user.verificationStatus = 'approved';
       user.photoVerifiedAt = new Date();
       user.verified = user.isFullyVerified();
       if (session) {
@@ -254,6 +260,7 @@ router.post('/verifications/:userId/:action', authenticate, adminOnly, async (re
       }
     } else if (action === 'reject') {
       user.photoVerificationStatus = 'rejected';
+      user.verificationStatus = 'rejected';
       user.verified = user.isFullyVerified();
       if (reason) {
         user.photoRejectionReason = reason;
