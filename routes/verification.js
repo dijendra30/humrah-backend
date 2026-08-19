@@ -141,20 +141,26 @@ router.post('/upload-video', auth, (req, res, next) => {
   });
 }, async (req, res) => {
   try {
-    console.log("========== VIDEO REQUEST ==========");
-    console.log("sessionId:", req.body.sessionId);
-    console.log("req.file:", req.file);
-    console.log("req.body:", req.body);
-
+    console.log("========== FORENSIC DIAGNOSTIC LOG (BACKEND) ==========");
+    console.log("body keys:", Object.keys(req.body));
+    console.log("raw sessionId from body:", req.body.sessionId);
+    console.log("type of sessionId:", typeof req.body.sessionId);
+    console.log("req.file exists:", !!req.file);
     if (req.file) {
       console.log("size:", req.file.size);
       console.log("mime:", req.file.mimetype);
-    } else {
-      console.log("NO VIDEO FILE RECEIVED");
+    }
+    console.log("req.userId:", req.userId);
+    console.log("=======================================================");
+
+    let { sessionId } = req.body;
+    
+    // Sometimes Retrofit sends text parts with extra quotes depending on converter
+    if (sessionId && sessionId.startsWith('"') && sessionId.endsWith('"')) {
+      sessionId = sessionId.replace(/^"|"$/g, '');
+      console.log("Cleaned sessionId:", sessionId);
     }
 
-    const { sessionId } = req.body;
-    
     if (!req.file) {
       return res.status(400).json({ 
         success: false, 
@@ -162,19 +168,26 @@ router.post('/upload-video', auth, (req, res, next) => {
       });
     }
     
-    console.log(`[VIDEO UPLOAD RECEIVED]`, { sessionId, fileSize: req.file.size, mimeType: req.file.mimetype });
     console.log(`📥 [Upload] Received video for session ${sessionId}`);
-    console.log(`📦 [Upload] Video size: ${(req.file.size / 1024 / 1024).toFixed(2)} MB`);
     console.log(`👤 [Upload] User ID: ${req.userId}`);
     
     // Verify session exists and belongs to user
-    const session = await VerificationSession.findOne({
+    const query = {
       sessionId,
       userId: req.userId,
       status: 'PENDING'
-    });
+    };
+    console.log("Querying MongoDB with:", query);
+    
+    const session = await VerificationSession.findOne(query);
     
     if (!session) {
+      console.log(`❌ [Upload] Session not found! Checking if it exists AT ALL for this sessionId...`);
+      const anySession = await VerificationSession.findOne({ sessionId });
+      console.log("Any session found:", !!anySession);
+      if (anySession) {
+         console.log("Session's userId:", anySession.userId, "Status:", anySession.status);
+      }
       return res.status(404).json({
         success: false,
         message: 'Session not found or already processed'
@@ -233,7 +246,13 @@ router.post('/upload-video', auth, (req, res, next) => {
       { new: true }
     );
 
-    console.log("Saved session and updated user status to 'pending'");
+    // Notify UI that video was received and is processing
+    const io = req.app.get('io');
+    if (io) {
+      io.to(req.userId.toString()).emit('verification_status_updated', {
+        status: 'MANUAL_REVIEW'
+      });
+    }
     
     // Notify admin team via Telegram (fire and forget)
     if (updatedUser) {
