@@ -443,6 +443,19 @@ const userSchema = new mongoose.Schema({
   photoVerifiedAt:                  { type: Date,   default: null },
   photoVerifiedBy:                  { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   photoRejectionReason:             { type: String, default: null },
+  
+  // =============================================
+  // AUTHORITATIVE VERIFICATION STATE
+  // =============================================
+  // Synchronized field for efficient profile and admin access.
+  // Replaces the legacy photoVerificationStatus for all new verifications.
+  verificationStatus: {
+    type: String,
+    enum: ['unverified', 'pending', 'approved', 'rejected'],
+    default: 'unverified',
+    index: true
+  },
+  
   emailVerificationOTP:             { type: String, default: null },
   emailVerificationExpires:         { type: Date,   default: null },
 
@@ -674,6 +687,8 @@ userSchema.methods.getPublicProfile = function() {
     lastName: this.lastName,
     profilePhoto: this.profilePhoto,
     verified: this.verified,
+    photoVerificationStatus: this.photoVerificationStatus,
+    verificationStatus: this.verificationStatus,
     isPremium: this.isPremium,
     userType: this.userType,
     questionnaire: {
@@ -742,6 +757,7 @@ userSchema.methods.getPrivateProfile = function() {
     verificationPhoto: this.verificationPhoto,
     verificationPhotoPublicId: this.verificationPhotoPublicId,
     photoVerificationStatus: this.photoVerificationStatus,
+    verificationStatus: this.verificationStatus,
     verificationPhotoSubmittedAt: this.verificationPhotoSubmittedAt,
     photoVerifiedAt: this.photoVerifiedAt,
     photoRejectionReason: this.photoRejectionReason,
