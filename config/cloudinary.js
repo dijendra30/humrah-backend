@@ -83,7 +83,7 @@ const uploadVerificationVideo = async (buffer, sessionId) => {
       {
         folder: `verification-temp/${sessionId}`,
         resource_type: 'video',
-        type: 'authenticated', // Private, not public
+        type: 'upload', // Changed from 'authenticated' to 'upload' to bypass tier restrictions
         format: 'mp4',
         invalidate: true,
         eager: '', // No transformations
@@ -136,10 +136,9 @@ const deleteVideo = async (publicId) => {
     console.log(`[DELETE VIDEO CALLED]`);
     console.log(`[VIDEO PUBLIC ID] ${publicId}`);
     
-    // NOTE: Added type: 'authenticated' because verification videos are uploaded as authenticated
+    // NOTE: Removed type: 'authenticated' since verification videos are now 'upload'
     const result = await cloudinary.uploader.destroy(publicId, {
       resource_type: 'video',
-      type: 'authenticated',
       invalidate: true
     });
     

@@ -27,7 +27,8 @@ router.get('/dashboard/stats', authenticate, adminOnly, async (req, res) => {
       totalUsers,
       activeUsersToday,
       verifiedUsers,
-      pendingVerifications,
+      legacyPendingCount,
+      videoPendingCount,
       totalCompanions,
       activeBookings,
       waitingForSafetyTeam,
@@ -49,8 +50,9 @@ router.get('/dashboard/stats', authenticate, adminOnly, async (req, res) => {
     ] = await Promise.all([
       User.countDocuments({ role: 'USER' }),
       User.countDocuments({ role: 'USER', lastActive: { $gte: today } }),
-      User.countDocuments({ role: 'USER', photoVerificationStatus: 'approved' }),
-      User.countDocuments({ role: 'USER', 'verificationInfo.status': 'PENDING' }), // Assuming this field exists
+      User.countDocuments({ role: 'USER', $or: [{ photoVerificationStatus: 'approved' }, { verificationStatus: 'approved' }] }),
+      User.countDocuments({ role: 'USER', $or: [{ photoVerificationStatus: 'pending' }, { verificationStatus: 'pending' }] }),
+      VerificationSession.countDocuments({ status: 'MANUAL_REVIEW' }),
       User.countDocuments({ role: 'COMPANION' }), // Assuming role COMPANION or similar exists
       Booking ? Booking.countDocuments({ status: 'CONFIRMED' }) : 0,
       SafetyTicket.countDocuments({ status: 'WAITING_FOR_SAFETY_TEAM' }),
@@ -71,6 +73,9 @@ router.get('/dashboard/stats', authenticate, adminOnly, async (req, res) => {
       Broadcast.aggregate([{ $group: { _id: null, total: { $sum: '$deliveredCount' }, opens: { $sum: '$openedCount' } } }])
     ]);
 
+    // Calculate total pending
+    const pendingVerifications = legacyPendingCount + videoPendingCount;
+    
     const broadcastTotals = totalPushNotifications.length > 0 ? totalPushNotifications[0] : { total: 0, opens: 0 };
     const avgOpenRate = broadcastTotals.total > 0 ? ((broadcastTotals.opens / broadcastTotals.total) * 100).toFixed(1) : 0;
 
@@ -124,9 +129,30 @@ const VerificationSession = require('../models/VerificationSession');
 router.get('/verifications/analytics', authenticate, adminOnly, async (req, res) => {
   try {
     const totalUsers = await User.countDocuments({ role: 'USER' });
-    const approved = await VerificationSession.countDocuments({ status: 'APPROVED' });
-    const pending = await VerificationSession.countDocuments({ status: 'MANUAL_REVIEW' });
-    const rejected = await VerificationSession.countDocuments({ status: 'REJECTED' });
+    
+    // Prevent double counting by finding users with sessions and excluding them from legacy queries
+    const pendingSessionUserIds = await VerificationSession.distinct('userId', { status: 'MANUAL_REVIEW' });
+    const legacyPendingOnly = await User.countDocuments({ 
+      _id: { $nin: pendingSessionUserIds }, 
+      photoVerificationStatus: 'pending', 
+      verificationPhoto: { $ne: null } 
+    });
+    
+    const approvedSessionUserIds = await VerificationSession.distinct('userId', { status: 'APPROVED' });
+    const legacyApprovedOnly = await User.countDocuments({
+      _id: { $nin: approvedSessionUserIds },
+      photoVerificationStatus: 'approved'
+    });
+    
+    const rejectedSessionUserIds = await VerificationSession.distinct('userId', { status: 'REJECTED' });
+    const legacyRejectedOnly = await User.countDocuments({
+      _id: { $nin: rejectedSessionUserIds },
+      photoVerificationStatus: 'rejected'
+    });
+
+    const pending = pendingSessionUserIds.length + legacyPendingOnly;
+    const approved = approvedSessionUserIds.length + legacyApprovedOnly;
+    const rejected = rejectedSessionUserIds.length + legacyRejectedOnly;
     
     // Funnel data
     const submitted = approved + pending + rejected;
@@ -146,42 +172,17 @@ const { getAuthenticatedUrl } = require('../config/cloudinary');
 
 router.get('/verifications/pending', authenticate, adminOnly, async (req, res) => {
   try {
-    const sessions = await VerificationSession.find({ status: 'MANUAL_REVIEW' })
-      .populate('userId', 'firstName lastName email profilePhoto')
-      .sort({ createdAt: -1 });
+    const [sessions, pendingSessionUserIds] = await Promise.all([
+      VerificationSession.find({ status: 'MANUAL_REVIEW' })
+        .populate('userId', 'firstName lastName email profilePhoto')
+        .sort({ createdAt: -1 }),
+      VerificationSession.distinct('userId', { status: 'MANUAL_REVIEW' })
+    ]);
       
-    const formatted = sessions
+    const formattedSessions = sessions
       .filter(session => session.userId)
       .map(session => {
-        console.log("Verification session:");
-        console.log(session);
-
-        console.log("videoUrl:", session.videoUrl);
-        console.log("cloudinaryPublicId:", session.cloudinaryPublicId);
-
-        // ✅ FIX: Videos are uploaded as type:'authenticated' in Cloudinary, so
-        // session.videoUrl (the raw secure_url) is NOT directly playable in a
-        // browser.  We must ALWAYS generate a signed URL from cloudinaryPublicId.
-        // The old guard `if (!videoUrl && ...)` was dead code because videoUrl
-        // was always set — meaning the signed-URL path was never reached.
-        let videoUrl = null;
-        if (session.cloudinaryPublicId) {
-          try {
-            // Must append .mp4 BEFORE signing — Cloudinary treats extension as
-            // part of the signed payload and rejects mismatches.
-            const publicIdWithExtension = session.cloudinaryPublicId.endsWith('.mp4')
-              ? session.cloudinaryPublicId
-              : `${session.cloudinaryPublicId}.mp4`;
-
-            videoUrl = getAuthenticatedUrl(publicIdWithExtension, 'video');
-            console.log("Generated signed videoUrl:", videoUrl);
-          } catch (e) {
-            console.error('Failed to generate signed video URL', e);
-            // Fallback to raw stored URL (won't play for authenticated resources,
-            // but better than nothing for debugging)
-            videoUrl = session.videoUrl || null;
-          }
-        }
+        let videoUrl = session.videoUrl || null;
 
         return {
           _id: session.userId._id, // User ID for backwards compatibility
@@ -191,11 +192,33 @@ router.get('/verifications/pending', authenticate, adminOnly, async (req, res) =
           email: session.userId.email,
           profilePhoto: session.userId.profilePhoto,
           verificationVideoUrl: videoUrl,
-          createdAt: session.createdAt
+          createdAt: session.createdAt,
+          verificationType: 'VIDEO'
         };
       });
+      
+    const legacyUsers = await User.find({ 
+      _id: { $nin: pendingSessionUserIds },
+      photoVerificationStatus: 'pending', 
+      verificationPhoto: { $ne: null } 
+    }).sort({ verificationPhotoSubmittedAt: -1 });
+
+    const formattedLegacy = legacyUsers.map(user => {
+      return {
+        _id: user._id,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        email: user.email,
+        profilePhoto: user.profilePhoto,
+        verificationPhoto: user.verificationPhoto,
+        createdAt: user.verificationPhotoSubmittedAt || user.createdAt,
+        verificationType: 'PHOTO'
+      };
+    });
+
+    const allVerifications = [...formattedSessions, ...formattedLegacy].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     
-    res.json({ success: true, verifications: formatted });
+    res.json({ success: true, verifications: allVerifications });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Failed to fetch pending verifications' });
   }
@@ -213,9 +236,10 @@ router.post('/verifications/:userId/:action', authenticate, adminOnly, async (re
     const session = await VerificationSession.findOne({ userId, status: 'MANUAL_REVIEW' }).sort({ createdAt: -1 });
 
     if (action === 'approve') {
-      user.verified = true;
       user.photoVerificationStatus = 'approved';
+      user.verificationStatus = 'approved';
       user.photoVerifiedAt = new Date();
+      user.verified = user.isFullyVerified();
       if (session) {
         session.status = 'APPROVED';
         session.result = 'APPROVED';
@@ -223,8 +247,9 @@ router.post('/verifications/:userId/:action', authenticate, adminOnly, async (re
         session.reviewedAt = new Date();
       }
     } else if (action === 'reject') {
-      user.verified = false;
       user.photoVerificationStatus = 'rejected';
+      user.verificationStatus = 'rejected';
+      user.verified = user.isFullyVerified();
       if (reason) {
         user.photoRejectionReason = reason;
         if (session) session.rejectionReason = reason;
@@ -237,6 +262,18 @@ router.post('/verifications/:userId/:action', authenticate, adminOnly, async (re
       }
     } else {
       return res.status(400).json({ success: false, message: 'Invalid action' });
+    }
+
+    // Emit real-time status update to the user
+    const io = req.app.get('io');
+    if (io) {
+      const socketPayload = {
+        sessionId: session ? session.sessionId : null,
+        status: action === 'approve' ? 'APPROVED' : 'REJECTED',
+        rejectionReason: action === 'reject' ? reason : null
+      };
+      io.to(`user:${userId.toString()}`).emit('verification_status_updated', socketPayload);
+      console.log(`[Socket] Emitted verification_status_updated: ${socketPayload.status} to room user:${userId}`);
     }
 
     // Capture media IDs for async cleanup before clearing them from DB

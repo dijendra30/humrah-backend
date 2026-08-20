@@ -165,13 +165,6 @@ verificationSessionSchema.statics.cleanupExpiredSessions = async function() {
   return result;
 };
 
-// =============================================
-// HOOKS
-// =============================================
-verificationSessionSchema.pre('find', async function() {
-  this.model.cleanupExpiredSessions().catch(err => {
-    console.error('Error cleaning up expired sessions:', err);
-  });
-});
+// Removed pre-find hook. Cleanup should be handled by a cron/worker.
 
 module.exports = mongoose.model('VerificationSession', verificationSessionSchema);

@@ -814,12 +814,16 @@ router.post('/send-otp-registration', sendOtpLimiter, async (req, res) => {
 
     const normalizedEmail = email.toLowerCase().trim();
 
-    // ── User enumeration protection ──────────────────────────────────────────
-    // Always return generic success — attacker learns nothing from the response.
+    // ── Email Existence Check ────────────────────────────────────────────────
+    // Return 409 Conflict if email already exists to let clients handle it securely
     const existingUser = await User.findOne({ email: normalizedEmail }).select('_id');
     if (existingUser) {
       if (existingUser.ensureGuidelinesMigration) await existingUser.ensureGuidelinesMigration();
-      return res.json({ success: true, message: 'If this email is valid, an OTP has been sent.' });
+      return res.status(409).json({
+        success: false,
+        code: 'EMAIL_ALREADY_EXISTS',
+        message: 'This email is already associated with a Humrah account. Please log in to continue.'
+      });
     }
 
     // ── Delegate all OTP logic to otpService (handles cooldown, hash, email) ─
