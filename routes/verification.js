@@ -92,7 +92,7 @@ router.post('/start', auth, async (req, res) => {
       instructions: selectedInstructions,
       status: 'PENDING',
       createdAt: new Date(),
-      expiresAt: new Date(Date.now() + 10 * 60 * 1000) // 10 minutes
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000) // 24 hours
     });
     
     console.log(`✅ [Verification] Session created: ${sessionId} for user ${req.userId}`);
@@ -102,7 +102,7 @@ router.post('/start', auth, async (req, res) => {
       sessionId: session.sessionId,
       instructions: selectedInstructions,
       duration: 6, // 6 seconds max
-      expiresIn: 600 // 10 minutes in seconds
+      expiresIn: 86400 // 24 hours in seconds
     });
     
   } catch (error) {
