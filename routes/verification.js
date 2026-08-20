@@ -7,7 +7,6 @@ const VerificationSession = require('../models/VerificationSession');
 const { uploadVerificationVideo, deleteVideo } = require('../config/cloudinary');
 const crypto = require('crypto');
 const multer = require('multer');
-const { processVerificationVideo } = require('../services/verificationProcessor');
 const { notifyVerificationReview } = require('../services/telegramService');
 
 // =============================================
@@ -174,23 +173,37 @@ router.post('/upload-video', auth, (req, res, next) => {
     // Verify session exists and belongs to user
     const query = {
       sessionId,
-      userId: req.userId,
-      status: 'PENDING'
+      userId: req.userId
     };
     console.log("Querying MongoDB with:", query);
     
     const session = await VerificationSession.findOne(query);
     
     if (!session) {
-      console.log(`❌ [Upload] Session not found! Checking if it exists AT ALL for this sessionId...`);
-      const anySession = await VerificationSession.findOne({ sessionId });
-      console.log("Any session found:", !!anySession);
-      if (anySession) {
-         console.log("Session's userId:", anySession.userId, "Status:", anySession.status);
-      }
+      console.log(`❌ [Upload] Session not found AT ALL for this sessionId...`);
       return res.status(404).json({
         success: false,
-        message: 'Session not found or already processed'
+        message: 'Session not found'
+      });
+    }
+
+    // Phase 10: IDEMPOTENCY
+    // If Android network timed out after successful backend processing, 
+    // it will retry. We must return success immediately without re-uploading.
+    if (session.status === 'MANUAL_REVIEW' || session.status === 'APPROVED') {
+      console.log(`✅ [Upload] Idempotent retry detected for session ${sessionId}, already processed.`);
+      return res.json({
+        success: true,
+        message: 'Video already uploaded successfully. Sent for manual review.',
+        sessionId: session.sessionId,
+        status: session.status
+      });
+    }
+
+    if (session.status !== 'PENDING') {
+      return res.status(400).json({
+        success: false,
+        message: `Session cannot be processed in state: ${session.status}`
       });
     }
     
@@ -319,175 +332,6 @@ router.get('/status/:sessionId', auth, async (req, res) => {
     });
   }
 });
-
-// =============================================
-// BACKGROUND PROCESSING FUNCTION
-// =============================================
-// ✅ io parameter added — allows emitting real-time socket events to the user
-async function processVerificationInBackground(sessionId, userId, io) {
-  try {
-    console.log(`\n🎬 [Verification] Starting background processing...`);
-    
-    const session = await VerificationSession.findById(sessionId);
-    const user = await User.findById(userId);
-    
-    if (!session || !user) {
-      console.error('❌ [Verification] Session or user not found');
-      return;
-    }
-    
-    console.log(`👤 [Verification] Processing for user: ${user.email}`);
-    console.log(`📹 [Verification] Video ID: ${session.cloudinaryPublicId}`);
-    
-    // =============================================
-    // CALL THE VERIFICATION PROCESSOR
-    // =============================================
-    const result = await processVerificationVideo(
-      session.cloudinaryPublicId,
-      user,
-      session
-    );
-    
-    console.log(`📊 [Verification] Processing complete. Decision: ${result.decision}`);
-    
-    // =============================================
-    // UPDATE SESSION WITH RESULTS
-    // =============================================
-    session.status = result.decision;
-    session.result = result.decision;
-    session.confidence = result.confidence;
-    session.livenessScore = result.livenessScore;
-    session.faceMatchScore = result.faceMatchScore;
-    session.rejectionReason = result.rejectionReason;
-    session.processedAt = new Date();
-    
-    // =============================================
-    // HANDLE APPROVAL
-    // =============================================
-    if (result.decision === 'APPROVED') {
-      session.faceEmbedding = result.faceEmbedding;
-      
-      // Mark user as verified
-      await user.markVerifiedViaVideo(result.faceEmbedding);
-      // Sync photoVerificationStatus so booking routes don't block this user
-      user.photoVerificationStatus = 'approved';
-      user.photoVerifiedAt = new Date();
-      await user.save();
-      
-      console.log(`✅ [Verification] User ${user._id} APPROVED and marked as verified`);
-      
-      // Send success notification
-      await sendVerificationResultNotification(user, 'APPROVED');
-
-      // ✅ Emit real-time socket event to user's private room
-      if (io) {
-        io.to(`user:${user._id.toString()}`).emit('verification_status_updated', {
-          status: 'approved',
-          reviewDeadline: null,
-          rejectionReason: null
-        });
-        console.log(`🔔 [Socket] Emitted approved to user ${user._id}`);
-      }
-    }
-    
-    // =============================================
-    // HANDLE REJECTION
-    // =============================================
-    else if (result.decision === 'REJECTED') {
-      await user.recordVerificationRejection(result.rejectionReason, session.sessionId);
-      
-      console.log(`❌ [Verification] User ${user._id} REJECTED: ${result.rejectionReason}`);
-      
-      // Send rejection notification
-      await sendVerificationResultNotification(user, 'REJECTED', result.rejectionReason);
-
-      // ✅ Emit real-time socket event to user's private room
-      if (io) {
-        io.to(`user:${user._id.toString()}`).emit('verification_status_updated', {
-          status: 'rejected',
-          reviewDeadline: null,
-          rejectionReason: result.rejectionReason || 'Verification rejected'
-        });
-        console.log(`🔔 [Socket] Emitted rejected to user ${user._id}`);
-      }
-    }
-    
-    // =============================================
-    // HANDLE MANUAL REVIEW
-    // =============================================
-    else if (result.decision === 'MANUAL_REVIEW') {
-      session.faceEmbedding = result.faceEmbedding;
-
-      // ✅ Stamp review window timestamps on the session
-      const now = new Date();
-      const reviewDeadline = new Date(now.getTime() + 24 * 60 * 60 * 1000); // +24 hours
-      session.manualReviewStartedAt = now;
-      session.reviewDeadline = reviewDeadline;
-
-      // ✅ FIX: Update user.photoVerificationStatus so REST API reflects correct state
-      user.photoVerificationStatus = 'pending';
-      user.verificationPhotoSubmittedAt = now;
-      await user.save();
-      
-      console.log(`⚠️ [Verification] User ${user._id} needs MANUAL REVIEW (deadline: ${reviewDeadline.toISOString()})`);
-      
-      // Notify admins
-      await notifyAdminsForManualReview(session, user);
-
-      // ✅ Emit real-time socket event to user's private room
-      if (io) {
-        io.to(`user:${user._id.toString()}`).emit('verification_status_updated', {
-          status: 'pending',
-          reviewDeadline: reviewDeadline.toISOString(),
-          rejectionReason: null
-        });
-        console.log(`🔔 [Socket] Emitted pending (manual review) to user ${user._id} (deadline: ${reviewDeadline.toISOString()})`);
-      }
-    }
-    
-    await session.save();
-    
-    // =============================================
-    // CLOUDINARY CLEANUP LIFECYCLE
-    // =============================================
-    if (result.decision === 'APPROVED' || result.decision === 'REJECTED') {
-      try {
-        console.log(`[Cleanup Decision] AI decision was ${result.decision}. Deleting Cloudinary video...`);
-        await deleteVideo(session.cloudinaryPublicId);
-        session.videoDeletedAt = new Date();
-        await session.save();
-        console.log(`🗑️ [Verification] Video deleted from Cloudinary`);
-      } catch (deleteError) {
-        console.error('⚠️ [Verification] Failed to delete video:', deleteError);
-      }
-    } else if (result.decision === 'MANUAL_REVIEW') {
-      console.log(`[Cleanup Decision] AI decision was MANUAL_REVIEW. Bypassing Cloudinary deletion to preserve asset for admin review.`);
-    }
-    
-    console.log(`\n✅ [Verification] Processing complete for session ${session.sessionId}`);
-    
-  } catch (error) {
-    console.error('❌ [Verification] Background processing error:', error);
-    
-    // Update session to failed state
-    try {
-      const session = await VerificationSession.findById(sessionId);
-      if (session) {
-        session.status = 'FAILED';
-        session.rejectionReason = 'Processing error occurred';
-        session.processedAt = new Date();
-        await session.save();
-        
-        // Try to delete video even on error
-        if (session.cloudinaryPublicId) {
-          await deleteVideo(session.cloudinaryPublicId);
-        }
-      }
-    } catch (updateError) {
-      console.error('❌ [Verification] Failed to update session:', updateError);
-    }
-  }
-}
 
 // =============================================
 // GET USER VERIFICATION HISTORY (Admin)
