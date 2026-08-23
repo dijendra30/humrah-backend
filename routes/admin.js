@@ -5,6 +5,8 @@ const User = require('../models/User');
 const SafetyReport = require('../models/SafetyReport');
 const AuditLog = require('../models/AuditLog');
 const PostReport = require('../models/PostReport');
+const Post = require('../models/Post');
+const FoodPost = require('../models/FoodPost');
 const { authenticate, authorize, superAdminOnly, adminOnly, auditLog } = require('../middleware/auth');
 
 
@@ -271,9 +273,17 @@ router.post('/users/ban', authenticate, superAdminOnly, auditLog('BAN_USER', 'US
       banReason: reason,
       isPermanent
     };
-
     user.status = 'BANNED';
     await user.save();
+
+    // ── COMMUNITY SAFETY ARCHITECTURE ──
+    // If permanent ban, instantly hide user's Community content
+    if (isPermanent === true) {
+      await Promise.all([
+        Post.updateMany({ userId: user._id }, { $set: { isActive: false } }),
+        FoodPost.updateMany({ userId: user._id }, { $set: { isActive: false } })
+      ]);
+    }
 
     // If linked to report, add action
     if (reportId) {
@@ -360,6 +370,13 @@ router.delete('/users/:userId/ban', authenticate, superAdminOnly, auditLog('UNBA
     };
     user.status = 'ACTIVE';
     await user.save();
+
+    // ── COMMUNITY SAFETY ARCHITECTURE ──
+    // Restore Community content visibility
+    await Promise.all([
+      Post.updateMany({ userId: user._id }, { $set: { isActive: true } }),
+      FoodPost.updateMany({ userId: user._id }, { $set: { isActive: true } })
+    ]);
 
     res.json({
       success: true,
