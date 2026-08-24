@@ -235,6 +235,13 @@ router.post('/verifications/:userId/:action', authenticate, adminOnly, async (re
     // Find the pending session
     const session = await VerificationSession.findOne({ userId, status: 'MANUAL_REVIEW' }).sort({ createdAt: -1 });
 
+    if (action === 'reject' && user.photoVerificationStatus === 'rejected') {
+      return res.json({ success: true, message: 'Verification already rejected', status: 'REJECTED' });
+    }
+    if (action === 'approve' && user.photoVerificationStatus === 'approved') {
+      return res.json({ success: true, message: 'Verification already approved', status: 'APPROVED' });
+    }
+
     if (action === 'approve') {
       user.photoVerificationStatus = 'approved';
       user.verificationStatus = 'approved';
@@ -247,14 +254,30 @@ router.post('/verifications/:userId/:action', authenticate, adminOnly, async (re
         session.reviewedAt = new Date();
       }
     } else if (action === 'reject') {
+      const providedReason = req.body.rejectionReason || req.body.reason;
+      const rejectionReason = typeof providedReason === 'string' ? providedReason.trim() : '';
+      
+      if (rejectionReason.length < 5) {
+        return res.status(400).json({
+          success: false,
+          message: 'A meaningful rejection reason is required.'
+        });
+      }
+      
+      if (rejectionReason.length > 500) {
+        return res.status(400).json({
+          success: false,
+          message: 'Rejection reason must be 500 characters or less.'
+        });
+      }
+
       user.photoVerificationStatus = 'rejected';
       user.verificationStatus = 'rejected';
       user.verified = user.isFullyVerified();
-      if (reason) {
-        user.photoRejectionReason = reason;
-        if (session) session.rejectionReason = reason;
-      }
+      user.photoRejectionReason = rejectionReason;
+      
       if (session) {
+        session.rejectionReason = rejectionReason;
         session.status = 'REJECTED';
         session.result = 'REJECTED';
         session.reviewedBy = req.user._id;
@@ -270,7 +293,7 @@ router.post('/verifications/:userId/:action', authenticate, adminOnly, async (re
       const socketPayload = {
         sessionId: session ? session.sessionId : null,
         status: action === 'approve' ? 'APPROVED' : 'REJECTED',
-        rejectionReason: action === 'reject' ? reason : null
+        rejectionReason: action === 'reject' ? (req.body.rejectionReason || req.body.reason) : null
       };
       io.to(`user:${userId.toString()}`).emit('verification_status_updated', socketPayload);
       console.log(`[Socket] Emitted verification_status_updated: ${socketPayload.status} to room user:${userId}`);
@@ -336,13 +359,17 @@ router.post('/verifications/:userId/:action', authenticate, adminOnly, async (re
         console.log(`[FCM TOKEN FOUND] ${user.fcmTokens.length} tokens for user ${user._id}`);
         console.log(`[FCM SEND START] Dispatching ${action} notification to user ${user._id}`);
 
+        const providedReason = req.body.rejectionReason || req.body.reason;
+        const rejectionReason = typeof providedReason === 'string' ? providedReason.trim() : '';
+
         const notificationData = {
           type: action === 'approve' ? 'verification_approved' : 'verification_rejected',
           title: action === 'approve' ? '🎉 Verification Approved' : 'Verification Update',
           body: action === 'approve' 
             ? 'Your photo verification has been approved. You can now access verified member features.'
             : 'Your verification could not be approved. Please review the requirements and submit again.',
-          userId: user._id.toString()
+          userId: user._id.toString(),
+          rejectionReason: action === 'reject' ? rejectionReason : undefined
         };
 
         await sendDataFcm(user._id.toString(), user.fcmTokens, notificationData);
