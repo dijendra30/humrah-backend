@@ -770,6 +770,7 @@ needsGuidelinesAcceptance=${needsGuidelines}`);
     hostActive:              user.hostActive !== false,
     paymentInfo:             user.paymentInfo || null,
     photoVerificationStatus: user.photoVerificationStatus || 'not_submitted',
+    photoRejectionReason:    user.photoRejectionReason || null,
     profileCompleteness:     user.profileCompleteness || null,
     acceptedCommunityVersion:user.acceptedCommunityVersion || null,
     communityAcceptedAt:     user.communityAcceptedAt || null,

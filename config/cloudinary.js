@@ -2,6 +2,7 @@
 const cloudinary = require('cloudinary').v2;
 const multer = require('multer');
 const path = require('path');
+const fs = require('fs');
 
 // Configure Cloudinary
 cloudinary.config({
@@ -73,10 +74,9 @@ const uploadBuffer = async (buffer, folder = 'humrah') => {
 };
 
 // Helper function to upload verification video (Temporary, Authenticated)
-const uploadVerificationVideo = async (buffer, sessionId) => {
+const uploadVerificationVideo = async (filePath, sessionId) => {
   return new Promise((resolve, reject) => {
     console.log(`📤 [Cloudinary] Uploading verification video for session ${sessionId}`);
-    console.log(`📦 [Cloudinary] Video size: ${(buffer.length / 1024 / 1024).toFixed(2)} MB`);
     
     console.log("Uploading video to Cloudinary");
     const uploadStream = cloudinary.uploader.upload_stream(
@@ -110,7 +110,13 @@ const uploadVerificationVideo = async (buffer, sessionId) => {
       }
     );
     
-    uploadStream.end(buffer);
+    const readStream = fs.createReadStream(filePath);
+    readStream.on('error', (err) => {
+      console.error(`❌ [Cloudinary Upload] Error reading file stream for session ${sessionId}:`, err);
+      reject(err);
+    });
+    
+    readStream.pipe(uploadStream);
   });
 };
 

@@ -9,13 +9,24 @@ const crypto = require('crypto');
 const multer = require('multer');
 const { notifyVerificationReview } = require('../services/telegramService');
 
+const os = require('os');
+const fs = require('fs');
+const util = require('util');
+const unlinkAsync = util.promisify(fs.unlink);
+
 // =============================================
 // MULTER SETUP FOR VIDEO UPLOAD
 // =============================================
 const upload = multer({
-  storage: multer.memoryStorage(), // Note: 50MB max per concurrent upload in Node heap
+  storage: multer.diskStorage({
+    destination: os.tmpdir(),
+    filename: (req, file, cb) => {
+      const uniqueSuffix = Date.now() + '_' + Math.round(Math.random() * 1E9);
+      cb(null, `verification_${uniqueSuffix}.mp4`);
+    }
+  }),
   limits: {
-    fileSize: 50 * 1024 * 1024 // 50MB limit (Increased to safely accommodate CameraX verification videos)
+    fileSize: 50 * 1024 * 1024 // 50MB limit
   },
   fileFilter: (req, file, cb) => {
     if (file.mimetype.startsWith('video/')) {
@@ -122,19 +133,24 @@ router.post('/start', auth, async (req, res) => {
 // @access  Private
 router.post('/upload-video', auth, (req, res, next) => {
   upload.single('video')(req, res, (err) => {
-    if (err instanceof multer.MulterError) {
-      if (err.code === 'LIMIT_FILE_SIZE') {
-        console.error(`❌ [Upload] File too large error for user ${req.userId}`);
-        return res.status(413).json({ 
-          success: false, 
-          message: 'Verification video is too large. Maximum allowed size is 50 MB.' 
-        });
+    if (err) {
+      if (req.file && req.file.path) {
+        unlinkAsync(req.file.path).catch(e => console.error(`❌ [Cleanup] Failed to delete partial file:`, e));
       }
-      console.error(`❌ [Upload] Multer error:`, err);
-      return res.status(400).json({ success: false, message: `Upload error: ${err.message}` });
-    } else if (err) {
-      console.error(`❌ [Upload] Unknown error:`, err);
-      return res.status(500).json({ success: false, message: err.message || 'Unknown upload error' });
+      if (err instanceof multer.MulterError) {
+        if (err.code === 'LIMIT_FILE_SIZE') {
+          console.error(`❌ [Upload] File too large error for user ${req.userId}`);
+          return res.status(413).json({ 
+            success: false, 
+            message: 'Verification video is too large. Maximum allowed size is 50 MB.' 
+          });
+        }
+        console.error(`❌ [Upload] Multer error:`, err);
+        return res.status(400).json({ success: false, message: `Upload error: ${err.message}` });
+      } else {
+        console.error(`❌ [Upload] Unknown error:`, err);
+        return res.status(500).json({ success: false, message: err.message || 'Unknown upload error' });
+      }
     }
     next();
   });
@@ -218,10 +234,10 @@ router.post('/upload-video', auth, (req, res, next) => {
       });
     }
     
-    // Upload video buffer to Cloudinary
+    // Upload video file to Cloudinary
     console.log(`☁️ [Upload] Uploading to Cloudinary...`);
     const cloudinaryResult = await uploadVerificationVideo(
-      req.file.buffer,
+      req.file.path,
       sessionId
     );
     
@@ -291,6 +307,12 @@ router.post('/upload-video', auth, (req, res, next) => {
       message: 'Failed to upload video',
       error: error.message
     });
+  } finally {
+    if (req.file && req.file.path) {
+      unlinkAsync(req.file.path).catch(err => {
+        console.error(`❌ [Cleanup] Failed to delete temp video file ${req.file.path}:`, err);
+      });
+    }
   }
 });
 
