@@ -5,6 +5,8 @@ const User = require('../models/User');
 const SafetyReport = require('../models/SafetyReport');
 const AuditLog = require('../models/AuditLog');
 const PostReport = require('../models/PostReport');
+const Post = require('../models/Post');
+const FoodPost = require('../models/FoodPost');
 const { authenticate, authorize, superAdminOnly, adminOnly, auditLog } = require('../middleware/auth');
 
 
@@ -167,6 +169,108 @@ router.post('/users/warn', authenticate, adminOnly, auditLog('WARN_USER', 'USER'
 });
 
 /**
+ * @route   POST /api/admin/users/:userId/official-message
+ * @desc    Send an official one-way message to a user
+ * @access  Private (Admin)
+ */
+router.post('/users/:userId/official-message', authenticate, adminOnly, auditLog('OFFICIAL_MESSAGE', 'USER'), async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { content } = req.body;
+
+    if (!content || !content.trim()) {
+      return res.status(400).json({ success: false, message: 'Message content cannot be empty' });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    const Chat = require('../models/Chat');
+    const Message = require('../models/Message');
+    const { sendDataFcm } = require('../utils/fcmHelper');
+
+    // 1. Find or create the OFFICIAL chat for this user atomically
+    let chat = await Chat.findOneAndUpdate(
+      { 
+        chatType: 'OFFICIAL', 
+        'participants.userId': user._id 
+      },
+      {
+        $setOnInsert: {
+          chatType: 'OFFICIAL',
+          participants: [
+            { userId: user._id, role: 'USER', hasDeleted: false, unreadCount: 0 },
+            { userId: req.user._id, role: req.user.role, hasDeleted: false, unreadCount: 0 }
+          ],
+          status: 'ACTIVE',
+          lastMessageAt: new Date()
+        }
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
+    // 2. Create the message
+    const message = new Message({
+      chatId: chat._id,
+      senderId: req.user._id,
+      senderRole: 'ADMIN',
+      content: content.trim(),
+      messageType: 'TEXT',
+      deliveryStatus: 'SENT'
+    });
+    await message.save();
+
+    // 3. Update chat latest message and unread count
+    await Chat.updateOne(
+      { _id: chat._id, 'participants.userId': user._id },
+      { 
+        $set: { lastMessageAt: new Date(), lastMessageContent: content.trim() },
+        $inc: { 'participants.$.unreadCount': 1 }
+      }
+    );
+
+    // 4. Send FCM Notification using standard data-only structure
+    if (user.fcmTokens && user.fcmTokens.length > 0) {
+      await sendDataFcm(user._id.toString(), user.fcmTokens, {
+        type: 'NEW_CHAT_MESSAGE',
+        chatId: chat._id.toString(),
+        chatType: 'OFFICIAL'
+      });
+    }
+
+    // 5. Emit socket event if needed for real-time update
+    const io = req.app.get('io');
+    if (io) {
+      io.to(chat._id.toString()).emit('new-message', {
+        message: {
+          ...message.toObject(),
+          chatType: 'OFFICIAL',
+          senderName: 'Humrah',
+          senderPhotoUrl: 'logo.jpg' // Matches unifiedChatController
+        },
+        tempId: null
+      });
+      io.to(`user:${user._id.toString()}`).emit('chat_updated', {
+        chatId: chat._id,
+        lastMessageContent: content.trim(),
+        lastMessageAt: new Date()
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Official message sent successfully'
+    });
+
+  } catch (error) {
+    console.error('Official message error:', error);
+    res.status(500).json({ success: false, message: 'Failed to send official message' });
+  }
+});
+
+/**
  * @route   POST /api/admin/users/suspend
  * @desc    Suspend a user
  * @access  Private (Admin)
@@ -271,9 +375,17 @@ router.post('/users/ban', authenticate, superAdminOnly, auditLog('BAN_USER', 'US
       banReason: reason,
       isPermanent
     };
-
     user.status = 'BANNED';
     await user.save();
+
+    // ── COMMUNITY SAFETY ARCHITECTURE ──
+    // If permanent ban, instantly hide user's Community content
+    if (isPermanent === true) {
+      await Promise.all([
+        Post.updateMany({ userId: user._id }, { $set: { isActive: false } }),
+        FoodPost.updateMany({ userId: user._id }, { $set: { isActive: false } })
+      ]);
+    }
 
     // If linked to report, add action
     if (reportId) {
@@ -360,6 +472,13 @@ router.delete('/users/:userId/ban', authenticate, superAdminOnly, auditLog('UNBA
     };
     user.status = 'ACTIVE';
     await user.save();
+
+    // ── COMMUNITY SAFETY ARCHITECTURE ──
+    // Restore Community content visibility
+    await Promise.all([
+      Post.updateMany({ userId: user._id }, { $set: { isActive: true } }),
+      FoodPost.updateMany({ userId: user._id }, { $set: { isActive: true } })
+    ]);
 
     res.json({
       success: true,

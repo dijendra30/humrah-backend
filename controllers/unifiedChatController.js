@@ -88,6 +88,13 @@ async function fetchStandardChats(userId) {
       isOfficial = true;
       showVerifiedBadge = true;
       role = 'FOUNDER';
+    } else if (chat.chatType === 'OFFICIAL') {
+      title = 'Humrah';
+      avatar = 'logo.jpg';
+      subtitle = 'Official Updates';
+      isOfficial = true;
+      showVerifiedBadge = true;
+      role = 'OFFICIAL';
     } else if (otherParticipants.length > 0) {
       const otherUser = otherParticipants[0].userId;
       title = `${otherUser.firstName || ''} ${otherUser.lastName || ''}`.trim() || chat.chatType;

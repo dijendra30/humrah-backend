@@ -214,6 +214,8 @@ exports.getChatMessages = async (req, res) => {
     let effectiveCanSend = false;
     if (chat.chatType === 'FOUNDER') {
       effectiveCanSend = exports.calculateFounderWritability(chat);
+    } else if (chat.chatType === 'OFFICIAL') {
+      effectiveCanSend = false; // Strictly one-way for users
     } else {
       effectiveCanSend = !chat.isReadOnly();
     }
@@ -273,6 +275,10 @@ exports.sendMessage = async (req, res) => {
     if (!chat) return res.status(404).json({ success: false, message: 'Chat not found.' });
     
     let effectiveCanSend = false;
+    if (chat.chatType === 'OFFICIAL' && req.user.role === 'USER') {
+      return res.status(403).json({ error: 'Replies are not allowed in Official Updates' });
+    }
+
     if (chat.chatType === 'FOUNDER') {
       effectiveCanSend = exports.calculateFounderWritability(chat);
     } else {

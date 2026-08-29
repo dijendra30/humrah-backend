@@ -5,7 +5,7 @@ const chatSchema = new mongoose.Schema({
   // Chat Type
   chatType: {
     type: String,
-    enum: ['BOOKING', 'SUPPORT', 'FOUNDER'],
+    enum: ['BOOKING', 'SUPPORT', 'FOUNDER', 'OFFICIAL'],
     required: true,
     index: true
   },
@@ -147,8 +147,8 @@ chatSchema.pre('save', function (next) {
     return next(new Error('Chat must have at least 2 participants'));
   }
   
-  // For SUPPORT and FOUNDER chats, ensure at least one admin in participants
-  if (this.chatType === 'SUPPORT' || this.chatType === 'FOUNDER') {
+  // For SUPPORT, FOUNDER and OFFICIAL chats, ensure at least one admin in participants
+  if (this.chatType === 'SUPPORT' || this.chatType === 'FOUNDER' || this.chatType === 'OFFICIAL') {
     const hasAdmin = this.participants.some(p => 
       p.role === 'SAFETY_ADMIN' || p.role === 'SUPER_ADMIN'
     );
