@@ -236,7 +236,9 @@ router.post('/users/:userId/official-message', authenticate, adminOnly, auditLog
       await sendDataFcm(user._id.toString(), user.fcmTokens, {
         type: 'NEW_CHAT_MESSAGE',
         chatId: chat._id.toString(),
-        chatType: 'OFFICIAL'
+        chatType: 'OFFICIAL',
+        messageText: content,
+        senderName: 'Humrah'
       });
     }
 
