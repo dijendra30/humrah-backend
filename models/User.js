@@ -62,6 +62,10 @@ const questionnaireSchema = new mongoose.Schema({
   language: String,
   interests: [String],
   hobbies: [String],
+  conversationInterests: [String],
+  humrahRoomInterests: [String],
+  socialActivities: [String],
+  socialVibe: String,
   movieGenre: String,
   favoriteFood: String,
   travelPreference: String,
@@ -87,6 +91,11 @@ const questionnaireSchema = new mongoose.Schema({
 }, { _id: false });
 
 const userSchema = new mongoose.Schema({
+  completedPromptVersion: { type: Number, default: 0 },
+  lastPromptShownAt: { type: Date, default: null },
+  lastPromptDeferredAt: { type: Date, default: null },
+  pendingAiEnrichmentText: { type: String, default: null },
+  pendingAiEnrichmentPromptVersion: { type: Number, default: null },
   // =============================================
   // MODERATION TRACKING
   // =============================================

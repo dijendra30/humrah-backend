@@ -3,6 +3,20 @@ const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const AiProfilePrompt = require('../models/AiProfilePrompt');
+
+// Get active AI prompt configuration
+router.get('/active-prompt', async (req, res) => {
+  try {
+    const prompt = await AiProfilePrompt.findOne({ isActive: true }).select('version promptText reminderDays');
+    if (!prompt) {
+      return res.json({ success: true, prompt: null });
+    }
+    res.json({ success: true, prompt });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
 const LegalAcceptance = require('../models/LegalAcceptance');
 const LegalVersion = require('../models/LegalVersion');
 const { sendWelcomeEmail } = require('../config/email');
@@ -246,6 +260,45 @@ router.post('/register', registerLimiter, async (req, res) => {
       }
     }
     // --- END ONBOARDING COMPLIANCE ---
+
+    // --- PHASE 2B: AI PROFILE EXTRACTION ---
+    const { optionalBioText, completedPromptVersion } = req.body;
+    if (optionalBioText) {
+      user.pendingAiEnrichmentText = optionalBioText;
+      if (completedPromptVersion) user.pendingAiEnrichmentPromptVersion = completedPromptVersion;
+      
+      try {
+        const aiProfileService = require('../services/aiProfileService');
+        const aiData = await aiProfileService.extractProfile(optionalBioText);
+        
+        // Merge into questionnaire, but explicit data always wins
+        if (aiData) {
+          const q = user.questionnaire || {};
+          q.bio = q.bio || aiData.bio;
+          q.socialVibe = q.socialVibe || aiData.socialVibe;
+          q.goodMeetupMeaning = q.goodMeetupMeaning || aiData.goodMeetupMeaning;
+          q.vibeQuote = q.vibeQuote || aiData.vibeQuote;
+          
+          if (!q.hobbies || q.hobbies.length === 0) q.hobbies = aiData.hobbies || [];
+          if (!q.interests || q.interests.length === 0) q.interests = aiData.interests || [];
+          if (!q.comfortActivity || q.comfortActivity.length === 0) q.comfortActivity = aiData.comfortActivity || [];
+          if (!q.relaxActivity || q.relaxActivity.length === 0) q.relaxActivity = aiData.relaxActivity || [];
+          if (!q.musicPreference || q.musicPreference.length === 0) q.musicPreference = aiData.musicPreference || [];
+          if (!q.socialActivities || q.socialActivities.length === 0) q.socialActivities = aiData.socialActivities || [];
+          if (!q.conversationInterests || q.conversationInterests.length === 0) q.conversationInterests = aiData.conversationInterests || [];
+          if (!q.humrahRoomInterests || q.humrahRoomInterests.length === 0) q.humrahRoomInterests = aiData.humrahRoomInterests || [];
+          
+          user.questionnaire = q;
+          user.pendingAiEnrichmentText = null;
+          if (completedPromptVersion) {
+            user.completedPromptVersion = completedPromptVersion;
+          }
+        }
+      } catch (aiError) {
+        console.warn('AI Profile Extraction failed during registration. Retaining raw text.', aiError.message);
+      }
+    }
+    // --- END PHASE 2B ---
 
     await user.save();
 

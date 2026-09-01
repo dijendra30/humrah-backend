@@ -929,4 +929,38 @@ router.patch('/post-reports/:id/resolve', authenticate, adminOnly, async (req, r
   }
 });
 
+const AiProfilePrompt = require('../models/AiProfilePrompt');
+
+router.get('/prompts', authenticate, adminOnly, async (req, res) => {
+  try {
+    const prompts = await AiProfilePrompt.find().sort({ version: -1 });
+    res.json({ success: true, prompts });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+router.post('/prompts', authenticate, adminOnly, async (req, res) => {
+  try {
+    const { version, promptText, reminderDays } = req.body;
+    const prompt = new AiProfilePrompt({ version, promptText, reminderDays });
+    await prompt.save();
+    res.status(201).json({ success: true, prompt });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+router.put('/prompts/:id/activate', authenticate, adminOnly, async (req, res) => {
+  try {
+    const prompt = await AiProfilePrompt.findById(req.params.id);
+    if (!prompt) return res.status(404).json({ success: false, message: 'Not found' });
+    prompt.isActive = true;
+    await prompt.save();
+    res.json({ success: true, prompt });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 module.exports = router;

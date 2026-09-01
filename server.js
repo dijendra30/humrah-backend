@@ -567,6 +567,11 @@ const connectDB = async () => {
     startMovieDailySessionJob();  // pre-seeds tomorrow's system sessions at 7 PM IST
     startPayoutCronJobs();
     startLetterPushCron();
+    
+    const { runHumrahRoomExpiry } = require('./jobs/humrahRoomExpiryJob');
+    setInterval(runHumrahRoomExpiry, 15 * 60 * 1000); // 15 mins
+    runHumrahRoomExpiry(); // initial run
+
     await runStartupCleanup();
     scheduleDailyCleanup();
   } catch (err) {
@@ -586,6 +591,8 @@ const moderationRoutes            = require('./routes/moderation');
 const gamingRoutes                = require('./routes/gamingRoutes');
 const { initSessionSocket }       = require('./sockets/sessionSocket');
 initSessionSocket(io);
+const { initHumrahRoomSocket }    = require('./sockets/humrahRoomSocket');
+initHumrahRoomSocket(io);
 
 const authRoutes             = require('./routes/auth');
 const userRoutes             = require('./routes/users');
@@ -691,6 +698,7 @@ app.use('/api/live-location',     authenticate, enforceLegalAcceptance, require(
 app.use('/api',                   authenticate, enforceLegalAcceptance, require('./routes/moderation_route'));
 app.use('/api/official-events',   authenticate, enforceLegalAcceptance, require('./routes/officialEvents')); // ✅ Official Events Management System
 app.use('/api/event-requests',    authenticate, enforceLegalAcceptance, require('./routes/eventRequests')); // ✅ Event Requests System
+app.use('/api/rooms',             authenticate, enforceLegalAcceptance, require('./routes/roomRoutes')); // ✅ Humrah Rooms Phase 1B
 
 // ✅ NEW: Live location for matchmaking — POST /api/users/matchmaking-location
 //         Separate from safety live-location. Updates liveLocation on User doc.
