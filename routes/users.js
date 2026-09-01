@@ -776,4 +776,66 @@ router.delete('/me/muted/:userId', authenticate, async (req, res) => {
   }
 });
 
+// =============================================
+// AI PROMPT REMINDER ROUTES
+// =============================================
+const AiProfilePrompt = require('../models/AiProfilePrompt');
+
+router.get('/check-prompt-reminder', authenticate, async (req, res) => {
+  try {
+    const user = req.user; // populated by authenticate middleware
+    const activePrompt = await AiProfilePrompt.findOne({ isActive: true });
+    
+    if (!activePrompt) {
+      return res.json({ shouldShow: false });
+    }
+
+    // CASE 1: User has already completed the active prompt
+    if (user.completedPromptVersion >= activePrompt.version) {
+      return res.json({ shouldShow: false });
+    }
+
+    // CASE 6: New prompt version released, bypass cooldown
+    // If completed is less than active, and they previously deferred an older version.
+    let bypassCooldown = false;
+    if (user.pendingAiEnrichmentPromptVersion && user.pendingAiEnrichmentPromptVersion < activePrompt.version) {
+      bypassCooldown = true;
+    }
+
+    // CASE 4: User recently selected Maybe Later
+    if (user.lastPromptDeferredAt && !bypassCooldown) {
+      const cooldownMs = (activePrompt.reminderDays || 15) * 24 * 60 * 60 * 1000;
+      if (Date.now() < user.lastPromptDeferredAt.getTime() + cooldownMs) {
+        return res.json({ shouldShow: false });
+      }
+    }
+
+    // CASE 2, 3, 5: Eligible
+    return res.json({
+      shouldShow: true,
+      promptVersion: activePrompt.version,
+      promptText: activePrompt.promptText,
+      cooldownDays: activePrompt.reminderDays || 15
+    });
+
+  } catch (error) {
+    console.error('Check prompt reminder error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+router.post('/defer-prompt', authenticate, async (req, res) => {
+  try {
+    const { promptVersion } = req.body;
+    req.user.lastPromptDeferredAt = new Date();
+    // Preserve the version context
+    req.user.pendingAiEnrichmentPromptVersion = promptVersion;
+    await req.user.save();
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Defer prompt error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 module.exports = router;
