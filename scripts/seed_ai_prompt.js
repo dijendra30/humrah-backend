@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('dotenv').config({ path: require('path').resolve(__dirname, '../.env') });
 const mongoose = require('mongoose');
 const AiProfilePrompt = require('../models/AiProfilePrompt');
 
@@ -219,8 +219,16 @@ Before returning the final JSON, verify:
 
 async function seedPrompt() {
   try {
-    await mongoose.connect(process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/humrah');
+    await mongoose.connect(process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/humrah');
     console.log('Connected to DB');
+
+    // Check if an active prompt already exists with this exact text
+    const currentActive = await AiProfilePrompt.findOne({ isActive: true });
+    
+    if (currentActive && currentActive.promptText === NEW_PROMPT) {
+      console.log('Active prompt is already up to date. Version: ' + currentActive.version);
+      return;
+    }
 
     // Deactivate all existing prompts
     await AiProfilePrompt.updateMany({}, { isActive: false });
