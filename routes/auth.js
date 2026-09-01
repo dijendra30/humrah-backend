@@ -273,20 +273,26 @@ router.post('/register', registerLimiter, async (req, res) => {
         
         // Merge into questionnaire, but explicit data always wins
         if (aiData) {
+          const pd = aiData.profile_data || {};
           const q = user.questionnaire || {};
-          q.bio = q.bio || aiData.bio;
-          q.socialVibe = q.socialVibe || aiData.socialVibe;
-          q.goodMeetupMeaning = q.goodMeetupMeaning || aiData.goodMeetupMeaning;
-          q.vibeQuote = q.vibeQuote || aiData.vibeQuote;
           
-          if (!q.hobbies || q.hobbies.length === 0) q.hobbies = aiData.hobbies || [];
-          if (!q.interests || q.interests.length === 0) q.interests = aiData.interests || [];
-          if (!q.comfortActivity || q.comfortActivity.length === 0) q.comfortActivity = aiData.comfortActivity || [];
-          if (!q.relaxActivity || q.relaxActivity.length === 0) q.relaxActivity = aiData.relaxActivity || [];
-          if (!q.musicPreference || q.musicPreference.length === 0) q.musicPreference = aiData.musicPreference || [];
-          if (!q.socialActivities || q.socialActivities.length === 0) q.socialActivities = aiData.socialActivities || [];
-          if (!q.conversationInterests || q.conversationInterests.length === 0) q.conversationInterests = aiData.conversationInterests || [];
-          if (!q.humrahRoomInterests || q.humrahRoomInterests.length === 0) q.humrahRoomInterests = aiData.humrahRoomInterests || [];
+          q.bio = q.bio || aiData.profile_summary;
+          q.goodMeetupMeaning = q.goodMeetupMeaning || (pd.good_meetup && pd.good_meetup.join(', '));
+          q.socialVibe = q.socialVibe || (pd.social_style && pd.social_style.join(', '));
+          
+          if (!q.hobbies || q.hobbies.length === 0) q.hobbies = pd.hobbies || [];
+          if (!q.interests || q.interests.length === 0) q.interests = pd.interests || [];
+          if (!q.comfortActivity || q.comfortActivity.length === 0) q.comfortActivity = pd.comfort_activities || [];
+          if (!q.relaxActivity || q.relaxActivity.length === 0) q.relaxActivity = pd.relaxation_activities || [];
+          if (!q.musicPreference || q.musicPreference.length === 0) q.musicPreference = (pd.music_preferences && pd.music_preferences.liked) || [];
+          if (!q.socialActivities || q.socialActivities.length === 0) q.socialActivities = pd.activity_preferences || [];
+          if (!q.hangoutPreferences || q.hangoutPreferences.length === 0) q.hangoutPreferences = pd.hangout_preferences || [];
+          
+          // String fields mapped from arrays
+          q.personalityType = q.personalityType || (pd.personality && pd.personality.join(', '));
+          q.favoriteFood = q.favoriteFood || (pd.food_preferences && pd.food_preferences.join(', '));
+          q.travelPreference = q.travelPreference || (pd.travel_preferences && pd.travel_preferences.join(', '));
+          q.movieGenre = q.movieGenre || (pd.movie_preferences && pd.movie_preferences.liked && pd.movie_preferences.liked.join(', '));
           
           user.questionnaire = q;
           user.pendingAiEnrichmentText = null;
