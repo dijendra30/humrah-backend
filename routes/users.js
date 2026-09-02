@@ -391,6 +391,74 @@ router.post('/submit-verification-photo-base64', authenticate, uploadLimiter, as
 
 // ==================== QUESTIONNAIRE ROUTES ====================
 
+router.get('/me/next-profile-question', authenticate, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    const q = user.questionnaire || {};
+
+    const isUnanswered = (key, type) => {
+      const val = q[key];
+      if (type === 'string') return !val || typeof val !== 'string' || val.trim() === '';
+      if (type === 'array') return !val || !Array.isArray(val) || val.length === 0;
+      return !val;
+    };
+
+    // Master pool of progressive-eligible questions in priority order
+    const progressivePool = [
+      // 1. Screen 4 Rollover (High priority to complete basic profile)
+      { id: 15, key: 'travelPreference', type: 'string' },
+      { id: 17, key: 'socialVibe', type: 'string' },
+      { id: 18, key: 'comfortZones', type: 'array' },
+      { id: 19, key: 'budgetComfort', type: 'string' },
+      { id: 20, key: 'hangoutFrequency', type: 'string' },
+      { id: 21, key: 'comfortActivity', type: 'array' },
+      { id: 22, key: 'relaxActivity', type: 'array' },
+      { id: 23, key: 'musicPreference', type: 'array' },
+      
+      // 2. New Progressive Metadata
+      { id: 11, key: 'conversationInterests', type: 'array' },
+      { id: 60, key: 'profession', type: 'string' },
+      { id: 61, key: 'education', type: 'string' },
+      { id: 67, key: 'lookingForOnHumrah', type: 'array' },
+      { id: 68, key: 'personalityType', type: 'string' },
+      { id: 69, key: 'hangoutPreferences', type: 'array' },
+
+      // 3. Nuance (Lower priority)
+      { id: 62, key: 'smokingStatus', type: 'string' },
+      { id: 63, key: 'drinkingStatus', type: 'string' },
+      { id: 64, key: 'petPreference', type: 'string' },
+      { id: 65, key: 'fitnessLevel', type: 'string' },
+      { id: 66, key: 'relationshipStatus', type: 'string' }
+    ];
+
+    let nextQuestion = null;
+    for (const pq of progressivePool) {
+      if (isUnanswered(pq.key, pq.type)) {
+        nextQuestion = pq;
+        break;
+      }
+    }
+
+    if (!nextQuestion) {
+      return res.json({ success: true, message: 'No eligible progressive questions available', question: null });
+    }
+
+    // Return enough metadata for Android to query its local static registry by ID
+    res.json({
+      success: true,
+      question: {
+        id: nextQuestion.id,
+        backendKey: nextQuestion.key
+      }
+    });
+  } catch (error) {
+    console.error('Next profile question error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 router.put('/me/questionnaire', authenticate, async (req, res) => {
   try {
     const { questionnaire, profileCompletion } = req.body;
@@ -837,5 +905,73 @@ router.post('/defer-prompt', authenticate, async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
+
+// --- PHASE 2C: AI PROFILE IMPORT ---
+router.post('/me/ai-profile', authenticate, async (req, res) => {
+  try {
+    const { aiResponse, promptVersion } = req.body;
+    
+    if (!aiResponse) {
+      return res.status(400).json({ success: false, message: 'Missing AI response JSON' });
+    }
+
+    let parsed;
+    if (typeof aiResponse === 'string') {
+      try {
+        parsed = JSON.parse(aiResponse.trim());
+      } catch (e) {
+        return res.status(400).json({ success: false, message: 'Invalid JSON format. Please paste the exact JSON output.' });
+      }
+    } else {
+      parsed = aiResponse;
+    }
+
+    if (parsed.status !== 'complete' || !parsed.profile_data || !parsed.profile_summary) {
+      return res.status(400).json({ success: false, message: 'Missing required profile_data or profile_summary fields.' });
+    }
+
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    // Save the entire structured AI profile natively
+    user.aiProfile = parsed;
+
+    // Map to questionnaire
+    const pd = parsed.profile_data;
+    const q = user.questionnaire || {};
+    
+    q.bio = q.bio || parsed.profile_summary;
+    if (!q.goodMeetupMeaning && pd.good_meetup?.length) q.goodMeetupMeaning = pd.good_meetup.join(', ');
+    if (!q.socialVibe && pd.social_style?.length) q.socialVibe = pd.social_style.join(', ');
+    
+    if (!q.hobbies?.length) q.hobbies = pd.hobbies || [];
+    if (!q.interests?.length) q.interests = pd.interests || [];
+    if (!q.comfortActivity?.length) q.comfortActivity = pd.comfort_activities || [];
+    if (!q.relaxActivity?.length) q.relaxActivity = pd.relaxation_activities || [];
+    if (!q.musicPreference?.length) q.musicPreference = pd.music_preferences?.liked || [];
+    if (!q.socialActivities?.length) q.socialActivities = pd.activity_preferences || [];
+    if (!q.hangoutPreferences?.length) q.hangoutPreferences = pd.hangout_preferences || [];
+    
+    if (!q.personalityType && pd.personality?.length) q.personalityType = pd.personality.join(', ');
+    if (!q.favoriteFood && pd.food_preferences?.length) q.favoriteFood = pd.food_preferences.join(', ');
+    if (!q.travelPreference && pd.travel_preferences?.length) q.travelPreference = pd.travel_preferences.join(', ');
+    if (!q.movieGenre && pd.movie_preferences?.liked?.length) q.movieGenre = pd.movie_preferences.liked.join(', ');
+
+    user.questionnaire = q;
+    user.pendingAiEnrichmentText = null;
+
+    if (promptVersion) {
+      user.completedPromptVersion = promptVersion;
+    }
+    
+    await user.save();
+    
+    return res.json({ success: true, message: 'AI Profile imported successfully', user: user.getPrivateProfile() });
+  } catch (err) {
+    console.error('Error importing AI profile:', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+// --- END PHASE 2C ---
 
 module.exports = router;
