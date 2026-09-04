@@ -40,6 +40,26 @@ exports.releaseLock = async (key) => {
   }
 };
 
+exports.set = async (key, value, ttlSeconds) => {
+  if (redisClient) {
+    if (ttlSeconds) {
+      await redisClient.set(key, JSON.stringify(value), 'EX', ttlSeconds);
+    } else {
+      await redisClient.set(key, JSON.stringify(value));
+    }
+  } else {
+    memCache.set(key, { value, expires: ttlSeconds ? Date.now() + (ttlSeconds * 1000) : Infinity });
+  }
+};
+
+exports.del = async (key) => {
+  if (redisClient) {
+    await redisClient.del(key);
+  } else {
+    memCache.delete(key);
+  }
+};
+
 exports.setWithJitter = async (key, value, baseTtlSeconds, jitterSeconds) => {
   const jitter = Math.floor(Math.random() * (jitterSeconds * 2)) - jitterSeconds;
   const finalTtl = Math.max(1, baseTtlSeconds + jitter);
