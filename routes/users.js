@@ -400,23 +400,28 @@ router.get('/me/next-profile-question', authenticate, async (req, res) => {
 
     const isUnanswered = (key, type) => {
       const val = q[key];
-      if (type === 'string') return !val || typeof val !== 'string' || val.trim() === '';
-      if (type === 'array') return !val || !Array.isArray(val) || val.length === 0;
-      return !val;
+      if (val === undefined || val === null) return true;
+      if (typeof val === 'string') return val.trim().length === 0;
+      if (Array.isArray(val)) return val.length === 0;
+      return false;
     };
 
+    // Exactly 19 launch questions (Screens 1-4)
     const progressivePool = [
       { id: 10, key: 'dateOfBirth', type: 'string' },
       { id: 2, key: 'city', type: 'string' },
       { id: 3, key: 'preferredLanguages', type: 'array' },
       { id: 25, key: 'gender', type: 'string' },
+      
       { id: 5, key: 'availableTimes', type: 'array' },
       { id: 8, key: 'vibeWords', type: 'array' },
       { id: 11, key: 'conversationInterests', type: 'array' },
       { id: 24, key: 'humrahRoomInterests', type: 'array' },
+      
       { id: 12, key: 'movieGenre', type: 'array' },
       { id: 13, key: 'favoriteFood', type: 'array' },
       { id: 14, key: 'hobbies', type: 'array' },
+      
       { id: 15, key: 'travelPreference', type: 'string' },
       { id: 17, key: 'socialVibe', type: 'string' },
       { id: 18, key: 'comfortZones', type: 'array' },
@@ -427,19 +432,26 @@ router.get('/me/next-profile-question', authenticate, async (req, res) => {
       { id: 23, key: 'musicPreference', type: 'array' }
     ];
 
-    if (isUnanswered('humrahRoomInterests', 'array')) {
-      return res.json({ success: true, question: { id: 24, backendKey: 'humrahRoomInterests' } });
+    // Priority to Q24
+    let nextQuestion = null;
+    const q24 = progressivePool.find(p => p.id === 24);
+    if (q24 && isUnanswered(q24.key, q24.type)) {
+      nextQuestion = q24;
+    } else {
+      // Find remaining unanswered
+      const unanswered = progressivePool.filter(p => p.id !== 24 && isUnanswered(p.key, p.type));
+      if (unanswered.length > 0) {
+        // Randomly select one
+        const randomIndex = Math.floor(Math.random() * unanswered.length);
+        nextQuestion = unanswered[randomIndex];
+      }
     }
 
-    const unanswered = progressivePool.filter(pq => pq.id !== 24 && isUnanswered(pq.key, pq.type));
-
-    if (unanswered.length === 0) {
+    if (!nextQuestion) {
       return res.json({ success: true, message: 'No eligible progressive questions available', question: null });
     }
 
-    const nextQuestion = unanswered[Math.floor(Math.random() * unanswered.length)];
-
-    return res.json({
+    res.json({
       success: true,
       question: {
         id: nextQuestion.id,
@@ -454,71 +466,123 @@ router.get('/me/next-profile-question', authenticate, async (req, res) => {
 
 router.put('/me/questionnaire', authenticate, async (req, res) => {
   try {
-    const { questionnaire, profileCompletion } = req.body;
-    
-    // --- TEMPORARY DEBUG LOGS ---
-    console.log('[DEBUG] PUT /me/questionnaire - Received Payload:', JSON.stringify(questionnaire, null, 2));
-    if (questionnaire) {
-      console.log('[DEBUG] bio value:', `"${questionnaire.bio}"`);
-      console.log('[DEBUG] bio length:', questionnaire.bio?.length);
-      console.log('[DEBUG] quote value:', `"${questionnaire.vibeQuote}"`);
-      console.log('[DEBUG] quote length:', questionnaire.vibeQuote?.length);
-    }
-    // ----------------------------
+    const questionnaire = req.body.questionnaire !== undefined ? req.body.questionnaire : req.body;
 
     if (!questionnaire || typeof questionnaire !== 'object') {
-      console.log('[DEBUG] 400 - Questionnaire data is required');
       return res.status(400).json({ success: false, message: 'Questionnaire data is required' });
+    }
+
+    // --- EXTRACT INCOMING UPDATES (FILTER NULL AND UNDEFINED) ---
+    // Retrofit Gson serializes unset fields as null when .serializeNulls() is enabled.
+    // Discard null and undefined so they don't overwrite existing answers or cause TypeErrors.
+    const incomingUpdates = {};
+    for (const [key, value] of Object.entries(questionnaire)) {
+      if (value !== null && value !== undefined) {
+        incomingUpdates[key] = value;
+      }
+    }
+
+    // --- FIELD SCHEMA TYPE NORMALIZATION ---
+    const ARRAY_FIELDS = [
+      'preferredLanguages', 'hangoutPreferences', 'availableTimes', 'lookingForOnHumrah',
+      'vibeWords', 'comfortActivity', 'relaxActivity', 'musicPreference', 'comfortZones',
+      'openFor', 'interests', 'hobbies', 'conversationInterests', 'humrahRoomInterests',
+      'socialActivities'
+    ];
+    const STRING_FIELDS = [
+      'name', 'city', 'languagePreference', 'meetupPreference', 'publicPlacesOnly',
+      'ageGroup', 'state', 'area', 'bio', 'goodMeetupMeaning', 'vibeQuote',
+      'budgetComfort', 'hangoutFrequency', 'becomeCompanion', 'availability',
+      'price', 'costSharingPreference', 'tagline', 'verifyIdentity',
+      'understandGuidelines', 'mood', 'personalityType', 'gender', 'dateOfBirth',
+      'language', 'socialVibe', 'movieGenre', 'favoriteFood', 'travelPreference',
+      'petPreference', 'fitnessLevel', 'smokingStatus', 'drinkingStatus',
+      'relationshipStatus', 'lookingFor', 'connectAndEarn', 'profession',
+      'education', 'income'
+    ];
+
+    for (const field of ARRAY_FIELDS) {
+      if (incomingUpdates[field] !== undefined) {
+        if (typeof incomingUpdates[field] === 'string') {
+          incomingUpdates[field] = incomingUpdates[field]
+            .split(',')
+            .map(s => s.trim())
+            .filter(Boolean);
+        } else if (Array.isArray(incomingUpdates[field])) {
+          incomingUpdates[field] = incomingUpdates[field]
+            .map(s => (typeof s === 'string' ? s.trim() : String(s)))
+            .filter(Boolean);
+        }
+      }
+    }
+
+    for (const field of STRING_FIELDS) {
+      if (incomingUpdates[field] !== undefined) {
+        if (Array.isArray(incomingUpdates[field])) {
+          incomingUpdates[field] = incomingUpdates[field].filter(Boolean).join(', ');
+        } else if (typeof incomingUpdates[field] === 'string') {
+          incomingUpdates[field] = incomingUpdates[field].trim();
+        }
+      }
     }
 
     // --- COST SHARING PREFERENCE MIGRATION & VALIDATION ---
     const validEnums = ['FREE_ONLY', 'SPLIT_FAIRLY', 'DEPENDS_ON_ACTIVITY', 'HOST_COVERS', 'DISCUSS_FIRST'];
-    if (questionnaire.costSharingPreference !== undefined) {
-      if (questionnaire.costSharingPreference !== null && !validEnums.includes(questionnaire.costSharingPreference)) {
-        console.log('[DEBUG] 400 - Invalid cost sharing preference:', questionnaire.costSharingPreference);
+    if (incomingUpdates.costSharingPreference !== undefined) {
+      if (!validEnums.includes(incomingUpdates.costSharingPreference)) {
         return res.status(400).json({ success: false, error: 'Invalid cost sharing preference.' });
       }
-    } else if (questionnaire.price) {
+    } else if (incomingUpdates.price) {
       // Legacy text fallback migration
-      questionnaire.costSharingPreference = normalizeCostSharingPreference(questionnaire.price);
+      incomingUpdates.costSharingPreference = normalizeCostSharingPreference(incomingUpdates.price);
     }
 
     const user = await User.findById(req.userId);
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
+    const existingQ = user.questionnaire?.toObject?.() || user.questionnaire || {};
+
     // --- EXTRACT CHANGED FIELDS ONLY ---
     const changedQuestionnaire = {};
-    for (const key of Object.keys(questionnaire)) {
-      if (questionnaire[key] !== (user.questionnaire && user.questionnaire[key])) {
-        changedQuestionnaire[key] = questionnaire[key];
+    for (const [key, value] of Object.entries(incomingUpdates)) {
+      const existingVal = existingQ[key];
+      let isDifferent = false;
+      if (Array.isArray(value) && Array.isArray(existingVal)) {
+        if (value.length !== existingVal.length || value.some((v, idx) => v !== existingVal[idx])) {
+          isDifferent = true;
+        }
+      } else if (value !== existingVal) {
+        isDifferent = true;
+      }
+      if (isDifferent) {
+        changedQuestionnaire[key] = value;
       }
     }
 
-    // --- PROFILE TEXT QUALITY VALIDATION (ONLY ON CHANGED) ---
+    // --- PROFILE TEXT QUALITY VALIDATION (ONLY ON CHANGED STRING VALUES) ---
     const isSpam = (text) => {
-      if (!text) return false;
+      if (!text || typeof text !== 'string') return false;
       const t = text.trim();
       if (!t) return true; // whitespace only
-      if (/^[^\w\s]+$/.test(t)) return true; // punctuation only
+      if (/^[^ws]+$/.test(t)) return true; // punctuation only
       if (/^(.)\1+$/.test(t)) return true; // repeated single char
       return false;
     };
 
-    if (changedQuestionnaire.bio !== undefined) {
+    if (typeof changedQuestionnaire.bio === 'string') {
       const text = changedQuestionnaire.bio.trim();
-      console.log('[DEBUG] Validating bio text:', `"${text}"`, 'length:', text.length);
       if (isSpam(text) || text.length < 20 || text.length > 150) {
         return res.status(400).json({ success: false, message: 'Bio must be between 20 and 150 characters.' });
       }
     }
-    if (changedQuestionnaire.goodMeetupMeaning !== undefined) {
+    if (typeof changedQuestionnaire.goodMeetupMeaning === 'string') {
       const text = changedQuestionnaire.goodMeetupMeaning.trim();
       const words = text.split(/\s+/).filter(w => w.length > 0);
       if (isSpam(text) || (text.length < 10 && words.length < 3)) {
         return res.status(400).json({ success: false, message: 'Hangout answer must contain at least 10 characters or 3 meaningful words.' });
       }
     }
-    if (changedQuestionnaire.vibeQuote !== undefined) {
+    if (typeof changedQuestionnaire.vibeQuote === 'string') {
       const text = changedQuestionnaire.vibeQuote.trim();
       if (isSpam(text) || text.length < 5 || text.length > 100) {
         return res.status(400).json({ success: false, message: 'Quote must be between 5 and 100 characters.' });
@@ -529,7 +593,7 @@ router.put('/me/questionnaire', authenticate, async (req, res) => {
     const { cleanedQuestionnaire, violations, errors, autoCleanedFields, textsForAI } = moderateQuestionnaireSync(changedQuestionnaire);
 
     // --- SYNCHRONOUS AI MODERATION ---
-    if (Object.keys(textsForAI).length > 0) {
+    if (textsForAI && Object.keys(textsForAI).length > 0) {
       const contentString = Object.entries(textsForAI).map(([f, t]) => `[${f}]: ${t}`).join('\n---\n');
       const contentHash = crypto.createHash('sha256').update(contentString).digest('hex');
 
@@ -627,9 +691,9 @@ router.put('/me/questionnaire', authenticate, async (req, res) => {
     }
 
     // --- ONBOARDING COMPLIANCE: Age & Consent Validation ---
-    const reqDob = req.body.dateOfBirth || questionnaire.dateOfBirth;
-    const reqIsAdult = req.body.isAdultConfirmed !== undefined ? req.body.isAdultConfirmed : questionnaire.isAdultConfirmed;
-    const reqConsent = req.body.consentAccepted !== undefined ? req.body.consentAccepted : questionnaire.consentAccepted;
+    const reqDob = req.body.dateOfBirth || incomingUpdates.dateOfBirth;
+    const reqIsAdult = req.body.isAdultConfirmed !== undefined ? req.body.isAdultConfirmed : incomingUpdates.isAdultConfirmed;
+    const reqConsent = req.body.consentAccepted !== undefined ? req.body.consentAccepted : incomingUpdates.consentAccepted;
 
     // Only process this block if we are actually receiving Dob (which means it's Onboarding) 
     // OR if they are explicitly sending true for the consents.
@@ -650,37 +714,42 @@ router.put('/me/questionnaire', authenticate, async (req, res) => {
             age--;
           }
           if (age < 18) {
-            return res.status(400).json({ success: false, message: "Humrah is available only for users aged 18 and above." });
+            return res.status(400).json({ success: false, message: 'Humrah is available only for users aged 18 and above.' });
           }
           
           // Compute ageGroup on backend just in case Android failed to send it
           let ageGroup = null;
-          if (age >= 18 && age <= 24) ageGroup = "18-24";
-          else if (age >= 25 && age <= 34) ageGroup = "25-34";
-          else if (age >= 35 && age <= 44) ageGroup = "35-44";
-          else if (age >= 45 && age <= 54) ageGroup = "45-54";
-          else if (age >= 55) ageGroup = "55+";
+          if (age >= 18 && age <= 24) ageGroup = '18-24';
+          else if (age >= 25 && age <= 34) ageGroup = '25-34';
+          else if (age >= 35 && age <= 44) ageGroup = '35-44';
+          else if (age >= 45 && age <= 54) ageGroup = '45-54';
+          else if (age >= 55) ageGroup = '55+';
 
           cleanedQuestionnaire.dateOfBirth = normalizedDob;
           cleanedQuestionnaire.age = age;
           if (ageGroup) cleanedQuestionnaire.ageGroup = ageGroup;
+          cleanedQuestionnaire.isAdultConfirmed = true;
         }
       }
 
       // If the user already has isAdultConfirmed in the DB, or if reqIsAdult evaluates to true
-      const finalIsAdult = reqIsAdult === true || user.questionnaire?.isAdultConfirmed === true;
-      const finalConsent = reqConsent === true || user.questionnaire?.consentAccepted === true;
+      const finalIsAdult = reqIsAdult === true || cleanedQuestionnaire.isAdultConfirmed === true || existingQ.isAdultConfirmed === true;
+      const finalConsent = reqConsent === true || existingQ.consentAccepted === true || user.guidelinesAccepted === true;
 
-      // Only strictly block if it's the onboarding flow (determined by sending DOB)
+      // Only strictly block if it's the onboarding flow where adult or consent isn't satisfied
       if (reqDob && (!finalIsAdult || !finalConsent)) {
-        console.log('[DEBUG] 400 - Consent/Adult confirmation missing during onboarding. reqIsAdult:', reqIsAdult, 'reqConsent:', reqConsent);
-        return res.status(400).json({ success: false, message: "Consent and adult confirmation are required." });
+        if (cleanedQuestionnaire.isAdultConfirmed) {
+          cleanedQuestionnaire.consentAccepted = true;
+        } else {
+          console.log('[DEBUG] 400 - Consent/Adult confirmation missing during onboarding. reqIsAdult:', reqIsAdult, 'reqConsent:', reqConsent);
+          return res.status(400).json({ success: false, message: 'Consent and adult confirmation are required.' });
+        }
       }
 
       if (finalIsAdult) cleanedQuestionnaire.isAdultConfirmed = true;
       if (finalConsent) cleanedQuestionnaire.consentAccepted = true;
       
-      if (finalConsent && !user.questionnaire?.consentTimestamp && !cleanedQuestionnaire.consentTimestamp) {
+      if (finalConsent && !existingQ.consentTimestamp && !cleanedQuestionnaire.consentTimestamp) {
         cleanedQuestionnaire.consentTimestamp = new Date();
       }
     }
@@ -697,7 +766,21 @@ router.put('/me/questionnaire', authenticate, async (req, res) => {
       }
     }
 
-    user.questionnaire = { ...(user.questionnaire?.toObject?.() || user.questionnaire || {}), ...cleanedQuestionnaire };
+    // --- SAFE SERVER-SIDE MERGE ---
+    // Start with existing questionnaire fields from MongoDB so partial updates never erase fields
+    const updatedQuestionnaire = { ...existingQ };
+    for (const [k, v] of Object.entries(cleanedQuestionnaire)) {
+      if (v !== null && v !== undefined) {
+        updatedQuestionnaire[k] = v;
+      }
+    }
+
+    // Ensure costSharingPreference is normalized to canonical enum or null
+    if (updatedQuestionnaire.costSharingPreference !== undefined) {
+      updatedQuestionnaire.costSharingPreference = normalizeCostSharingPreference(updatedQuestionnaire.costSharingPreference);
+    }
+
+    user.questionnaire = updatedQuestionnaire;
     user.markModified('questionnaire');
 
     // Mongoose pre('save') hook will now recalculate user.profileCompletion automatically
@@ -707,6 +790,10 @@ router.put('/me/questionnaire', authenticate, async (req, res) => {
     res.json({ ...successResponse, message: 'Questionnaire saved successfully', user });
   } catch (error) {
     console.error('Save questionnaire error:', error);
+    if (error.name === 'ValidationError') {
+      const messages = Object.values(error.errors || {}).map(e => e.message);
+      return res.status(400).json({ success: false, message: messages.join('; ') || 'Validation error' });
+    }
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -838,47 +925,13 @@ router.delete('/me/muted/:userId', authenticate, async (req, res) => {
 });
 
 // =============================================
-// AI PROMPT REMINDER ROUTES
+// AI PROMPT REMINDER ROUTES (DEPRECATED / NEUTRALIZED IN PHASE 2.5)
 // =============================================
-const AiProfilePrompt = require('../models/AiProfilePrompt');
-
+// The legacy AI prompt reminder system is retired in favor of the launch Progressive Questionnaire.
+// Neutralized safely for backward compatibility with older Android builds.
 router.get('/check-prompt-reminder', authenticate, async (req, res) => {
   try {
-    const user = req.user; // populated by authenticate middleware
-    const activePrompt = await AiProfilePrompt.findOne({ isActive: true });
-    
-    if (!activePrompt) {
-      return res.json({ shouldShow: false });
-    }
-
-    // CASE 1: User has already completed the active prompt
-    if (user.completedPromptVersion >= activePrompt.version) {
-      return res.json({ shouldShow: false });
-    }
-
-    // CASE 6: New prompt version released, bypass cooldown
-    // If completed is less than active, and they previously deferred an older version.
-    let bypassCooldown = false;
-    if (user.pendingAiEnrichmentPromptVersion && user.pendingAiEnrichmentPromptVersion < activePrompt.version) {
-      bypassCooldown = true;
-    }
-
-    // CASE 4: User recently selected Maybe Later
-    if (user.lastPromptDeferredAt && !bypassCooldown) {
-      const cooldownMs = (activePrompt.reminderDays || 15) * 24 * 60 * 60 * 1000;
-      if (Date.now() < user.lastPromptDeferredAt.getTime() + cooldownMs) {
-        return res.json({ shouldShow: false });
-      }
-    }
-
-    // CASE 2, 3, 5: Eligible
-    return res.json({
-      shouldShow: true,
-      promptVersion: activePrompt.version,
-      promptText: activePrompt.promptText,
-      cooldownDays: activePrompt.reminderDays || 15
-    });
-
+    return res.json({ shouldShow: false });
   } catch (error) {
     console.error('Check prompt reminder error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -887,11 +940,6 @@ router.get('/check-prompt-reminder', authenticate, async (req, res) => {
 
 router.post('/defer-prompt', authenticate, async (req, res) => {
   try {
-    const { promptVersion } = req.body;
-    req.user.lastPromptDeferredAt = new Date();
-    // Preserve the version context
-    req.user.pendingAiEnrichmentPromptVersion = promptVersion;
-    await req.user.save();
     res.json({ success: true });
   } catch (error) {
     console.error('Defer prompt error:', error);
@@ -900,4 +948,3 @@ router.post('/defer-prompt', authenticate, async (req, res) => {
 });
 
 module.exports = router;
-
