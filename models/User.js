@@ -48,8 +48,22 @@ const questionnaireSchema = new mongoose.Schema({
       'SPLIT_FAIRLY',
       'DEPENDS_ON_ACTIVITY',
       'HOST_COVERS',
-      'DISCUSS_FIRST'
+      'DISCUSS_FIRST',
+      null,
+      ''
     ],
+    set: function(val) {
+      if (!val || typeof val !== 'string') return null;
+      const lower = val.trim().toLowerCase();
+      const validEnums = ['FREE_ONLY', 'SPLIT_FAIRLY', 'DEPENDS_ON_ACTIVITY', 'HOST_COVERS', 'DISCUSS_FIRST'];
+      if (validEnums.includes(val)) return val;
+      if (lower.includes('split')) return 'SPLIT_FAIRLY';
+      if (lower.includes('free')) return 'FREE_ONLY';
+      if (lower.includes('host')) return 'HOST_COVERS';
+      if (lower.includes('depend')) return 'DEPENDS_ON_ACTIVITY';
+      if (lower.includes('discuss')) return 'DISCUSS_FIRST';
+      return null;
+    },
     default: null
   },
   tagline: String,
@@ -82,9 +96,7 @@ const questionnaireSchema = new mongoose.Schema({
   // =============================================
   // ONBOARDING & COMPLIANCE FIELDS
   // =============================================
-  dateOfBirth: String,
   age: Number,
-  ageGroup: String,
   isAdultConfirmed: { type: Boolean, default: false },
   consentAccepted: { type: Boolean, default: false },
   consentTimestamp: { type: Date, default: null }
@@ -702,6 +714,8 @@ userSchema.methods.getPublicProfile = function() {
     userType: this.userType,
     questionnaire: {
       city: this.questionnaire?.city,
+      preferredLanguages: this.questionnaire?.preferredLanguages,
+      gender: this.questionnaire?.gender,
       interests: this.questionnaire?.interests,
       ageGroup: this.questionnaire?.ageGroup,
       state: this.questionnaire?.state,
@@ -711,17 +725,27 @@ userSchema.methods.getPublicProfile = function() {
       vibeQuote: this.questionnaire?.vibeQuote,
       lookingForOnHumrah: this.questionnaire?.lookingForOnHumrah,
       vibeWords: this.questionnaire?.vibeWords,
+      conversationInterests: this.questionnaire?.conversationInterests,
+      humrahRoomInterests: this.questionnaire?.humrahRoomInterests,
       hangoutPreferences: this.questionnaire?.hangoutPreferences,
+      availableTimes: this.questionnaire?.availableTimes,
+      socialVibe: this.questionnaire?.socialVibe,
+      movieGenre: this.questionnaire?.movieGenre,
+      favoriteFood: this.questionnaire?.favoriteFood,
+      travelPreference: this.questionnaire?.travelPreference,
       musicPreference: this.questionnaire?.musicPreference,
       comfortActivity: this.questionnaire?.comfortActivity,
       relaxActivity: this.questionnaire?.relaxActivity,
       comfortZones: this.questionnaire?.comfortZones,
+      budgetComfort: this.questionnaire?.budgetComfort,
+      hangoutFrequency: this.questionnaire?.hangoutFrequency,
       hobbies: this.questionnaire?.hobbies,
       ...(this.userType === 'COMPANION' && {
         becomeCompanion: this.questionnaire?.becomeCompanion,
         openFor: this.questionnaire?.openFor,
         availability: this.questionnaire?.availability,
         price: this.questionnaire?.price,
+        costSharingPreference: this.questionnaire?.costSharingPreference,
         tagline: this.questionnaire?.tagline
       })
     },
