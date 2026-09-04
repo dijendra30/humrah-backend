@@ -735,9 +735,11 @@ router.put('/me/questionnaire', authenticate, async (req, res) => {
     // --- COST SHARING PREFERENCE MIGRATION & VALIDATION ---
     const validEnums = ['FREE_ONLY', 'SPLIT_FAIRLY', 'DEPENDS_ON_ACTIVITY', 'HOST_COVERS', 'DISCUSS_FIRST'];
     if (incomingUpdates.costSharingPreference !== undefined) {
-      if (!validEnums.includes(incomingUpdates.costSharingPreference)) {
+      const normalized = normalizeCostSharingPreference(incomingUpdates.costSharingPreference);
+      if (!normalized || !validEnums.includes(normalized)) {
         return res.status(400).json({ success: false, error: 'Invalid cost sharing preference.' });
       }
+      incomingUpdates.costSharingPreference = normalized;
     } else if (incomingUpdates.price) {
       // Legacy text fallback migration
       incomingUpdates.costSharingPreference = normalizeCostSharingPreference(incomingUpdates.price);
@@ -769,29 +771,35 @@ router.put('/me/questionnaire', authenticate, async (req, res) => {
     const isSpam = (text) => {
       if (!text || typeof text !== 'string') return false;
       const t = text.trim();
-      if (!t) return true; // whitespace only
-      if (/^[^ws]+$/.test(t)) return true; // punctuation only
+      if (!t) return false; // empty / cleared text is not spam
+      if (/^[^\w\s]+$/.test(t)) return true; // punctuation only
       if (/^(.)\1+$/.test(t)) return true; // repeated single char
       return false;
     };
 
     if (typeof changedQuestionnaire.bio === 'string') {
       const text = changedQuestionnaire.bio.trim();
-      if (isSpam(text) || text.length < 20 || text.length > 150) {
-        return res.status(400).json({ success: false, message: 'Bio must be between 20 and 150 characters.' });
+      if (text.length > 0) {
+        if (isSpam(text) || text.length < 20 || text.length > 150) {
+          return res.status(400).json({ success: false, message: 'Bio must be between 20 and 150 characters.' });
+        }
       }
     }
     if (typeof changedQuestionnaire.goodMeetupMeaning === 'string') {
       const text = changedQuestionnaire.goodMeetupMeaning.trim();
-      const words = text.split(/\s+/).filter(w => w.length > 0);
-      if (isSpam(text) || (text.length < 10 && words.length < 3)) {
-        return res.status(400).json({ success: false, message: 'Hangout answer must contain at least 10 characters or 3 meaningful words.' });
+      if (text.length > 0) {
+        const words = text.split(/\s+/).filter(w => w.length > 0);
+        if (isSpam(text) || (text.length < 10 && words.length < 3)) {
+          return res.status(400).json({ success: false, message: 'Hangout answer must contain at least 10 characters or 3 meaningful words.' });
+        }
       }
     }
     if (typeof changedQuestionnaire.vibeQuote === 'string') {
       const text = changedQuestionnaire.vibeQuote.trim();
-      if (isSpam(text) || text.length < 5 || text.length > 100) {
-        return res.status(400).json({ success: false, message: 'Quote must be between 5 and 100 characters.' });
+      if (text.length > 0) {
+        if (isSpam(text) || text.length < 5 || text.length > 100) {
+          return res.status(400).json({ success: false, message: 'Quote must be between 5 and 100 characters.' });
+        }
       }
     }
 
@@ -934,22 +942,19 @@ router.put('/me/questionnaire', authenticate, async (req, res) => {
           cleanedQuestionnaire.dateOfBirth = normalizedDob;
           cleanedQuestionnaire.age = age;
           if (ageGroup) cleanedQuestionnaire.ageGroup = ageGroup;
-          cleanedQuestionnaire.isAdultConfirmed = true;
         }
       }
 
       // If the user already has isAdultConfirmed in the DB, or if reqIsAdult evaluates to true
-      const finalIsAdult = reqIsAdult === true || cleanedQuestionnaire.isAdultConfirmed === true || existingQ.isAdultConfirmed === true;
+      const finalIsAdult = reqIsAdult === true || existingQ.isAdultConfirmed === true;
       const finalConsent = reqConsent === true || existingQ.consentAccepted === true || user.guidelinesAccepted === true;
 
-      // Only strictly block if it's the onboarding flow where adult or consent isn't satisfied
-      if (reqDob && (!finalIsAdult || !finalConsent)) {
-        if (cleanedQuestionnaire.isAdultConfirmed) {
-          cleanedQuestionnaire.consentAccepted = true;
-        } else {
-          console.log('[DEBUG] 400 - Consent/Adult confirmation missing during onboarding. reqIsAdult:', reqIsAdult, 'reqConsent:', reqConsent);
-          return res.status(400).json({ success: false, message: 'Consent and adult confirmation are required.' });
-        }
+      // Only strictly block if it's the initial onboarding flow where adult or consent isn't satisfied.
+      // An existing user editing profile questions must not be blocked by onboarding compliance checks.
+      const isOnboarding = !existingQ.dateOfBirth && reqDob;
+      if (isOnboarding && (!finalIsAdult || !finalConsent)) {
+        console.log('[DEBUG] 400 - Consent/Adult confirmation missing during onboarding. reqIsAdult:', reqIsAdult, 'reqConsent:', reqConsent);
+        return res.status(400).json({ success: false, message: 'Consent and adult confirmation are required.' });
       }
 
       if (finalIsAdult) cleanedQuestionnaire.isAdultConfirmed = true;
