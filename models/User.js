@@ -99,7 +99,12 @@ const questionnaireSchema = new mongoose.Schema({
   age: Number,
   isAdultConfirmed: { type: Boolean, default: false },
   consentAccepted: { type: Boolean, default: false },
-  consentTimestamp: { type: Date, default: null }
+  consentTimestamp: { type: Date, default: null },
+  // =============================================
+  // PROGRESSIVE QUESTION TIMING STATE (PHASE 2.7)
+  // =============================================
+  lastProgressiveQuestionAnsweredAt: { type: Date, default: null },
+  nextProgressiveQuestionAvailableAt: { type: Date, default: null }
 }, { _id: false });
 
 const userSchema = new mongoose.Schema({
