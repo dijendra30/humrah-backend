@@ -18,6 +18,15 @@ const { checkWithOpenAI, checkWithLlamaGuard, moderateQuestionnaireSync, applySt
 // ✅ Atomic, geocode-first live location update — single source of truth
 // shared with routes/liveLocationMatchmaking.js (see services/liveLocationService.js)
 const { updateUserLiveLocation } = require('../services/liveLocationService');
+const {
+  createContinuationToken,
+  verifyContinuationToken,
+  rotateContinuationToken
+} = require('../services/progressiveSessionService');
+
+const PROGRESSIVE_QUESTION_COOLDOWN_DAYS =
+  parseInt(process.env.PROGRESSIVE_QUESTION_COOLDOWN_DAYS, 10) || 3;
+
 
 const normalizeCostSharingPreference = (val) => {
   if (!val || typeof val !== 'string') return null;
@@ -391,64 +400,77 @@ router.post('/submit-verification-photo-base64', authenticate, uploadLimiter, as
 
 // ==================== QUESTIONNAIRE ROUTES ====================
 
+// Exactly 19 launch questions (Screens 1-4)
+const PROGRESSIVE_POOL = [
+  { id: 10, key: 'dateOfBirth', type: 'string' },
+  { id: 2, key: 'city', type: 'string' },
+  { id: 3, key: 'preferredLanguages', type: 'array' },
+  { id: 25, key: 'gender', type: 'string' },
+  
+  { id: 5, key: 'availableTimes', type: 'array' },
+  { id: 8, key: 'vibeWords', type: 'array' },
+  { id: 11, key: 'conversationInterests', type: 'array' },
+  { id: 24, key: 'humrahRoomInterests', type: 'array' },
+  
+  { id: 12, key: 'movieGenre', type: 'string' },
+  { id: 13, key: 'favoriteFood', type: 'string' },
+  { id: 14, key: 'hobbies', type: 'array' },
+  
+  { id: 15, key: 'travelPreference', type: 'string' },
+  { id: 17, key: 'socialVibe', type: 'string' },
+  { id: 18, key: 'comfortZones', type: 'array' },
+  { id: 19, key: 'budgetComfort', type: 'string' },
+  { id: 20, key: 'hangoutFrequency', type: 'string' },
+  { id: 21, key: 'comfortActivity', type: 'array' },
+  { id: 22, key: 'relaxActivity', type: 'array' },
+  { id: 23, key: 'musicPreference', type: 'array' }
+];
+
+const isUnansweredProgressive = (q, key) => {
+  const val = q[key];
+  if (val === undefined || val === null) return true;
+  if (typeof val === 'string') return val.trim().length === 0;
+  if (Array.isArray(val)) return val.length === 0;
+  return false;
+};
+
+// ── GET /me/next-profile-question: Normal Home Eligibility ───────────────────
 router.get('/me/next-profile-question', authenticate, async (req, res) => {
   try {
     const user = await User.findById(req.userId);
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
     const q = user.questionnaire || {};
+    const unanswered = PROGRESSIVE_POOL.filter(p => isUnansweredProgressive(q, p.key));
 
-    const isUnanswered = (key, type) => {
-      const val = q[key];
-      if (val === undefined || val === null) return true;
-      if (typeof val === 'string') return val.trim().length === 0;
-      if (Array.isArray(val)) return val.length === 0;
-      return false;
-    };
+    if (unanswered.length === 0) {
+      return res.json({ success: true, message: 'All progressive questions completed', question: null, reason: 'complete' });
+    }
 
-    // Exactly 19 launch questions (Screens 1-4)
-    const progressivePool = [
-      { id: 10, key: 'dateOfBirth', type: 'string' },
-      { id: 2, key: 'city', type: 'string' },
-      { id: 3, key: 'preferredLanguages', type: 'array' },
-      { id: 25, key: 'gender', type: 'string' },
-      
-      { id: 5, key: 'availableTimes', type: 'array' },
-      { id: 8, key: 'vibeWords', type: 'array' },
-      { id: 11, key: 'conversationInterests', type: 'array' },
-      { id: 24, key: 'humrahRoomInterests', type: 'array' },
-      
-      { id: 12, key: 'movieGenre', type: 'array' },
-      { id: 13, key: 'favoriteFood', type: 'array' },
-      { id: 14, key: 'hobbies', type: 'array' },
-      
-      { id: 15, key: 'travelPreference', type: 'string' },
-      { id: 17, key: 'socialVibe', type: 'string' },
-      { id: 18, key: 'comfortZones', type: 'array' },
-      { id: 19, key: 'budgetComfort', type: 'string' },
-      { id: 20, key: 'hangoutFrequency', type: 'string' },
-      { id: 21, key: 'comfortActivity', type: 'array' },
-      { id: 22, key: 'relaxActivity', type: 'array' },
-      { id: 23, key: 'musicPreference', type: 'array' }
-    ];
+    // Optional: check if a valid server-issued continuationToken was supplied
+    const continuationToken = req.headers['x-continuation-token'] || req.query.continuationToken;
+    let tokenValid = false;
+    if (continuationToken) {
+      tokenValid = await verifyContinuationToken(continuationToken, req.userId);
+    }
+
+    // Cooldown check:
+    // IMPORTANT: ?session=true has NO authority to bypass cooldown.
+    // Only a verified server-issued continuationToken can bypass cooldown.
+    const now = new Date();
+    const nextAvailableAt = q.nextProgressiveQuestionAvailableAt;
+    if (!tokenValid && nextAvailableAt && now < new Date(nextAvailableAt)) {
+      return res.json({ success: true, question: null, reason: 'cooldown' });
+    }
 
     // Priority to Q24
     let nextQuestion = null;
-    const q24 = progressivePool.find(p => p.id === 24);
-    if (q24 && isUnanswered(q24.key, q24.type)) {
+    const q24 = unanswered.find(p => p.id === 24);
+    if (q24) {
       nextQuestion = q24;
     } else {
-      // Find remaining unanswered
-      const unanswered = progressivePool.filter(p => p.id !== 24 && isUnanswered(p.key, p.type));
-      if (unanswered.length > 0) {
-        // Randomly select one
-        const randomIndex = Math.floor(Math.random() * unanswered.length);
-        nextQuestion = unanswered[randomIndex];
-      }
-    }
-
-    if (!nextQuestion) {
-      return res.json({ success: true, message: 'No eligible progressive questions available', question: null });
+      const randomIndex = Math.floor(Math.random() * unanswered.length);
+      nextQuestion = unanswered[randomIndex];
     }
 
     res.json({
@@ -460,6 +482,182 @@ router.get('/me/next-profile-question', authenticate, async (req, res) => {
     });
   } catch (error) {
     console.error('Next profile question error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ── POST /me/progressive-question/answer: Dedicated Progressive Answer Endpoint ──
+router.post('/me/progressive-question/answer', authenticate, async (req, res) => {
+  try {
+    const { questionId, backendKey, answer, continuationToken } = req.body;
+    if (questionId === undefined || questionId === null) {
+      return res.status(400).json({ success: false, message: 'questionId is required' });
+    }
+
+    const qDef = PROGRESSIVE_POOL.find(p => p.id === Number(questionId));
+    if (!qDef) {
+      return res.status(400).json({ success: false, message: 'Invalid or unapproved progressive question ID' });
+    }
+
+    if (backendKey && backendKey !== qDef.key) {
+      return res.status(400).json({ success: false, message: 'questionId and backendKey mismatch' });
+    }
+
+    if (answer === undefined || answer === null) {
+      return res.status(400).json({ success: false, message: 'answer is required' });
+    }
+
+    let formattedAnswer = answer;
+    if (qDef.type === 'array') {
+      if (typeof formattedAnswer === 'string') {
+        formattedAnswer = formattedAnswer.split(',').map(s => s.trim()).filter(Boolean);
+      } else if (Array.isArray(formattedAnswer)) {
+        formattedAnswer = formattedAnswer.map(s => (typeof s === 'string' ? s.trim() : String(s))).filter(Boolean);
+      } else {
+        return res.status(400).json({ success: false, message: 'Answer must be a list or comma-separated string' });
+      }
+      if (formattedAnswer.length === 0) {
+        return res.status(400).json({ success: false, message: 'Answer cannot be empty' });
+      }
+    } else if (qDef.type === 'string') {
+      if (Array.isArray(formattedAnswer)) {
+        formattedAnswer = formattedAnswer.map(s => (typeof s === 'string' ? s.trim() : String(s))).filter(Boolean).join(', ');
+      } else if (typeof formattedAnswer === 'string') {
+        formattedAnswer = formattedAnswer.trim();
+      } else {
+        formattedAnswer = String(formattedAnswer).trim();
+      }
+      if (formattedAnswer.length === 0) {
+        return res.status(400).json({ success: false, message: 'Answer cannot be empty' });
+      }
+    }
+
+    let dobData = null;
+    if (qDef.id === 10) {
+      let normalizedDob = formattedAnswer;
+      if (/^\d{2}\/\d{2}\/\d{4}$/.test(normalizedDob)) {
+        const parts = normalizedDob.split('/');
+        normalizedDob = `${parts[2]}-${parts[1]}-${parts[0]}`;
+      }
+      const birthDate = new Date(normalizedDob);
+      if (isNaN(birthDate.getTime())) {
+        return res.status(400).json({ success: false, message: 'Invalid date of birth' });
+      }
+      let age = new Date().getFullYear() - birthDate.getFullYear();
+      const m = new Date().getMonth() - birthDate.getMonth();
+      if (m < 0 || (m === 0 && new Date().getDate() < birthDate.getDate())) {
+        age--;
+      }
+      if (age < 18) {
+        return res.status(400).json({ success: false, message: 'Humrah is available only for users aged 18 and above.' });
+      }
+      let ageGroup = null;
+      if (age >= 18 && age <= 24) ageGroup = '18-24';
+      else if (age >= 25 && age <= 34) ageGroup = '25-34';
+      else if (age >= 35 && age <= 44) ageGroup = '35-44';
+      else if (age >= 45 && age <= 54) ageGroup = '45-54';
+      else if (age >= 55) ageGroup = '55+';
+
+      dobData = {
+        dateOfBirth: normalizedDob,
+        age,
+        ageGroup,
+        isAdultConfirmed: true
+      };
+    }
+
+    const user = await User.findById(req.userId);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    const existingQ = user.questionnaire?.toObject?.() || user.questionnaire || {};
+    const updatedQ = { ...existingQ };
+
+    // Update ONLY the answered question
+    if (dobData) {
+      updatedQ.dateOfBirth = dobData.dateOfBirth;
+      updatedQ.age = dobData.age;
+      if (dobData.ageGroup) updatedQ.ageGroup = dobData.ageGroup;
+      updatedQ.isAdultConfirmed = true;
+    } else {
+      updatedQ[qDef.key] = formattedAnswer;
+      if (qDef.id === 14) {
+        updatedQ.interests = formattedAnswer;
+      }
+    }
+
+    // Set server-authoritative cooldown timing
+    const now = new Date();
+    const availableAt = new Date(now.getTime() + PROGRESSIVE_QUESTION_COOLDOWN_DAYS * 24 * 60 * 60 * 1000);
+    updatedQ.lastProgressiveQuestionAnsweredAt = now;
+    updatedQ.nextProgressiveQuestionAvailableAt = availableAt;
+
+    user.questionnaire = updatedQ;
+    user.markModified('questionnaire');
+
+    await user.save();
+
+    // ONLY AFTER SUCCESSFUL SAVE: create/rotate short-lived continuation token
+    const newToken = await rotateContinuationToken(continuationToken, user._id.toString());
+
+    res.json({
+      success: true,
+      message: 'Progressive question answered successfully',
+      continuationToken: newToken,
+      lastProgressiveQuestionAnsweredAt: now,
+      nextProgressiveQuestionAvailableAt: availableAt
+    });
+  } catch (error) {
+    console.error('Progressive answer error:', error);
+    if (error.name === 'ValidationError') {
+      const messages = Object.values(error.errors || {}).map(e => e.message);
+      return res.status(400).json({ success: false, message: messages.join('; ') || 'Validation error' });
+    }
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ── GET /me/progressive-question/next: Dedicated In-Session Continuation ─────
+router.get('/me/progressive-question/next', authenticate, async (req, res) => {
+  try {
+    const token = req.headers['x-continuation-token'] || req.query.token || req.query.continuationToken;
+    if (!token) {
+      return res.status(401).json({ success: false, message: 'Continuation token required' });
+    }
+
+    const isValid = await verifyContinuationToken(token, req.userId);
+    if (!isValid) {
+      return res.status(403).json({ success: false, message: 'Invalid or expired continuation session' });
+    }
+
+    const user = await User.findById(req.userId);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    const q = user.questionnaire || {};
+    const unanswered = PROGRESSIVE_POOL.filter(p => isUnansweredProgressive(q, p.key));
+
+    if (unanswered.length === 0) {
+      return res.json({ success: true, message: 'All progressive questions completed', question: null, reason: 'complete' });
+    }
+
+    // Priority to Q24
+    let nextQuestion = null;
+    const q24 = unanswered.find(p => p.id === 24);
+    if (q24) {
+      nextQuestion = q24;
+    } else {
+      const randomIndex = Math.floor(Math.random() * unanswered.length);
+      nextQuestion = unanswered[randomIndex];
+    }
+
+    res.json({
+      success: true,
+      question: {
+        id: nextQuestion.id,
+        backendKey: nextQuestion.key
+      }
+    });
+  } catch (error) {
+    console.error('Next progressive question continuation error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -481,6 +679,14 @@ router.put('/me/questionnaire', authenticate, async (req, res) => {
         incomingUpdates[key] = value;
       }
     }
+
+    // Explicitly delete progressive timing and client source flags:
+    // General PUT /me/questionnaire MUST NOT start/alter progressive cooldown,
+    // and malicious clients cannot tamper with server-authoritative timestamps.
+    delete incomingUpdates.lastProgressiveQuestionAnsweredAt;
+    delete incomingUpdates.nextProgressiveQuestionAvailableAt;
+    delete incomingUpdates.source;
+    delete incomingUpdates.isProgressive;
 
     // --- FIELD SCHEMA TYPE NORMALIZATION ---
     const ARRAY_FIELDS = [
