@@ -1,5 +1,8 @@
 const AppConfig = require('../models/AppConfig');
 const { uploadBuffer } = require('../config/cloudinary');
+const redisService = require('../services/redisService');
+
+const CACHE_KEY = 'humrah:app-config';
 
 const getOrCreateConfig = async () => {
   let config = await AppConfig.findOne({});
@@ -93,6 +96,14 @@ const publishLogo = async (req, res) => {
     config.draft.createdAt = null;
 
     await config.save();
+    
+    // Invalidate Cache
+    try {
+      await redisService.del(CACHE_KEY);
+      console.log('APP_CONFIG_CACHE_INVALIDATED');
+    } catch (err) {
+      console.warn('Failed to invalidate cache:', err.message);
+    }
 
     return res.status(200).json({
       success: true,
@@ -114,6 +125,14 @@ const stopRemoteBranding = async (req, res) => {
     config.branding.remoteBrandingEnabled = false;
     config.branding.updatedAt = new Date();
     await config.save();
+
+    // Invalidate Cache
+    try {
+      await redisService.del(CACHE_KEY);
+      console.log('APP_CONFIG_CACHE_INVALIDATED');
+    } catch (err) {
+      console.warn('Failed to invalidate cache:', err.message);
+    }
 
     return res.status(200).json({
       success: true,
@@ -145,6 +164,14 @@ const restoreDefaultBranding = async (req, res) => {
     config.draft.createdAt = null;
 
     await config.save();
+
+    // Invalidate Cache
+    try {
+      await redisService.del(CACHE_KEY);
+      console.log('APP_CONFIG_CACHE_INVALIDATED');
+    } catch (err) {
+      console.warn('Failed to invalidate cache:', err.message);
+    }
 
     return res.status(200).json({
       success: true,
