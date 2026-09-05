@@ -3,8 +3,11 @@ const mongoose = require('mongoose');
 const humrahRoomSchema = new mongoose.Schema({
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   discoveryMode: { type: String, enum: ['NEAR_ME', 'ALL_INDIA', 'PRIVATE'], required: true },
-  topic: { type: String, default: '' },
-  capacity: { type: Number, required: true, min: 2, max: 10 },
+  title: { type: String, required: true, trim: true, maxlength: 30 },
+  description: { type: String, trim: true },
+  topic: { type: String, required: true },
+  languages: { type: [String], default: [] },
+  capacity: { type: Number, required: true, min: 2, max: 5 },
   status: { type: String, enum: ['SUGGESTED', 'ACTIVE', 'FULL', 'INACTIVE', 'CLOSED'], default: 'ACTIVE' },
   expiresAt: { type: Date },
   lastMessageAt: { type: Date, default: Date.now }
