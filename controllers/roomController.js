@@ -16,15 +16,7 @@ const logRoomEvent = async (eventType, metadata = {}) => {
   }
 };
 
-const CANONICAL_TOPICS = [
-  "Movies & Series", "Food & Cooking", "Music", "Gaming", "Travel & Exploring",
-  "Sports", "Study & Learning", "Books & Reading", "Technology", "Photography & Content Creation",
-  "Fitness & Wellness", "Fashion & Style", "Art & Creativity", "Career & Work", "Startups & Business",
-  "College & Campus Life", "Current Topics", "Life & Experiences", "Personal Growth", "Relationships & Friendships",
-  "Chill & Casual Conversations", "Deep Conversations", "Local Hangouts", "Cafés & Food Spots", "Weekend Plans",
-  "City Exploration", "Events & Activities", "Random Fun Discussions", "Memes & Internet Culture", "Pop Culture",
-  "Anime & Manga", "TV Shows & Fandoms", "Creative Writing & Storytelling", "Language & Culture", "Just Meeting New People"
-];
+const { resolveRoomTopicImage, getAvailableTopics, isValidTopicForUser } = require('../utils/roomTopicConfig');
 
 exports.createRoom = async (req, res) => {
   if (process.env.ENABLE_HUMRAH_ROOMS === 'false') {
@@ -42,7 +34,10 @@ exports.createRoom = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Title must be maximum 30 characters' });
     }
 
-    if (!CANONICAL_TOPICS.includes(topic)) {
+    const user = await User.findById(userId).select('questionnaire.city');
+    const userCity = user?.questionnaire?.city;
+
+    if (!isValidTopicForUser(topic, userCity)) {
       return res.status(400).json({ success: false, message: 'Invalid topic selected' });
     }
 
@@ -99,6 +94,7 @@ exports.createRoom = async (req, res) => {
         title: room.title,
         description: room.description,
         topic: room.topic,
+        imageUrl: resolveRoomTopicImage(room.topic),
         languages: room.languages,
         discoveryMode: room.discoveryMode,
         memberCount: 1,
@@ -200,6 +196,7 @@ exports.discoverRooms = async (req, res) => {
               title: room.title,
               description: room.description,
               topic: room.topic,
+              imageUrl: resolveRoomTopicImage(room.topic),
               languages: room.languages,
               discoveryMode: room.discoveryMode,
               capacity: room.capacity,
@@ -227,6 +224,7 @@ exports.discoverRooms = async (req, res) => {
           title: room.title,
           description: room.description,
           topic: room.topic,
+          imageUrl: resolveRoomTopicImage(room.topic),
           languages: room.languages,
           discoveryMode: room.discoveryMode,
           capacity: room.capacity,
@@ -411,6 +409,7 @@ exports.getMyRooms = async (req, res) => {
         title: room.title,
         description: room.description,
         topic: room.topic,
+        imageUrl: resolveRoomTopicImage(room.topic),
         languages: room.languages,
         discoveryMode: room.discoveryMode,
         capacity: room.capacity,
@@ -447,6 +446,7 @@ exports.getRoomDetails = async (req, res) => {
       title: room.title,
       description: room.description,
       topic: room.topic,
+      imageUrl: resolveRoomTopicImage(room.topic),
       languages: room.languages,
       discoveryMode: room.discoveryMode,
       capacity: room.capacity,
@@ -489,5 +489,18 @@ exports.getRoomMessages = async (req, res) => {
   } catch (error) {
     console.error('[getRoomMessages error]', error);
     res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+exports.getTopics = async (req, res) => {
+  try {
+    const user = await User.findById(req.userId).select('questionnaire.city');
+    const city = user?.questionnaire?.city;
+    
+    const topics = getAvailableTopics(city);
+    return res.status(200).json({ success: true, topics });
+  } catch (error) {
+    console.error('[getTopics error]', error);
+    return res.status(500).json({ success: false, message: 'Server error fetching topics' });
   }
 };
