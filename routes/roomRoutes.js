@@ -6,6 +6,7 @@ const { authenticate } = require('../middleware/auth');
 router.post('/', authenticate, roomController.createRoom);
 router.post('/discover', authenticate, roomController.discoverRooms);
 router.post('/:roomId/join', authenticate, roomController.joinRoom);
+router.post('/:roomId/leave', authenticate, roomController.leaveRoom);
 router.get('/', authenticate, roomController.getMyRooms);
 router.get('/:roomId', authenticate, roomController.getRoomDetails);
 router.get('/:roomId/messages', authenticate, roomController.getRoomMessages);
