@@ -16,28 +16,53 @@ const logRoomEvent = async (eventType, metadata = {}) => {
   }
 };
 
+const CANONICAL_TOPICS = [
+  "Movies & Series", "Food & Cooking", "Music", "Gaming", "Travel & Exploring",
+  "Sports", "Study & Learning", "Books & Reading", "Technology", "Photography & Content Creation",
+  "Fitness & Wellness", "Fashion & Style", "Art & Creativity", "Career & Work", "Startups & Business",
+  "College & Campus Life", "Current Topics", "Life & Experiences", "Personal Growth", "Relationships & Friendships",
+  "Chill & Casual Conversations", "Deep Conversations", "Local Hangouts", "Cafés & Food Spots", "Weekend Plans",
+  "City Exploration", "Events & Activities", "Random Fun Discussions", "Memes & Internet Culture", "Pop Culture",
+  "Anime & Manga", "TV Shows & Fandoms", "Creative Writing & Storytelling", "Language & Culture", "Just Meeting New People"
+];
+
 exports.createRoom = async (req, res) => {
   if (process.env.ENABLE_HUMRAH_ROOMS === 'false') {
     return res.status(503).json({ success: false, message: 'Humrah Rooms are currently undergoing maintenance.' });
   }
 
   try {
-    const { topic, targetParticipants, discoveryMode } = req.body;
+    const { title, description, topic, capacity, discoveryMode, languages } = req.body;
     const userId = req.userId;
+
+    if (!title || title.trim() === '') {
+      return res.status(400).json({ success: false, message: 'Title is required' });
+    }
+    if (title.trim().length > 30) {
+      return res.status(400).json({ success: false, message: 'Title must be maximum 30 characters' });
+    }
+
+    if (!CANONICAL_TOPICS.includes(topic)) {
+      return res.status(400).json({ success: false, message: 'Invalid topic selected' });
+    }
 
     if (!['NEAR_ME', 'ALL_INDIA'].includes(discoveryMode)) {
       return res.status(400).json({ success: false, message: 'Invalid discovery mode' });
     }
     
-    // Ensure capacity is valid. Target participants must be at least 1 (total capacity 2)
-    const participants = parseInt(targetParticipants) || 1;
-    const totalCapacity = Math.min(Math.max(participants + 1, 2), 10);
+    const finalCapacity = parseInt(capacity);
+    if (isNaN(finalCapacity) || finalCapacity < 2 || finalCapacity > 5) {
+      return res.status(400).json({ success: false, message: 'Capacity must be between 2 and 5' });
+    }
 
     const room = new HumrahRoom({
       createdBy: userId,
       discoveryMode,
-      topic: topic || '',
-      capacity: totalCapacity,
+      title: title.trim(),
+      description: description ? description.trim() : '',
+      topic,
+      languages: Array.isArray(languages) ? languages : [],
+      capacity: finalCapacity,
       status: 'ACTIVE' // User-created rooms are immediately active
     });
 
@@ -52,6 +77,16 @@ exports.createRoom = async (req, res) => {
 
     await member.save();
 
+    // Sync topic to user profile idempotently
+    try {
+      await User.updateOne(
+        { _id: userId },
+        { $addToSet: { 'questionnaire.humrahRoomInterests': topic } }
+      );
+    } catch (profileErr) {
+      console.error('[createRoom] Failed to sync profile topic:', profileErr);
+    }
+
     // BASE TTL = 24 HOURS (86400s), JITTER = 1 HOUR (3600s)
     await redisService.setWithJitter(`room:transient:${room._id}`, { status: 'ACTIVE', createdBy: userId }, 86400, 3600);
 
@@ -61,7 +96,10 @@ exports.createRoom = async (req, res) => {
       success: true,
       room: {
         roomId: room._id,
+        title: room.title,
+        description: room.description,
         topic: room.topic,
+        languages: room.languages,
         discoveryMode: room.discoveryMode,
         memberCount: 1,
         capacity: room.capacity,
@@ -157,10 +195,12 @@ exports.discoverRooms = async (req, res) => {
             const dist = getDistance(userLat, userLng, creator.liveLocation?.lat, creator.liveLocation?.lng);
             const distanceTier = dist <= 5 ? '< 5 km' : dist <= 8 ? '5-8 km' : dist <= 10 ? '8-10 km' : '10-15 km';
             const memberCount = await RoomMember.countDocuments({ roomId: room._id, status: 'JOINED' });
-            
             return {
               roomId: room._id,
+              title: room.title,
+              description: room.description,
               topic: room.topic,
+              languages: room.languages,
               discoveryMode: room.discoveryMode,
               capacity: room.capacity,
               memberCount,
@@ -184,7 +224,10 @@ exports.discoverRooms = async (req, res) => {
         const memberCount = await RoomMember.countDocuments({ roomId: room._id, status: 'JOINED' });
         return {
           roomId: room._id,
+          title: room.title,
+          description: room.description,
           topic: room.topic,
+          languages: room.languages,
           discoveryMode: room.discoveryMode,
           capacity: room.capacity,
           memberCount,
@@ -299,6 +342,61 @@ exports.joinRoom = async (req, res) => {
   }
 };
 
+exports.leaveRoom = async (req, res) => {
+  if (process.env.ENABLE_HUMRAH_ROOMS === 'false') {
+    return res.status(503).json({ success: false, message: 'Humrah Rooms are currently undergoing maintenance.' });
+  }
+
+  const { roomId } = req.params;
+  const userId = req.userId;
+  const lockKey = `lock:room_join:${roomId}`;
+  let lockAcquired = false;
+
+  try {
+    lockAcquired = await redisService.acquireLock(lockKey, 10);
+    if (!lockAcquired) {
+      return res.status(429).json({ success: false, message: 'Room is currently busy, please try again.' });
+    }
+
+    const room = await HumrahRoom.findById(roomId);
+    if (!room) {
+      return res.status(404).json({ success: false, message: 'Room not found' });
+    }
+
+    const membership = await RoomMember.findOne({ roomId, userId, status: 'JOINED' });
+    if (!membership) {
+      return res.status(400).json({ success: false, message: 'Not an active member of this room' });
+    }
+
+    membership.status = 'LEFT';
+    membership.leftAt = new Date();
+    await membership.save();
+
+    // Clear socket presence proactively
+    if (redisService.del) {
+      await redisService.del(`presence:room:${roomId}:${userId}`);
+    }
+
+    const newMemberCount = await RoomMember.countDocuments({ roomId, status: 'JOINED' });
+    if (room.status === 'FULL' && newMemberCount < room.capacity) {
+      room.status = 'ACTIVE';
+      await room.save();
+      logRoomEvent('ROOM_REOPENED_FROM_FULL', { roomId });
+    }
+
+    logRoomEvent('ROOM_LEFT', { roomId, userId });
+    return res.status(200).json({ success: true, message: 'Successfully left room' });
+
+  } catch (error) {
+    console.error('[leaveRoom error]', error);
+    return res.status(500).json({ success: false, message: 'Server error leaving room' });
+  } finally {
+    if (lockAcquired) {
+      await redisService.releaseLock(lockKey);
+    }
+  }
+};
+
 exports.getMyRooms = async (req, res) => {
   try {
     const userId = req.userId;
@@ -310,7 +408,10 @@ exports.getMyRooms = async (req, res) => {
       const memberCount = await RoomMember.countDocuments({ roomId: room._id, status: 'JOINED' });
       return {
         roomId: room._id,
+        title: room.title,
+        description: room.description,
         topic: room.topic,
+        languages: room.languages,
         discoveryMode: room.discoveryMode,
         capacity: room.capacity,
         memberCount: memberCount,
@@ -331,6 +432,7 @@ exports.getRoomDetails = async (req, res) => {
   try {
     const { roomId } = req.params;
     const userId = req.userId;
+    // R1 Note: Currently restricts to joined members. Keeping this.
     const member = await RoomMember.findOne({ roomId, userId, status: 'JOINED' });
     if (!member) return res.status(403).json({ success: false, message: 'Not a member' });
 
@@ -339,8 +441,24 @@ exports.getRoomDetails = async (req, res) => {
     
     const members = await RoomMember.find({ roomId, status: 'JOINED' }).populate('userId', 'firstName lastName profilePhotoUrls');
     
-    res.status(200).json({ success: true, room, members });
+    // Map _id to roomId
+    const roomFormatted = {
+      roomId: room._id,
+      title: room.title,
+      description: room.description,
+      topic: room.topic,
+      languages: room.languages,
+      discoveryMode: room.discoveryMode,
+      capacity: room.capacity,
+      status: room.status,
+      memberCount: members.length,
+      createdAt: room.createdAt,
+      createdBy: room.createdBy
+    };
+
+    res.status(200).json({ success: true, room: roomFormatted, members });
   } catch (error) {
+    console.error('[getRoomDetails error]', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };
@@ -352,9 +470,24 @@ exports.getRoomMessages = async (req, res) => {
     const member = await RoomMember.findOne({ roomId, userId, status: 'JOINED' });
     if (!member) return res.status(403).json({ success: false, message: 'Not a member' });
 
-    const messages = await RoomMessage.find({ roomId }).sort({ createdAt: 1 }).limit(100);
-    res.status(200).json({ success: true, messages });
+    const messages = await RoomMessage.find({ roomId })
+      .sort({ createdAt: 1 })
+      .limit(100)
+      .populate('senderId', 'firstName lastName');
+
+    const formattedMessages = messages.map(msg => ({
+      _id: msg._id,
+      roomId: msg.roomId,
+      senderId: msg.senderId?._id || msg.senderId,
+      senderName: msg.senderId ? `${msg.senderId.firstName} ${msg.senderId.lastName}`.trim() : 'Unknown',
+      messageType: msg.messageType,
+      content: msg.content,
+      createdAt: msg.createdAt
+    }));
+
+    res.status(200).json({ success: true, messages: formattedMessages });
   } catch (error) {
+    console.error('[getRoomMessages error]', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };
