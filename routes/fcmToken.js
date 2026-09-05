@@ -19,7 +19,7 @@ const User    = require("../models/User");
 // Saves (or deduplicates) the FCM token for the authenticated user.
 router.post("/fcm-token", async (req, res) => {
   try {
-    const { fcmToken, androidVersion, appVersion } = req.body;
+    const { fcmToken, androidVersion, appVersion, supportsHumrahRooms } = req.body;
     if (!fcmToken || typeof fcmToken !== "string" || fcmToken.trim() === "") {
       return res.status(400).json({ success: false, message: "fcmToken is required" });
     }
@@ -39,11 +39,13 @@ router.post("/fcm-token", async (req, res) => {
       user.fcmDevices[existingDeviceIndex].androidVersion = androidVersion || user.fcmDevices[existingDeviceIndex].androidVersion;
       user.fcmDevices[existingDeviceIndex].appVersion = appVersion || user.fcmDevices[existingDeviceIndex].appVersion;
       user.fcmDevices[existingDeviceIndex].updatedAt = new Date();
+      if (supportsHumrahRooms !== undefined) user.fcmDevices[existingDeviceIndex].supportsHumrahRooms = !!supportsHumrahRooms;
     } else {
       user.fcmDevices.push({
         token: tokenStr,
         androidVersion: androidVersion || "Unknown",
         appVersion: appVersion || "Unknown",
+        supportsHumrahRooms: !!supportsHumrahRooms,
         updatedAt: new Date()
       });
     }
