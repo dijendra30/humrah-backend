@@ -569,6 +569,9 @@ const connectDB = async () => {
     startLetterPushCron();
     
     const { runHumrahRoomExpiry } = require('./jobs/humrahRoomExpiryJob');
+    const { processRoomInvitations } = require('./services/roomInvitationService');
+    setInterval(processRoomInvitations, 5 * 60 * 1000); // 5 mins
+    processRoomInvitations(); // initial run
     setInterval(runHumrahRoomExpiry, 15 * 60 * 1000); // 15 mins
     runHumrahRoomExpiry(); // initial run
 
@@ -743,9 +746,17 @@ const gracefulShutdown = async (signal) => {
     try {
       await mongoose.connection.close();
       console.log('MongoDB connection closed');
+      
+      const redisService = require('./services/redisService');
+      const redisClient = redisService.getClient();
+      if (redisClient) {
+        await redisClient.quit();
+        console.log('Redis connection closed');
+      }
+
       process.exit(0);
     } catch (err) {
-      console.error('Error closing MongoDB connection:', err);
+      console.error('Error during shutdown:', err);
       process.exit(1);
     }
   });
