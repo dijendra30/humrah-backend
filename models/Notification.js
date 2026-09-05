@@ -20,7 +20,7 @@ const notificationSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    enum: ['ADMIN_BROADCAST', 'SYSTEM', 'MATCH', 'ACTIVITY'],
+    enum: ['ADMIN_BROADCAST', 'SYSTEM', 'MATCH', 'ACTIVITY', 'ROOM_INVITATION'],
     default: 'ADMIN_BROADCAST'
   },
   broadcastId: {

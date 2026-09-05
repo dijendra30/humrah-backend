@@ -493,7 +493,8 @@ const userSchema = new mongoose.Schema({
     type: [{ 
       token: String, 
       androidVersion: String, 
-      appVersion: String, 
+      appVersion: String,
+        supportsHumrahRooms: { type: Boolean, default: false }, 
       updatedAt: { type: Date, default: Date.now } 
     }], 
     default: [] 
