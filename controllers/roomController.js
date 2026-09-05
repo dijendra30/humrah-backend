@@ -432,7 +432,7 @@ exports.getRoomDetails = async (req, res) => {
     const { roomId } = req.params;
     const userId = req.userId;
     // R1 Note: Currently restricts to joined members. Keeping this.
-    const member = await RoomMember.findOne({ roomId, userId, status: 'JOINED' });
+    const member = await RoomMember.findOne({ roomId, userId, status: { $in: ['JOINED', 'INVITED'] } });
     if (!member) return res.status(403).json({ success: false, message: 'Not a member' });
 
     const room = await HumrahRoom.findById(roomId);
