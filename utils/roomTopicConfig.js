@@ -11,13 +11,13 @@ const GLOBAL_TOPICS = [
 ];
 
 const TOPIC_IMAGES = {
-  'Movies & Series': null,
-  'Food & Cooking': null,
-  'Music': null,
-  'Gaming': null,
-  'Travel & Exploring': null,
-  'Sports': null,
-  'Study & Learning': null,
+  'Movies & Series': 'https://pub-6b15ba7242804a5ba9ca9ed1115c2810.r2.dev/room-topics/Movies%20%26%20Series.png',
+  'Food & Cooking': 'https://pub-6b15ba7242804a5ba9ca9ed1115c2810.r2.dev/room-topics/Food%20%26%20Cooking.png',
+  'Music': 'https://pub-6b15ba7242804a5ba9ca9ed1115c2810.r2.dev/room-topics/Music.png',
+  'Gaming': 'https://pub-6b15ba7242804a5ba9ca9ed1115c2810.r2.dev/room-topics/Gaming.png',
+  'Travel & Exploring': 'https://pub-6b15ba7242804a5ba9ca9ed1115c2810.r2.dev/room-topics/Travel%20%26%20Exploring.png',
+  'Sports': 'https://pub-6b15ba7242804a5ba9ca9ed1115c2810.r2.dev/room-topics/Sports.png',
+  'Study & Learning': 'https://pub-6b15ba7242804a5ba9ca9ed1115c2810.r2.dev/room-topics/Study%20%26%20Learning.png',
   'Books & Reading': null,
   'Technology': null,
   'Photography & Content Creation': null,
@@ -48,7 +48,7 @@ const TOPIC_IMAGES = {
   'Just Meeting New People': null,
 
   // Location-specific topics
-  'Delhi Dairy': null
+  'Delhi Dairy': 'https://pub-6b15ba7242804a5ba9ca9ed1115c2810.r2.dev/room-topics/Delhi%20Dairy.png'
 };
 
 const LOCATION_TOPICS = {
