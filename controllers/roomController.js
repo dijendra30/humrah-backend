@@ -6,6 +6,7 @@ const RoomMessage = require('../models/RoomMessage');
 const redisService = require('../services/redisService');
 const { sendDataFcm } = require('../utils/fcmHelper');
 const { normalizeReaction, serializeReactions } = require('../utils/roomReactionConfig');
+const { TIER, buildDiscoveryProfile, scoreRoomForUser, compareScored } = require('../utils/roomDiscoveryRanking');
 
 // Safe, non-blocking analytics hook
 const logRoomEvent = async (eventType, metadata = {}) => {
@@ -144,6 +145,127 @@ const getDistance = (lat1, lon1, lat2, lon2) => {
   return R * c;
 };
 
+/**
+ * R4.5 — assembles the discoverable Room inventory for one user and ranks it.
+ *
+ * Bounded query budget regardless of Room count:
+ *   1 rooms   +  (0|1) memberCount backfill  +  1 memberships  +  1 blocked-members
+ *
+ * Guarantees (see INVARIANTS in the R4.5 report):
+ *   - a Room the user has JOINED is never returned
+ *   - one user joining never removes the Room for anyone else (per-user filter only)
+ *   - FULL / CLOSED / INACTIVE / at-capacity Rooms are never returned
+ *   - member counts are the real denormalized values; nothing is fabricated
+ */
+async function buildDiscoveryInventory({ userId, user, excludeIds, joinedRoomIds, preferredMode, seededRooms }) {
+  const MAX_RESULTS = 40;
+  const joinedSet = new Set((joinedRoomIds || []).map(String));
+
+  // 1. Every Room that is structurally open to being joined right now.
+  //    SUGGESTED is included — that is the state the System Room generator emits.
+  const candidates = await HumrahRoom.find({
+    status: { $in: ['ACTIVE', 'SUGGESTED'] },
+    discoveryMode: { $in: ['NEAR_ME', 'ALL_INDIA'] },
+  })
+    .sort({ createdAt: -1 })
+    .limit(120)
+    .lean();
+
+  const open = candidates.filter(r => !joinedSet.has(String(r._id)));
+  if (open.length === 0) return seededRooms || [];
+
+  // 2. Real member counts (denormalized; falls back to one batch aggregation only
+  //    for Rooms the memberCount backfill has not touched yet).
+  const countOf = await memberCountResolver(open);
+
+  // 3. This user's non-JOINED membership state, for the invitation signal.
+  const myMemberships = await RoomMember.find({
+    userId,
+    roomId: { $in: open.map(r => r._id) },
+  }).select('roomId status').lean();
+  const myStatusByRoom = new Map(myMemberships.map(m => [String(m.roomId), m.status]));
+
+  // 4. Block safety. User-created Rooms are already screened by excludeIds above;
+  //    SYSTEM Rooms have no creator, so screen them by their JOINED members.
+  //    ONE query for every candidate Room.
+  const blockSet = new Set((excludeIds || []).map(String));
+  const joinedMembers = await RoomMember.find({
+    roomId: { $in: open.map(r => r._id) },
+    status: 'JOINED',
+  }).select('roomId userId').lean();
+  const blockedRoomIds = new Set();
+  joinedMembers.forEach(m => {
+    if (blockSet.has(String(m.userId))) blockedRoomIds.add(String(m.roomId));
+  });
+
+  const profile = buildDiscoveryProfile(user);
+  const now = Date.now();
+
+  const scored = [];
+  for (const room of open) {
+    const rid = String(room._id);
+    if (blockedRoomIds.has(rid)) continue;
+
+    const memberCount = countOf(room) || 0;
+    // Capacity is enforced server-side; never trust the client to hide a full Room.
+    if (memberCount >= (room.capacity || 0)) continue;
+
+    const myStatus = myStatusByRoom.get(rid) || null;
+    if (myStatus === 'JOINED') continue;          // defensive — already filtered
+    if (myStatus === 'KICKED') continue;
+
+    const { score, tier, reasons } = scoreRoomForUser(room, profile, {
+      memberCount,
+      isInvited: myStatus === 'INVITED',
+      now,
+    });
+    scored.push({ room, score, tier, reasons, memberCount, myStatus });
+  }
+
+  scored.sort(compareScored);
+
+  // 5. Progressive fallback so the dashboard is not needlessly empty. Personalized
+  //    Rooms first; broader tiers are appended only while inventory is thin. Every
+  //    tier is a REAL, joinable Room — nothing synthetic is added.
+  const byTier = (t) => scored.filter(s => s.tier === t);
+  const ordered = [
+    ...byTier(TIER.PERSONAL),
+    ...byTier(TIER.RELEVANT),
+    ...byTier(TIER.BROWSE),
+  ].slice(0, MAX_RESULTS);
+
+  // Preserve the distanceTier the geo path already computed for user-created Rooms.
+  const seededById = new Map((seededRooms || []).map(r => [String(r.roomId), r]));
+
+  return ordered.map(({ room, tier, reasons, memberCount, myStatus }) => {
+    const seeded = seededById.get(String(room._id));
+    const capacity = room.capacity || 0;
+    return {
+      roomId: room._id,
+      title: room.title,
+      description: room.description,
+      topic: room.topic,
+      imageUrl: resolveRoomTopicImage(room.topic),
+      languages: room.languages,
+      discoveryMode: room.discoveryMode,
+      capacity,
+      maxMembers: capacity,
+      memberCount,
+      remainingCapacity: Math.max(0, capacity - memberCount),
+      status: room.status,
+      creationSource: room.creationSource || 'USER',
+      myMembershipStatus: myStatus,          // 'INVITED' or null — never 'JOINED' here
+      discoveryTier: tier,
+      matchReasons: reasons,                 // coarse labels only, no scores exposed
+      distanceTier: seeded?.distanceTier
+        || (room.discoveryMode === 'NEAR_ME' ? 'Near Me' : 'All India'),
+      lastMessageAt: null,
+      lastMessage: null,
+      createdAt: room.createdAt,
+    };
+  });
+}
+
 exports.discoverRooms = async (req, res) => {
   if (process.env.ENABLE_HUMRAH_ROOMS === 'false') {
     return res.status(503).json({ success: false, message: 'Humrah Rooms are currently undergoing maintenance.' });
@@ -153,7 +275,9 @@ exports.discoverRooms = async (req, res) => {
     const { discoveryMode } = req.body;
     const userId = req.userId;
 
-    const user = await User.findById(userId).select('status suspensionInfo blockedUsers liveLocation');
+    // R4.5: questionnaire is needed for relevance ranking (existing explicit fields only).
+    const user = await User.findById(userId)
+      .select('status suspensionInfo blockedUsers liveLocation questionnaire');
     if (!user || user.status !== 'ACTIVE') {
       return res.status(403).json({ success: false, message: 'Account not eligible for discovery' });
     }
@@ -259,7 +383,24 @@ exports.discoverRooms = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid discovery mode' });
     }
 
-    return res.status(200).json({ success: true, rooms: discoveredRooms });
+    // ── R4.5: recruitment inventory + ranking ────────────────────────────────
+    // The block above is the pre-existing user-created-Room discovery, unchanged.
+    // SYSTEM-generated Rooms are SUGGESTED and have no createdBy, so they could
+    // never match those filters — which is why the generator's output was never
+    // discoverable. buildDiscoveryInventory() adds them (plus any open Room the
+    // strict filters missed), applies per-user membership/capacity/block rules,
+    // ranks everything, and guarantees a non-empty dashboard when real inventory
+    // exists. It never fabricates Rooms or member counts.
+    const ranked = await buildDiscoveryInventory({
+      userId,
+      user,
+      excludeIds,
+      joinedRoomIds: myRoomIds,
+      preferredMode: discoveryMode,
+      seededRooms: discoveredRooms,
+    });
+
+    return res.status(200).json({ success: true, rooms: ranked });
 
   } catch (error) {
     console.error('[discoverRooms error]', error);
