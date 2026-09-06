@@ -5,6 +5,11 @@ const User = require('../models/User');
 
 const redisService = require('../services/redisService');
 const { rateLimiter } = require('../utils/socketAuth');
+const { notifyAwayRoomMembers } = require('../services/roomMessageNotificationService');
+
+// Phase 2.1: typing state is in-process and short-lived. Never persisted to Mongo,
+// never pushed via FCM, never part of unread state.
+const TYPING_TTL_MS = 5000;
 
 /**
  * Resolve a human-readable sender name for a socket.
@@ -88,11 +93,56 @@ exports.initHumrahRoomSocket = (io) => {
       await redisService.setWithJitter(`presence:room:${roomId}:${userId}`, { online: true, socketId: socket.id }, 180, 30);
     });
 
+    // ── Typing indicator (Phase 2.1) ─────────────────────────────────────────
+    // Socket-only, Room-scoped, ephemeral. Authorization comes from activeRooms,
+    // which is only populated by a successful join_room (JOINED-membership checked).
+    // Never persisted, never notified, never affects unread or Room lifecycle.
+    const typingTimers = new Map(); // roomId -> Timeout
+
+    const emitTyping = async (roomId, isTyping) => {
+      const name = await resolveSenderName(socket);
+      socket.to(`room:${roomId}`).emit('room_typing', {
+        roomId,
+        userId,
+        userName: name,
+        isTyping,
+      });
+    };
+
+    const clearTyping = (roomId, broadcast = true) => {
+      const t = typingTimers.get(roomId);
+      if (t) { clearTimeout(t); typingTimers.delete(roomId); }
+      if (broadcast) emitTyping(roomId, false).catch(() => {});
+    };
+
+    socket.on('typing_start', async (data) => {
+      const { roomId } = data || {};
+      // Only a member who actually joined this Room socket channel may signal typing.
+      if (!roomId || !activeRooms.has(roomId)) return;
+      try {
+        const alreadyTyping = typingTimers.has(roomId);
+        // Safety fallback: typing always expires on its own even if the client
+        // never sends typing_stop (crash / network loss / app kill).
+        if (alreadyTyping) clearTimeout(typingTimers.get(roomId));
+        typingTimers.set(roomId, setTimeout(() => clearTyping(roomId), TYPING_TTL_MS));
+        if (!alreadyTyping) await emitTyping(roomId, true);
+      } catch (err) {
+        console.error('[ROOM_SOCKET] typing_start error:', err.message);
+      }
+    });
+
+    socket.on('typing_stop', (data) => {
+      const { roomId } = data || {};
+      if (!roomId || !activeRooms.has(roomId)) return;
+      if (typingTimers.has(roomId)) clearTyping(roomId);
+    });
+
     socket.on('leave_room', async (data) => {
       const { roomId } = data || {};
       if (!roomId) return;
 
       const roomChannel = `room:${roomId}`;
+      clearTyping(roomId); // stop showing this member as typing
       socket.leave(roomChannel);
       activeRooms.delete(roomId);
       console.log(`[ROOM_SOCKET] left roomId=${roomId} socketId=${socket.id} userId=${userId}`);
@@ -104,10 +154,13 @@ exports.initHumrahRoomSocket = (io) => {
     socket.on('disconnect', async () => {
       for (const roomId of activeRooms) {
         const roomChannel = `room:${roomId}`;
+        clearTyping(roomId); // a dropped socket must never stay "typing"
         socket.to(roomChannel).emit('room_member_left', { userId, userName, timestamp: new Date().toISOString() });
         await redisService.releaseLock(`presence:room:${roomId}:${userId}`);
       }
       activeRooms.clear();
+      typingTimers.forEach(t => clearTimeout(t));
+      typingTimers.clear();
     });
 
     socket.on('room_message', async (data, callback) => {
@@ -197,12 +250,26 @@ exports.initHumrahRoomSocket = (io) => {
         const emitData = await buildEmitData(msg);
 
         const roomChannel = `room:${roomId}`;
+        // Sending stops this member's typing indicator immediately.
+        clearTyping(roomId);
         // Broadcast to ALL OTHER members in the room (the sender gets it via the ack)
         socket.to(roomChannel).emit('room_message', emitData);
         console.log(`[ROOM_SOCKET] room_message persisted messageId=${emitData._id} roomId=${roomId} senderId=${userId}`);
 
         // Ack back to sender with the full persisted message
         if (typeof callback === 'function') callback({ success: true, message: emitData });
+
+        // Phase 2.1: push notification for JOINED members who are AWAY from the Room.
+        // Runs strictly AFTER persistence + ack + socket broadcast, and is
+        // fire-and-forget — a notification failure can never affect chat delivery.
+        notifyAwayRoomMembers(io, {
+          roomId,
+          messageId: msg._id,
+          senderId: userId,
+          senderName: emitData.senderName,
+          content: sanitizedContent,
+          topic: room.topic,
+        }).catch(err => console.error('[ROOM_SOCKET] away-member notify failed:', err.message));
       } catch (error) {
         console.error('[ROOM_SOCKET] error in room_message:', error);
         if (typeof callback === 'function') callback({ error: 'Server error' });
