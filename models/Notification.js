@@ -20,7 +20,9 @@ const notificationSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    enum: ['ADMIN_BROADCAST', 'SYSTEM', 'MATCH', 'ACTIVITY', 'ROOM_INVITATION', 'ROOM_MESSAGE'],
+    // ROOM_REENGAGEMENT (R5.2): a Room whose conversation has stalled. Distinct
+    // from ROOM_MESSAGE — there is no new message and no messageId.
+    enum: ['ADMIN_BROADCAST', 'SYSTEM', 'MATCH', 'ACTIVITY', 'ROOM_INVITATION', 'ROOM_MESSAGE', 'ROOM_REENGAGEMENT'],
     default: 'ADMIN_BROADCAST'
   },
 
