@@ -70,6 +70,33 @@ exports.setWithJitter = async (key, value, baseTtlSeconds, jitterSeconds) => {
   }
 };
 
+/**
+ * Fixed-window counter. Atomically increments `key` and, on the first hit of a
+ * window, sets its TTL to `windowSeconds`. Returns the new count.
+ *
+ * Multi-instance safe when Redis is configured (INCR is atomic server-side).
+ * Falls back to the in-memory map only when Redis is absent (dev). Callers that
+ * use this for a security control should treat the in-memory path as best-effort.
+ */
+exports.incrementWithWindow = async (key, windowSeconds) => {
+  if (redisClient) {
+    const count = await redisClient.incr(key);
+    if (count === 1) {
+      await redisClient.expire(key, windowSeconds);
+    }
+    return count;
+  }
+  // in-memory fallback (dev only)
+  const now = Date.now();
+  const item = memCache.get(key);
+  if (!item || now >= item.expires) {
+    memCache.set(key, { value: 1, expires: now + windowSeconds * 1000 });
+    return 1;
+  }
+  item.value += 1;
+  return item.value;
+};
+
 exports.get = async (key) => {
   if (redisClient) {
     const data = await redisClient.get(key);
