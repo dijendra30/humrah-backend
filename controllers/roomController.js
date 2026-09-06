@@ -453,7 +453,7 @@ exports.getRoomDetails = async (req, res) => {
     const room = await HumrahRoom.findById(roomId);
     if (!room) return res.status(404).json({ success: false, message: 'Not found' });
     
-    const members = await RoomMember.find({ roomId, status: 'JOINED' }).populate('userId', 'firstName lastName profilePhotoUrls');
+    const members = await RoomMember.find({ roomId, status: 'JOINED' }).populate('userId', 'firstName lastName profilePhoto');
     
     const roomFormatted = {
       roomId: room._id,
