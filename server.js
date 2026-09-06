@@ -541,6 +541,11 @@ io.on('connection', (socket) => {
   });
 });
 
+// NOTE: Humrah Room Chat socket events are initialised ONCE, further below,
+// alongside initSessionSocket(io) (see initHumrahRoomSocket(io) call).
+// A second registration here caused every room_message to be persisted and
+// broadcast twice (duplicate RoomMessage documents). Do not re-add it.
+
 function isUserOnline(userId)   { return userPresence.get(userId)?.status === 'ONLINE'; }
 function getUserLastSeen(userId) { return userPresence.get(userId)?.lastSeen || null; }
 function getUserInfo(userId)     { return userInfo.get(userId) || null; }
