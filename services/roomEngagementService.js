@@ -58,6 +58,9 @@ const THRESHOLDS = {
 const NON_CONVERSATIONAL_STATUSES = new Set(['CLOSED', 'INACTIVE', 'SUGGESTED']);
 
 const cacheKey = (roomId) => `room_engagement:${roomId}`;
+// Last observed engagement state per Room. Written only by recordStateTransition().
+// Exported so R5.2 can batch-read it instead of building a second state tracker.
+const stateKey = (roomId) => `room_engagement_state:${roomId}`;
 
 /**
  * Recent-message signals for a set of Rooms — ONE aggregation for all of them.
@@ -258,7 +261,7 @@ async function evaluateRooms(rooms, opts = {}) {
  */
 async function recordStateTransition(snapshot) {
   if (!snapshot || !snapshot.roomId) return null;
-  const key = `room_engagement_state:${snapshot.roomId}`;
+  const key = stateKey(snapshot.roomId);
   try {
     const previous = await redisService.get(key);
     if (previous === snapshot.state) return null;
@@ -291,4 +294,5 @@ module.exports = {
   loadRecentActivity,
   recordStateTransition,
   cacheKey,
+  stateKey,
 };
