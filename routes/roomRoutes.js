@@ -2,7 +2,12 @@ const express = require('express');
 const router = express.Router();
 const roomController = require('../controllers/roomController');
 const { authenticate } = require('../middleware/auth');
-const { validateRoomId, roomCreateLimiter, roomJoinLimiter } = require('../middleware/roomGuards');
+const {
+  validateRoomId,
+  roomCreateLimiter,
+  roomJoinLimiter,
+  roomReactionLimiter,
+} = require('../middleware/roomGuards');
 
 router.post('/', authenticate, roomCreateLimiter, roomController.createRoom);
 router.get('/topics', authenticate, roomController.getTopics);
@@ -14,5 +19,18 @@ router.post('/:roomId/join', authenticate, validateRoomId, roomJoinLimiter, room
 router.post('/:roomId/leave', authenticate, validateRoomId, roomController.leaveRoom);
 router.get('/:roomId', authenticate, validateRoomId, roomController.getRoomDetails);
 router.get('/:roomId/messages', authenticate, validateRoomId, roomController.getRoomMessages);
+
+// Phase 2.1 — server-authoritative read state (JOINED members only).
+router.post('/:roomId/read', authenticate, validateRoomId, roomController.markRoomRead);
+
+// Phase 2.1 — message reactions. POST adds/changes, DELETE removes.
+router.post(
+  '/:roomId/messages/:messageId/reaction',
+  authenticate, validateRoomId, roomReactionLimiter, roomController.addRoomMessageReaction
+);
+router.delete(
+  '/:roomId/messages/:messageId/reaction',
+  authenticate, validateRoomId, roomReactionLimiter, roomController.removeRoomMessageReaction
+);
 
 module.exports = router;
