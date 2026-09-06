@@ -523,7 +523,11 @@ exports.getRoomDetails = async (req, res) => {
       memberCount: typeof room.memberCount === 'number' ? room.memberCount : members.length,
       lastMessageAt: room.lastMessageAt ? room.lastMessageAt.toISOString() : null,
       createdAt: room.createdAt,
-      createdBy: room.createdBy
+      createdBy: room.createdBy,
+      // PHASE 2: the caller's own membership state ('JOINED' | 'INVITED'), so the
+      // invitation screen can show "Open Room" vs "Join Room" instead of offering
+      // Join to someone who already joined. Additive — existing clients ignore it.
+      myMembershipStatus: member.status
     };
 
     res.status(200).json({ success: true, room: roomFormatted, members });
