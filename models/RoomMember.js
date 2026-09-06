@@ -10,4 +10,7 @@ const roomMemberSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 roomMemberSchema.index({ roomId: 1, userId: 1 }, { unique: true });
+// R0: hot path — getMyRooms, discoverRooms exclusion, invitation worker all
+// query RoomMember by { userId, status }.
+roomMemberSchema.index({ userId: 1, status: 1 });
 module.exports = mongoose.model('RoomMember', roomMemberSchema);
