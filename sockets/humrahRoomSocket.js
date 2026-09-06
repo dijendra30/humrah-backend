@@ -112,6 +112,9 @@ exports.initHumrahRoomSocket = (io) => {
 
     socket.on('room_message', async (data, callback) => {
       const { roomId, content } = data || {};
+      const clientMessageId = (data && typeof data.clientMessageId === 'string')
+        ? data.clientMessageId.slice(0, 64)
+        : null;
       if (!roomId || !content || !content.trim()) {
         if (typeof callback === 'function') callback({ error: 'Missing parameters' });
         return;
@@ -142,26 +145,52 @@ exports.initHumrahRoomSocket = (io) => {
           return;
         }
 
-        const msg = new RoomMessage({
-          roomId,
-          senderId: userId,
-          messageType: 'TEXT',
-          content: sanitizedContent
+        const buildEmitData = async (m) => ({
+          _id: m._id.toString(),
+          roomId: m.roomId.toString(),
+          senderId: (m.senderId._id || m.senderId).toString(),
+          senderName: await resolveSenderName(socket),
+          content: m.content,
+          createdAt: m.createdAt.toISOString(),
+          messageType: m.messageType,
+          clientMessageId: m.clientMessageId || clientMessageId || null
         });
-        await msg.save();
+
+        // Idempotency — a retry after reconnect must not create a second row.
+        if (clientMessageId) {
+          const existing = await RoomMessage.findOne({ roomId, senderId: userId, clientMessageId });
+          if (existing) {
+            console.log(`[ROOM_SOCKET] room_message dedup clientMessageId=${clientMessageId} → messageId=${existing._id}`);
+            if (typeof callback === 'function') callback({ success: true, message: await buildEmitData(existing) });
+            return;
+          }
+        }
+
+        let msg;
+        try {
+          msg = await new RoomMessage({
+            roomId,
+            senderId: userId,
+            messageType: 'TEXT',
+            content: sanitizedContent,
+            clientMessageId
+          }).save();
+        } catch (e) {
+          // Unique index race — the retry landed while the first write was in flight.
+          if (e && e.code === 11000 && clientMessageId) {
+            const existing = await RoomMessage.findOne({ roomId, senderId: userId, clientMessageId });
+            if (existing) {
+              if (typeof callback === 'function') callback({ success: true, message: await buildEmitData(existing) });
+              return;
+            }
+          }
+          throw e;
+        }
 
         room.lastMessageAt = new Date();
         await room.save();
 
-        const emitData = {
-          _id: msg._id.toString(),
-          roomId: msg.roomId.toString(),
-          senderId: msg.senderId.toString(),
-          senderName: await resolveSenderName(socket),
-          content: sanitizedContent,
-          createdAt: msg.createdAt.toISOString(),
-          messageType: msg.messageType
-        };
+        const emitData = await buildEmitData(msg);
 
         const roomChannel = `room:${roomId}`;
         // Broadcast to ALL OTHER members in the room (the sender gets it via the ack)
