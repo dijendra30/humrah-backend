@@ -7,6 +7,7 @@ const redisService = require('../services/redisService');
 const { sendDataFcm } = require('../utils/fcmHelper');
 const { normalizeReaction, serializeReactions } = require('../utils/roomReactionConfig');
 const { TIER, buildDiscoveryProfile, scoreRoomForUser, compareScored } = require('../utils/roomDiscoveryRanking');
+const { evaluateRoom } = require('../services/roomEngagementService');
 
 // Safe, non-blocking analytics hook
 const logRoomEvent = async (eventType, metadata = {}) => {
@@ -685,7 +686,14 @@ exports.getRoomDetails = async (req, res) => {
       myMembershipStatus: member.status
     };
 
-    res.status(200).json({ success: true, room: roomFormatted, members });
+    // R5.1 — derived engagement condition of the conversation. Aggregate counts
+    // only: no user identities, no per-user timestamps, no presence identities.
+    // Already behind this endpoint's membership check, so only JOINED/INVITED
+    // members of THIS Room can see it. Advisory — a failure returns null and
+    // never breaks the Room read.
+    const engagement = await evaluateRoom(room);
+
+    res.status(200).json({ success: true, room: roomFormatted, members, engagement });
   } catch (error) {
     console.error('[getRoomDetails error]', error);
     res.status(500).json({ success: false, message: 'Server error' });
