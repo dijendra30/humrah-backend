@@ -8,8 +8,6 @@ const { sendDataFcm } = require('../utils/fcmHelper');
 // Safe, non-blocking analytics hook
 const logRoomEvent = async (eventType, metadata = {}) => {
   try {
-    // In a real implementation, this would save to an AnalyticsEvent collection
-    // For Phase 1B, we log it so it can be parsed or later implemented.
     console.log(`[ANALYTICS] ${eventType}`, JSON.stringify(metadata));
   } catch (err) {
     console.error('[ANALYTICS ERROR]', err);
@@ -58,7 +56,7 @@ exports.createRoom = async (req, res) => {
       topic,
       languages: Array.isArray(languages) ? languages : [],
       capacity: finalCapacity,
-      status: 'ACTIVE' // User-created rooms are immediately active
+      status: 'ACTIVE'
     });
 
     await room.save();
@@ -82,7 +80,6 @@ exports.createRoom = async (req, res) => {
       console.error('[createRoom] Failed to sync profile topic:', profileErr);
     }
 
-    // BASE TTL = 24 HOURS (86400s), JITTER = 1 HOUR (3600s)
     await redisService.setWithJitter(`room:transient:${room._id}`, { status: 'ACTIVE', createdBy: userId }, 86400, 3600);
 
     logRoomEvent('ROOM_CREATED', { roomId: room._id, userId, mode: discoveryMode });
@@ -100,6 +97,8 @@ exports.createRoom = async (req, res) => {
         memberCount: 1,
         capacity: room.capacity,
         status: room.status,
+        lastMessageAt: null,
+        lastMessage: null,
         createdAt: room.createdAt
       }
     });
@@ -112,7 +111,7 @@ exports.createRoom = async (req, res) => {
 
 // Helper: Haversine distance
 const getDistance = (lat1, lon1, lat2, lon2) => {
-  const R = 6371; // km
+  const R = 6371;
   const dLat = (lat2 - lat1) * Math.PI / 180;
   const dLon = (lon2 - lon1) * Math.PI / 180;
   const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
@@ -136,7 +135,6 @@ exports.discoverRooms = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Account not eligible for discovery' });
     }
 
-    // Hard filters
     const excludeIds = [userId, ...(user.blockedUsers || [])];
     const usersWhoBlockedMe = await User.find({ blockedUsers: userId }, { _id: 1 });
     excludeIds.push(...usersWhoBlockedMe.map(u => u._id));
@@ -161,7 +159,6 @@ exports.discoverRooms = async (req, res) => {
 
       const radii = [5000, 8000, 10000, 15000];
       for (const radius of radii) {
-        // Find users near me
         const nearbyUsers = await User.find({
           ...baseFilter,
           liveLocation: {
@@ -177,7 +174,6 @@ exports.discoverRooms = async (req, res) => {
         
         const nearbyUserIds = Array.from(nearbyUserMap.keys());
 
-        // Find active rooms created by these users that I am not already in
         const rooms = await HumrahRoom.find({
           createdBy: { $in: nearbyUserIds },
           status: 'ACTIVE',
@@ -203,10 +199,12 @@ exports.discoverRooms = async (req, res) => {
               memberCount,
               status: room.status,
               distanceTier,
+              lastMessageAt: null,
+              lastMessage: null,
               createdAt: room.createdAt
             };
           }));
-          break; // Stop progressive expansion if we found rooms
+          break;
         }
       }
     } else if (discoveryMode === 'ALL_INDIA') {
@@ -231,6 +229,8 @@ exports.discoverRooms = async (req, res) => {
           memberCount,
           status: room.status,
           distanceTier: 'All India',
+          lastMessageAt: null,
+          lastMessage: null,
           createdAt: room.createdAt
         };
       }));
@@ -245,6 +245,7 @@ exports.discoverRooms = async (req, res) => {
     return res.status(500).json({ success: false, message: 'Server error during discovery' });
   }
 };
+
 exports.joinRoom = async (req, res) => {
   if (process.env.ENABLE_HUMRAH_ROOMS === 'false') {
     return res.status(503).json({ success: false, message: 'Humrah Rooms are currently undergoing maintenance.' });
@@ -275,7 +276,6 @@ exports.joinRoom = async (req, res) => {
       return res.status(400).json({ success: false, message: `Cannot join room. Status is ${room.status}` });
     }
 
-    // Ensure user is not blocked by host, though a full check against all members could be done
     if (user.blockedUsers && user.blockedUsers.includes(room.createdBy)) {
       return res.status(403).json({ success: false, message: 'Cannot join this room due to block list.' });
     }
@@ -370,7 +370,6 @@ exports.leaveRoom = async (req, res) => {
     membership.leftAt = new Date();
     await membership.save();
 
-    // Clear socket presence proactively
     if (redisService.del) {
       await redisService.del(`presence:room:${roomId}:${userId}`);
     }
@@ -400,10 +399,25 @@ exports.getMyRooms = async (req, res) => {
     const userId = req.userId;
     const memberships = await RoomMember.find({ userId, status: 'JOINED' }).select('roomId');
     const roomIds = memberships.map(m => m.roomId);
-    const rooms = await HumrahRoom.find({ _id: { $in: roomIds } }).sort({ createdAt: -1 });
+    // Sort by lastMessageAt desc so most recently active rooms appear first
+    const rooms = await HumrahRoom.find({ _id: { $in: roomIds } }).sort({ lastMessageAt: -1, createdAt: -1 });
 
     const formattedRooms = await Promise.all(rooms.map(async (room) => {
       const memberCount = await RoomMember.countDocuments({ roomId: room._id, status: 'JOINED' });
+
+      // Fetch last message for session card preview
+      let lastMessage = null;
+      const lastMessageAt = room.lastMessageAt || null;
+      if (lastMessageAt) {
+        const lastMsg = await RoomMessage.findOne({ roomId: room._id, messageType: 'TEXT' })
+          .sort({ createdAt: -1 })
+          .populate('senderId', 'firstName');
+        if (lastMsg) {
+          const senderName = lastMsg.senderId?.firstName || 'Someone';
+          lastMessage = `${senderName}: ${lastMsg.content}`;
+        }
+      }
+
       return {
         roomId: room._id,
         title: room.title,
@@ -416,6 +430,8 @@ exports.getMyRooms = async (req, res) => {
         memberCount: memberCount,
         status: room.status,
         distanceTier: null,
+        lastMessageAt: lastMessageAt ? lastMessageAt.toISOString() : null,
+        lastMessage: lastMessage,
         createdAt: room.createdAt
       };
     }));
@@ -431,7 +447,6 @@ exports.getRoomDetails = async (req, res) => {
   try {
     const { roomId } = req.params;
     const userId = req.userId;
-    // R1 Note: Currently restricts to joined members. Keeping this.
     const member = await RoomMember.findOne({ roomId, userId, status: { $in: ['JOINED', 'INVITED'] } });
     if (!member) return res.status(403).json({ success: false, message: 'Not a member' });
 
@@ -440,7 +455,6 @@ exports.getRoomDetails = async (req, res) => {
     
     const members = await RoomMember.find({ roomId, status: 'JOINED' }).populate('userId', 'firstName lastName profilePhotoUrls');
     
-    // Map _id to roomId
     const roomFormatted = {
       roomId: room._id,
       title: room.title,
@@ -452,6 +466,7 @@ exports.getRoomDetails = async (req, res) => {
       capacity: room.capacity,
       status: room.status,
       memberCount: members.length,
+      lastMessageAt: room.lastMessageAt ? room.lastMessageAt.toISOString() : null,
       createdAt: room.createdAt,
       createdBy: room.createdBy
     };
@@ -479,7 +494,9 @@ exports.getRoomMessages = async (req, res) => {
       _id: msg._id,
       roomId: msg.roomId,
       senderId: msg.senderId?._id || msg.senderId,
-      senderName: msg.senderId ? `${msg.senderId.firstName} ${msg.senderId.lastName}`.trim() : 'Unknown',
+      senderName: msg.senderId
+        ? (`${msg.senderId.firstName || ''} ${msg.senderId.lastName || ''}`.trim() || 'Member')
+        : 'Member',
       messageType: msg.messageType,
       content: msg.content,
       createdAt: msg.createdAt
