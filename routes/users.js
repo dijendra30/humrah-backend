@@ -1043,8 +1043,17 @@ router.put('/me/questionnaire', authenticate, async (req, res) => {
     // Full onboarding / explicit questionnaire edit: if the user directly supplied
     // a non-empty humrahRoomInterests here, that IS an explicit Q24 answer (Room
     // creation goes through roomController.$addToSet, never this route).
-    if (Array.isArray(changedQuestionnaire.humrahRoomInterests) &&
-        changedQuestionnaire.humrahRoomInterests.length > 0) {
+    //
+    // BUGFIX: this previously read `changedQuestionnaire`, which only contains
+    // fields whose value DIFFERS from what is already stored. A user who created a
+    // Room about "Food & Cooking" already has that topic in humrahRoomInterests, so
+    // answering Q24 with that same topic produced no diff, the key was dropped, and
+    // the completion marker was never written — leaving Q24 to reappear forever.
+    // Answering a question is an event in its own right; whether the resulting value
+    // happens to match what was already there is irrelevant. Read the submitted
+    // payload (`incomingUpdates`) instead.
+    if (Array.isArray(incomingUpdates.humrahRoomInterests) &&
+        incomingUpdates.humrahRoomInterests.length > 0) {
       markProgressiveAnswered(updatedQuestionnaire, 24);
     }
 

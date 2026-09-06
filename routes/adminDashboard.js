@@ -855,9 +855,17 @@ router.post('/restore-profile-completion', authenticate, adminOnly, async (req, 
     let updatedCount = 0;
     
     for (const user of users) {
-      const androidCalc = calculateProfileCompletion(user);
-      if (user.profileCompletion !== androidCalc) {
-        await User.updateOne({ _id: user._id }, { $set: { profileCompletion: androidCalc } });
+      // BUGFIX: calculateProfileCompletion returns { percentage, breakdown, … },
+      // not a number. This compared a Number against an object (always unequal)
+      // and then wrote the whole object into the Number field `profileCompletion`
+      // for every user. Consume the percentage, and keep the breakdown in step
+      // with what the User pre-save hook stores.
+      const result = calculateProfileCompletion(user);
+      if (user.profileCompletion !== result.percentage) {
+        await User.updateOne(
+          { _id: user._id },
+          { $set: { profileCompletion: result.percentage, profileCompletionBreakdown: result.breakdown } }
+        );
         updatedCount++;
       }
     }
