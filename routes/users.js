@@ -116,11 +116,34 @@ router.put('/me', authenticate, async (req, res) => {
       if (errors.length > 0) {
         return res.status(422).json({ success: false, code: 'MODERATION_FAILED', message: "Some fields contain content that isn't allowed.", errors });
       }
-      filteredUpdates.questionnaire = cleanedQuestionnaire;
-      
       const user = await User.findById(req.userId);
       if (!user) return res.status(404).json({ success: false, message: 'User not found' });
-      
+
+      // BUGFIX: this previously assigned the client's questionnaire object directly.
+      // findByIdAndUpdate turns that into `$set: { questionnaire: <object> }`, which
+      // REPLACES the whole subdocument — so every field the app did not send was
+      // erased. That silently wiped the server-owned progressive state on each
+      // profile save: `answeredProgressiveQuestionIds` (making an answered Q24
+      // reappear forever) and the pacing timestamps. Merge onto what is stored, and
+      // never let a client payload clear state the client does not own.
+      const existingQ = user.questionnaire?.toObject?.() || user.questionnaire || {};
+      const mergedQ = { ...existingQ, ...cleanedQuestionnaire };
+      mergedQ.answeredProgressiveQuestionIds = Array.isArray(existingQ.answeredProgressiveQuestionIds)
+        ? existingQ.answeredProgressiveQuestionIds
+        : [];
+      mergedQ.lastProgressiveQuestionAnsweredAt = existingQ.lastProgressiveQuestionAnsweredAt ?? null;
+      mergedQ.nextProgressiveQuestionAvailableAt = existingQ.nextProgressiveQuestionAvailableAt ?? null;
+
+      // A full questionnaire submission that carries humrahRoomInterests is an
+      // explicit Q24 answer, exactly as on PUT /me/questionnaire. Room creation
+      // never reaches this route.
+      if (Array.isArray(cleanedQuestionnaire.humrahRoomInterests) &&
+          cleanedQuestionnaire.humrahRoomInterests.length > 0) {
+        markProgressiveAnswered(mergedQ, 24);
+      }
+
+      filteredUpdates.questionnaire = mergedQ;
+
       const changedFields = [];
       if (textsForAI) {
         for (const [field, text] of Object.entries(textsForAI)) {
