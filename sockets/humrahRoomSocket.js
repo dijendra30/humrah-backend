@@ -187,7 +187,11 @@ exports.initHumrahRoomSocket = (io) => {
           throw e;
         }
 
-        room.lastMessageAt = new Date();
+        // Use the persisted message's own timestamp — never a fresh Date(). This
+        // only runs after msg.save() succeeded (a failed save throws above), and
+        // the clientMessageId dedup path returns earlier, so a retry never
+        // re-bumps activity.
+        room.lastMessageAt = msg.createdAt;
         await room.save();
 
         const emitData = await buildEmitData(msg);
