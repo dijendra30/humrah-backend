@@ -55,9 +55,57 @@ const LOCATION_TOPICS = {
   'Delhi': ['Delhi Dairy']
 };
 
+// -----------------------------------------------------------------------------
+// Canonical topic resolution.
+//
+// The progressive questionnaire (Q24) historically shipped the same 35 topics in
+// sentence case ("Food & cooking") while this file — and the Room creation flow —
+// use title case ("Food & Cooking"). 31 of the 35 differed by capitalisation only.
+// Because every topic comparison in the backend is an exact string match, those
+// answers were treated as unknown topics: System Room generation could never find
+// a shared topic, and topic-based matching/discovery scoring silently under-fired.
+//
+// canonicalizeTopic() is the single place that resolves any stored spelling to the
+// canonical one. It is intentionally conservative: it matches on case and
+// whitespace only, never on meaning, and returns null for anything it does not
+// recognise so unknown topics can still be rejected.
+// -----------------------------------------------------------------------------
+const CANONICAL_BY_KEY = (() => {
+  const map = new Map();
+  const key = (t) => String(t).trim().toLowerCase().replace(/\s+/g, ' ');
+  GLOBAL_TOPICS.forEach(t => map.set(key(t), t));
+  Object.values(LOCATION_TOPICS).forEach(list => list.forEach(t => map.set(key(t), t)));
+  return map;
+})();
+
+/**
+ * @param {string} topic any stored/received topic spelling
+ * @returns {?string} the canonical topic string, or null if unrecognised
+ */
+function canonicalizeTopic(topic) {
+  if (typeof topic !== 'string') return null;
+  const k = topic.trim().toLowerCase().replace(/\s+/g, ' ');
+  if (!k) return null;
+  return CANONICAL_BY_KEY.get(k) || null;
+}
+
+/**
+ * Canonicalizes a list of topics, dropping unrecognised entries and duplicates
+ * that collapse onto the same canonical topic. Order is preserved.
+ */
+function canonicalizeTopics(topics) {
+  const out = [];
+  const seen = new Set();
+  (Array.isArray(topics) ? topics : []).forEach(t => {
+    const c = canonicalizeTopic(t);
+    if (c && !seen.has(c)) { seen.add(c); out.push(c); }
+  });
+  return out;
+}
+
 function resolveRoomTopicImage(topic) {
   if (!topic) return DEFAULT_IMAGE_URL;
-  const url = TOPIC_IMAGES[topic];
+  const url = TOPIC_IMAGES[canonicalizeTopic(topic) || topic];
   if (url && url.trim() !== '') {
     return url;
   }
@@ -81,16 +129,23 @@ function getAvailableTopics(city) {
   };
 }
 
+// Accepts any casing/whitespace variant of a real topic; still rejects unknown
+// topics, and still enforces that a LOCATION topic belongs to the user's city.
 function isValidTopicForUser(topic, city) {
-  if (GLOBAL_TOPICS.includes(topic)) return true;
-  if (city && LOCATION_TOPICS[city] && LOCATION_TOPICS[city].includes(topic)) return true;
+  const canonical = canonicalizeTopic(topic);
+  if (!canonical) return false;
+  if (GLOBAL_TOPICS.includes(canonical)) return true;
+  if (city && LOCATION_TOPICS[city] && LOCATION_TOPICS[city].includes(canonical)) return true;
   return false;
 }
 
 module.exports = {
   DEFAULT_IMAGE_URL,
   GLOBAL_TOPICS,
+  LOCATION_TOPICS,
   resolveRoomTopicImage,
   getAvailableTopics,
-  isValidTopicForUser
+  isValidTopicForUser,
+  canonicalizeTopic,
+  canonicalizeTopics
 };
