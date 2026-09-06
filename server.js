@@ -567,6 +567,12 @@ const connectDB = async () => {
   try {
     await mongoose.connect(process.env.MONGODB_URI);
     console.log('✅ MongoDB Connected');
+
+    // R1: one-shot idempotent sync of HumrahRoom.memberCount (new denormalized field)
+    require('./jobs/backfillRoomMemberCounts').backfillRoomMemberCounts();
+    // Q24 fix: one-shot idempotent grandfather of existing users' Q24 completion
+    require('./jobs/backfillQ24Completion').backfillQ24Completion();
+
     startExpiryJob(io);
     startMovieSessionExpiryJob();
     startMovieDailySessionJob();  // pre-seeds tomorrow's system sessions at 7 PM IST
@@ -579,6 +585,16 @@ const connectDB = async () => {
     processRoomInvitations(); // initial run
     setInterval(runHumrahRoomExpiry, 15 * 60 * 1000); // 15 mins
     runHumrahRoomExpiry(); // initial run
+
+    // Phase 1: System Room generation driver. Self-gated by ROOM_GENERATOR_ENABLED
+    // (default false) — creates SUGGESTED Rooms only; the invitation worker above
+    // remains solely responsible for sending invitations.
+    require('./jobs/systemRoomGenerationJob').startSystemRoomGenerationJob();
+
+    // R5.2: Room engagement engine. Self-gated by ROOM_ENGAGEMENT_ENABLED
+    // (default false). Decides whether a QUIET Room warrants one re-engagement
+    // notification; never changes Room lifecycle and never posts a chat message.
+    require('./jobs/roomEngagementJob').startRoomEngagementJob(io);
 
     await runStartupCleanup();
     scheduleDailyCleanup();
