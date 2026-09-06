@@ -7,7 +7,7 @@ const HumrahRoom = require('../models/HumrahRoom');
 const RoomMember = require('../models/RoomMember');
 const redisService = require('../services/redisService');
 const { calculatePairwiseCompatibility, checkEligibility, normalizeMatchingProfile } = require('./roomMatchingService');
-const { isValidTopicForUser, resolveRoomTopicImage } = require('../utils/roomTopicConfig');
+const { isValidTopicForUser, resolveRoomTopicImage, canonicalizeTopics } = require('../utils/roomTopicConfig');
 
 // --- THRESHOLDS & CONFIG ---
 const CONFIG = {
@@ -69,10 +69,19 @@ function calculateGroupCohesion(users) {
  * 2. Must be valid for all members based on location rules
  */
 function selectRoomTopic(users) {
+  // Topic counting is CANONICAL, not literal. The questionnaire (Q24) shipped the
+  // same 35 topics in sentence case ("Food & cooking") while this service and the
+  // Room creation flow use title case ("Food & Cooking"). Counting raw strings made
+  // those two spellings look like two different topics, so `count >= 2` below could
+  // never be reached and every group was discarded as `no_viable_topic`.
+  // canonicalizeTopic() resolves case/whitespace only — never meaning — and returns
+  // null for genuinely unknown topics, which are still ignored.
   const topicCounts = {};
   users.forEach(u => {
-    
-    const interests = u.questionnaire?.humrahRoomInterests || []; interests.forEach(topic => {
+    const interests = canonicalizeTopics(u.questionnaire?.humrahRoomInterests);
+    // canonicalizeTopics() de-duplicates, so a user holding both "Music" and
+    // "music" contributes one vote, not two.
+    interests.forEach(topic => {
       topicCounts[topic] = (topicCounts[topic] || 0) + 1;
     });
   });
