@@ -1,9 +1,11 @@
+const mongoose = require('mongoose');
 const HumrahRoom = require('../models/HumrahRoom');
 const RoomMember = require('../models/RoomMember');
 const User = require('../models/User');
 const RoomMessage = require('../models/RoomMessage');
 const redisService = require('../services/redisService');
 const { sendDataFcm } = require('../utils/fcmHelper');
+const { normalizeReaction, serializeReactions } = require('../utils/roomReactionConfig');
 
 // Safe, non-blocking analytics hook
 const logRoomEvent = async (eventType, metadata = {}) => {
@@ -437,8 +439,10 @@ exports.leaveRoom = async (req, res) => {
 exports.getMyRooms = async (req, res) => {
   try {
     const userId = req.userId;
-    const memberships = await RoomMember.find({ userId, status: 'JOINED' }).select('roomId');
+    const memberships = await RoomMember.find({ userId, status: 'JOINED' }).select('roomId lastReadAt');
     const roomIds = memberships.map(m => m.roomId);
+    // Phase 2.1: server-authoritative read state for the Sessions dot.
+    const lastReadByRoom = new Map(memberships.map(m => [String(m.roomId), m.lastReadAt || null]));
     // Most recently active first (null lastMessageAt sorts last in desc order).
     const rooms = await HumrahRoom.find({ _id: { $in: roomIds } }).sort({ lastMessageAt: -1, createdAt: -1 });
 
@@ -471,7 +475,17 @@ exports.getMyRooms = async (req, res) => {
       const lastMessage = lm ? `${nameById.get(String(lm.senderId)) || 'Someone'}: ${lm.content}` : null;
       const lastMessageAt = lm ? new Date(lm.createdAt).toISOString() : null;
 
+      // Phase 2.1 Sessions dot semantics:
+      //   no messages            -> no dot
+      //   messages, all read     -> GREEN  (hasMessages && !hasUnreadMessages)
+      //   new since lastReadAt   -> YELLOW (hasUnreadMessages)
+      const lastReadAt = lastReadByRoom.get(String(room._id));
+      const hasMessages = !!lm;
+      const hasUnreadMessages = hasMessages && (!lastReadAt || new Date(lm.createdAt) > new Date(lastReadAt));
+
       return {
+        hasMessages,
+        hasUnreadMessages,
         roomId: room._id,
         title: room.title,
         description: room.description,
@@ -559,6 +573,7 @@ exports.getRoomMessages = async (req, res) => {
       messageType: msg.messageType,
       content: msg.content,
       clientMessageId: msg.clientMessageId || null,
+      reactions: serializeReactions(msg.reactions, userId),
       createdAt: msg.createdAt
     }));
 
@@ -566,6 +581,238 @@ exports.getRoomMessages = async (req, res) => {
   } catch (error) {
     console.error('[getRoomMessages error]', error);
     res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE 2.1 — server-authoritative read state
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * POST /api/rooms/:roomId/read
+ * Marks the Room read for the caller. Only a JOINED member may do this —
+ * INVITED / LEFT / KICKED are rejected. Never called by notification delivery.
+ */
+exports.markRoomRead = async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    const userId = req.userId;
+
+    const updated = await RoomMember.findOneAndUpdate(
+      { roomId, userId, status: 'JOINED' },
+      { $set: { lastReadAt: new Date() } },
+      { new: true }
+    ).select('lastReadAt');
+
+    if (!updated) {
+      return res.status(403).json({ success: false, message: 'Not an active member of this room' });
+    }
+    return res.status(200).json({
+      success: true,
+      message: 'Room marked read',
+      lastReadAt: updated.lastReadAt.toISOString(),
+    });
+  } catch (error) {
+    console.error('[markRoomRead error]', error);
+    return res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE 2.1 — message reactions
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Shared guard: caller must be a JOINED member and the message must be in the Room. */
+async function loadReactableMessage(roomId, messageId, userId) {
+  const member = await RoomMember.findOne({ roomId, userId, status: 'JOINED' }).select('_id').lean();
+  if (!member) return { error: { code: 403, message: 'Not an active member of this room' } };
+
+  const message = await RoomMessage.findOne({ _id: messageId, roomId }).select('_id').lean();
+  if (!message) return { error: { code: 404, message: 'Message not found in this room' } };
+
+  return { ok: true };
+}
+
+/** Broadcasts the authoritative reaction state to members currently in the Room. */
+function broadcastReactions(req, roomId, messageId, reactions) {
+  try {
+    const io = req.app.get('io');
+    if (!io) return;
+    // Viewer-agnostic payload — each client marks its own `reacted` locally.
+    io.to(`room:${roomId}`).emit('reaction_updated', {
+      roomId: String(roomId),
+      messageId: String(messageId),
+      reactions: (reactions || [])
+        .filter(r => r.userIds && r.userIds.length > 0)
+        .map(r => ({
+          emoji: r.emoji,
+          count: r.userIds.length,
+          userIds: r.userIds.map(String),
+        })),
+    });
+  } catch (err) {
+    console.error('[roomReaction] broadcast failed:', err.message);
+  }
+}
+
+/**
+ * POST /api/rooms/:roomId/messages/:messageId/reaction   { emoji }
+ * Adds or CHANGES the caller's reaction. A user holds at most one emoji per
+ * message; posting a different emoji moves them.
+ *
+ * Concurrency-safe: a single aggregation-pipeline update performs
+ * "remove me from every bucket, then add me to the target, then drop empty buckets"
+ * atomically inside the document — no read-modify-write race.
+ */
+exports.addRoomMessageReaction = async (req, res) => {
+  try {
+    const { roomId, messageId } = req.params;
+    const userId = req.userId;
+
+    if (!mongoose.Types.ObjectId.isValid(messageId)) {
+      return res.status(400).json({ success: false, message: 'Invalid message id' });
+    }
+    const emoji = normalizeReaction(req.body?.emoji);
+    if (!emoji) {
+      return res.status(400).json({ success: false, message: 'Unsupported reaction' });
+    }
+
+    const guard = await loadReactableMessage(roomId, messageId, userId);
+    if (guard.error) {
+      return res.status(guard.error.code).json({ success: false, message: guard.error.message });
+    }
+
+    const uid = new mongoose.Types.ObjectId(String(userId));
+    const updated = await RoomMessage.findOneAndUpdate(
+      { _id: messageId, roomId },
+      [{
+        $set: {
+          reactions: {
+            $let: {
+              vars: {
+                stripped: {
+                  $map: {
+                    input: { $ifNull: ['$reactions', []] },
+                    as: 'r',
+                    in: {
+                      emoji: '$$r.emoji',
+                      userIds: {
+                        $filter: { input: '$$r.userIds', as: 'u', cond: { $ne: ['$$u', uid] } },
+                      },
+                    },
+                  },
+                },
+              },
+              in: {
+                $filter: {
+                  input: {
+                    $cond: [
+                      { $in: [emoji, { $map: { input: '$$stripped', as: 's', in: '$$s.emoji' } }] },
+                      {
+                        $map: {
+                          input: '$$stripped',
+                          as: 'r',
+                          in: {
+                            emoji: '$$r.emoji',
+                            userIds: {
+                              $cond: [
+                                { $eq: ['$$r.emoji', emoji] },
+                                { $concatArrays: ['$$r.userIds', [uid]] },
+                                '$$r.userIds',
+                              ],
+                            },
+                          },
+                        },
+                      },
+                      { $concatArrays: ['$$stripped', [{ emoji, userIds: [uid] }]] },
+                    ],
+                  },
+                  as: 'r',
+                  cond: { $gt: [{ $size: '$$r.userIds' }, 0] },
+                },
+              },
+            },
+          },
+        },
+      }],
+      { new: true }
+    ).select('reactions');
+
+    if (!updated) {
+      return res.status(404).json({ success: false, message: 'Message not found in this room' });
+    }
+
+    broadcastReactions(req, roomId, messageId, updated.reactions);
+    return res.status(200).json({
+      success: true,
+      messageId: String(messageId),
+      reactions: serializeReactions(updated.reactions, userId),
+    });
+  } catch (error) {
+    console.error('[addRoomMessageReaction error]', error);
+    return res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+/**
+ * DELETE /api/rooms/:roomId/messages/:messageId/reaction
+ * Removes the caller's reaction (whichever emoji it was). Idempotent.
+ */
+exports.removeRoomMessageReaction = async (req, res) => {
+  try {
+    const { roomId, messageId } = req.params;
+    const userId = req.userId;
+
+    if (!mongoose.Types.ObjectId.isValid(messageId)) {
+      return res.status(400).json({ success: false, message: 'Invalid message id' });
+    }
+
+    const guard = await loadReactableMessage(roomId, messageId, userId);
+    if (guard.error) {
+      return res.status(guard.error.code).json({ success: false, message: guard.error.message });
+    }
+
+    const uid = new mongoose.Types.ObjectId(String(userId));
+    const updated = await RoomMessage.findOneAndUpdate(
+      { _id: messageId, roomId },
+      [{
+        $set: {
+          reactions: {
+            $filter: {
+              input: {
+                $map: {
+                  input: { $ifNull: ['$reactions', []] },
+                  as: 'r',
+                  in: {
+                    emoji: '$$r.emoji',
+                    userIds: {
+                      $filter: { input: '$$r.userIds', as: 'u', cond: { $ne: ['$$u', uid] } },
+                    },
+                  },
+                },
+              },
+              as: 'r',
+              cond: { $gt: [{ $size: '$$r.userIds' }, 0] },
+            },
+          },
+        },
+      }],
+      { new: true }
+    ).select('reactions');
+
+    if (!updated) {
+      return res.status(404).json({ success: false, message: 'Message not found in this room' });
+    }
+
+    broadcastReactions(req, roomId, messageId, updated.reactions);
+    return res.status(200).json({
+      success: true,
+      messageId: String(messageId),
+      reactions: serializeReactions(updated.reactions, userId),
+    });
+  } catch (error) {
+    console.error('[removeRoomMessageReaction error]', error);
+    return res.status(500).json({ success: false, message: 'Server error' });
   }
 };
 
