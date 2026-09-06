@@ -452,7 +452,10 @@ exports.joinRoom = async (req, res) => {
     // Reject if the joining user has blocked, OR is blocked by, the room creator
     // or any current JOINED member. Response is deliberately generic — it never
     // reveals which user, or that a block exists.
-    const counterpartIds = new Set([String(room.createdBy)]);
+    // A SYSTEM-generated Room has no creator (HumrahRoom.createdBy is only required
+    // when creationSource === 'USER'). String(null) === "null" would be cast as an
+    // ObjectId below and throw, so a creator only joins the set when one exists.
+    const counterpartIds = new Set(room.createdBy ? [String(room.createdBy)] : []);
     joinedMembers.forEach(m => counterpartIds.add(String(m.userId)));
     counterpartIds.delete(String(userId));
     if (counterpartIds.size > 0) {
