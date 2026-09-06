@@ -86,6 +86,11 @@ const ENGAGEMENT_CONFIG = {
   // The last person who spoke is waiting for a reply, not for a reminder.
   EXCLUDE_LAST_SENDER: bool(process.env.ROOM_ENGAGEMENT_EXCLUDE_LAST_SENDER, true),
 
+  // R5.3 — how long after a delivered nudge a Room's recovery may still be
+  // attributed to it. Outside this window a Room becoming active again is just a
+  // Room becoming active again, and is NOT claimed as a re-engagement success.
+  ATTRIBUTION_WINDOW_HOURS: num(process.env.ROOM_ENGAGEMENT_ATTRIBUTION_WINDOW_HOURS, 24),
+
   LOCK_TTL_SECONDS: num(process.env.ROOM_ENGAGEMENT_LOCK_TTL_SECONDS, 300),
   // Short claim held while a Room's action is executing. Promoted to the full
   // Room cooldown only after a notification is actually delivered.
@@ -124,9 +129,41 @@ const roomCooldownKey = (action, roomId) => `engagement:${action}:room:${roomId}
 const roomClaimKey = (action, roomId) => `lock:engagement:${action}:room:${roomId}`;
 const userCooldownKey = (userId) => `engagement:cooldown:user:${userId}`;
 const userDailyKey = (userId) => `engagement:daily:user:${userId}`;
+// R5.3 — the open attribution window for one delivered nudge. Its TTL *is* the
+// window: once it expires the Room can no longer be credited to a nudge.
+const outcomeKey = (roomId) => `engagement:outcome:room:${roomId}`;
 const WORKER_LOCK_KEY = 'lock:room_engagement_worker';
 
 const hours = (h) => h * 60 * 60;
+
+/**
+ * R5.3 — the ONE place engagement observability is emitted.
+ *
+ * There is no PostHog client on this backend (verified: no dependency, no
+ * initialisation anywhere) and R5.3 does not add one. Delivery is already
+ * recorded durably in the Notification collection; this emits the structured
+ * counterpart under the existing [ROOM_ENGAGEMENT] prefix so a funnel can be
+ * reconstructed from logs + Notification rows + the Android PostHog events,
+ * joined on notificationId.
+ *
+ * Observational only. It can never throw into a caller, and nothing branches on
+ * its result — engagement behaviour is identical whether or not this succeeds.
+ * Properties are constructed explicitly: ids, counts and enums only. Never a
+ * Mongoose document, message text, name, email, token or questionnaire data.
+ */
+function emitEngagementEvent(event, props = {}) {
+  try {
+    console.log('[ROOM_ENGAGEMENT]', JSON.stringify({
+      event,
+      // Dry-run output must never be mistaken for real production activity.
+      dryRun: ENGAGEMENT_CONFIG.DRY_RUN === true,
+      at: new Date().toISOString(),
+      ...props,
+    }));
+  } catch (_) {
+    // Observability must never affect engagement. Swallow deliberately.
+  }
+}
 
 /**
  * THE DECISION. Pure function — no I/O, no clock reads beyond what is passed in.
@@ -228,6 +265,51 @@ function decideRoomAction(input = {}) {
     reason: REASON.ELIGIBLE,
     cooldownUntil: null,
   };
+}
+
+/** R5.3 — how a delivered nudge turned out, judged on Room activity alone. */
+const OUTCOME = {
+  REVIVED: 'ROOM_REVIVED',
+  ACTIVITY_NO_REVIVAL: 'ACTIVITY_NO_REVIVAL',
+  NO_ACTIVITY: 'NO_ACTIVITY',
+  PENDING: 'PENDING',
+};
+
+/**
+ * R5.3 — THE REVIVAL RULE. Pure, deterministic, exported for direct testing.
+ *
+ * A delivered nudge counts as ROOM_REVIVED only when ALL of these hold:
+ *
+ *   1. the Room is engagement-ACTIVE or engagement-HEALTHY per R5.1 — R5.1's
+ *      existing definition is reused verbatim, so "engaged" is never redefined;
+ *   2. at least MIN_PARTICIPANTS_FOR_CONVERSATION (2) distinct people have
+ *      posted, i.e. it is a conversation and not one person talking; and
+ *   3. the newest activity is strictly NEWER than the moment the nudge was
+ *      delivered — the clause that makes this a measurement rather than a
+ *      flattering coincidence. Without it, a Room whose pre-existing messages
+ *      already sat inside R5.1's 24h window would be credited to a nudge that
+ *      changed nothing.
+ *
+ * Delivery is not success. An open is not success. Only a Room that is talking
+ * again, with more than one person, after we nudged it, is success.
+ *
+ * Outside the attribution window nothing is claimed at all.
+ */
+function classifyRevival(marker, snapshot, now = Date.now()) {
+  if (!marker || !marker.sentAt || !snapshot) return OUTCOME.PENDING;
+
+  const windowMs = hours(ENGAGEMENT_CONFIG.ATTRIBUTION_WINDOW_HOURS) * 1000;
+  if (now - marker.sentAt > windowMs) return OUTCOME.PENDING; // expired, claim nothing
+
+  const lastActivity = snapshot.lastActivityAt ? Date.parse(snapshot.lastActivityAt) : NaN;
+  const activityAfterSend = Number.isFinite(lastActivity) && lastActivity > marker.sentAt;
+  if (!activityAfterSend) return OUTCOME.NO_ACTIVITY;
+
+  const multiParty = (snapshot.participatingMemberCount || 0)
+    >= THRESHOLDS.MIN_PARTICIPANTS_FOR_CONVERSATION;
+  const conversational = snapshot.state === STATE.ACTIVE || snapshot.state === STATE.HEALTHY;
+
+  return (multiParty && conversational) ? OUTCOME.REVIVED : OUTCOME.ACTIVITY_NO_REVIVAL;
 }
 
 /**
@@ -430,6 +512,18 @@ async function executeReengagement(io, room, snapshot, context = {}) {
         await redisService.set(userCooldownKey(uid), '1', hours(ENGAGEMENT_CONFIG.USER_COOLDOWN_HOURS));
         await redisService.incrementWithWindow(userDailyKey(uid), hours(24));
         delivered++;
+
+        // R5.3 — emitted ONLY past the fcm.delivered check above, so an attempted
+        // send is never counted as a delivered one. notificationId is the join key
+        // the Android open/participation events echo back.
+        emitEngagementEvent('room_reengagement_sent', {
+          roomId,
+          action: ACTION.QUIET_ROOM_REENGAGEMENT,
+          engagementState: snapshot?.state || null,
+          lifecycleStatus: room.status,
+          notificationId: String(notification._id),
+          delivered: true,
+        });
       } catch (perUserErr) {
         skip('recipient_error');
         console.error('[ROOM_ENGAGEMENT] recipient error:', perUserErr.message);
@@ -445,6 +539,22 @@ async function executeReengagement(io, room, snapshot, context = {}) {
         { at: Date.now(), action: ACTION.QUIET_ROOM_REENGAGEMENT },
         hours(ENGAGEMENT_CONFIG.ROOM_COOLDOWN_HOURS)
       );
+
+      // R5.3 — open the attribution window. The marker records only what is needed
+      // to judge revival later: when, how many were nudged, and the participation
+      // level at the moment of sending (so "already multi-party" can't be claimed
+      // as a revival). It expires on its own; nothing has to clean it up.
+      await redisService.set(
+        outcomeKey(roomId),
+        {
+          sentAt: Date.now(),
+          action: ACTION.QUIET_ROOM_REENGAGEMENT,
+          targetsNotified: delivered,
+          participantsAtSend: snapshot?.participatingMemberCount ?? 0,
+        },
+        hours(ENGAGEMENT_CONFIG.ATTRIBUTION_WINDOW_HOURS)
+      );
+
       result.executed = true;
     } else if (!result.skipReason) {
       result.skipReason = 'no_eligible_targets';
@@ -492,6 +602,8 @@ async function runEngagementPass(options = {}) {
     candidates: 0,
     actionsExecuted: 0,
     notificationsSent: 0,
+    roomsRevived: 0,
+    roomsActiveNotRevived: 0,
     roomsFailed: 0,
     decisionCounts: {},
     durationMs: 0,
@@ -577,7 +689,27 @@ async function runEngagementPass(options = {}) {
       });
       countDecision(decision.reason);
       decisions.push({ room, snapshot, decision });
+
+      // R5.3 — record the decision that actually leads to an action. Blocked and
+      // no-op decisions are counted into decisionCounts above but NOT emitted
+      // individually: an hourly "NO_ACTION" line per Room is how logs become a
+      // landfill nobody reads.
+      if (decision.shouldAct) {
+        emitEngagementEvent('room_engagement_action_decided', {
+          roomId,
+          action: decision.action,
+          reason: decision.reason,
+          engagementState: snapshot ? snapshot.state : null,
+          lifecycleStatus: room.status,
+          previousState: previousStateFor(roomId),
+        });
+      }
     }
+
+    // ── R5.3: did earlier nudges work? ────────────────────────────────────────
+    // Judged on the SAME snapshots already computed above, so measurement costs
+    // one batched Redis read and zero extra Mongo queries.
+    await measureRevivals(rooms, snapshotByRoom, now, summary);
 
     // ── Record genuine state transitions (only where the state actually moved) ─
     for (const { snapshot, room } of decisions) {
@@ -651,6 +783,57 @@ async function runEngagementPass(options = {}) {
 }
 
 /**
+ * R5.3 — closes the loop on nudges delivered in a previous pass.
+ *
+ * Costs ONE batched Redis read for the whole scan set and reuses the snapshots
+ * the pass already computed: no extra Mongo query, no per-Room round trip.
+ * A Room is only reported once — the marker is deleted the moment a verdict is
+ * reached, so a revived Room cannot be counted again on the next pass.
+ *
+ * Always resolves; a measurement failure never affects engagement.
+ */
+async function measureRevivals(rooms, snapshotByRoom, now, summary) {
+  try {
+    const ids = rooms.map(r => String(r._id));
+    const markers = await safeGetMany(ids.map(outcomeKey));
+    if (markers.size === 0) return;
+
+    for (const roomId of ids) {
+      const marker = markers.get(outcomeKey(roomId));
+      if (!marker) continue;
+
+      const snapshot = snapshotByRoom.get(roomId);
+      const outcome = classifyRevival(marker, snapshot, now);
+      // PENDING means "too early to tell" or "window expired" — say nothing and
+      // let the marker's own TTL decide when to stop watching.
+      if (outcome === OUTCOME.PENDING || outcome === OUTCOME.NO_ACTIVITY) continue;
+
+      emitEngagementEvent(
+        outcome === OUTCOME.REVIVED ? 'room_reengagement_success' : 'room_reengagement_outcome',
+        {
+          roomId,
+          action: marker.action,
+          outcome,
+          engagementState: snapshot ? snapshot.state : null,
+          participantsAtSend: marker.participantsAtSend,
+          participantsNow: snapshot ? snapshot.participatingMemberCount : null,
+          targetsNotified: marker.targetsNotified,
+          hoursSinceSend: Math.round(((now - marker.sentAt) / 3600000) * 10) / 10,
+        }
+      );
+
+      if (outcome === OUTCOME.REVIVED) summary.roomsRevived++;
+      else summary.roomsActiveNotRevived++;
+
+      // Verdict reached — stop watching this Room so it is never double-counted.
+      try { await redisService.del(outcomeKey(roomId)); } catch (_) { /* TTL clears it */ }
+    }
+  } catch (err) {
+    console.error('[ROOM_ENGAGEMENT] revival measurement failed:', err.message);
+  }
+}
+
+/**
  * Members, last senders and users for the acting set — three queries total,
  * regardless of how many Rooms are being acted on.
  */
@@ -707,7 +890,8 @@ async function safeGetMany(keys) {
 
 /** Ids, counts and reasons only. Never message text, names, tokens or profile data. */
 function logPass(summary) {
-  if (summary.actionsExecuted > 0 || summary.stateTransitions > 0 || summary.roomsFailed > 0 || summary.error) {
+  if (summary.actionsExecuted > 0 || summary.stateTransitions > 0 || summary.roomsFailed > 0 ||
+      summary.roomsRevived > 0 || summary.roomsActiveNotRevived > 0 || summary.error) {
     console.log('[ROOM_ENGAGEMENT]', JSON.stringify(summary));
   }
 }
@@ -716,6 +900,11 @@ module.exports = {
   ENGAGEMENT_CONFIG,
   ACTION,
   REASON,
+  OUTCOME,
+  classifyRevival,
+  measureRevivals,
+  emitEngagementEvent,
+  outcomeKey,
   ENGAGEABLE_LIFECYCLE_STATUSES,
   WORKER_LOCK_KEY,
   decideRoomAction,
