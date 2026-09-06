@@ -104,7 +104,13 @@ const questionnaireSchema = new mongoose.Schema({
   // PROGRESSIVE QUESTION TIMING STATE (PHASE 2.7)
   // =============================================
   lastProgressiveQuestionAnsweredAt: { type: Date, default: null },
-  nextProgressiveQuestionAvailableAt: { type: Date, default: null }
+  nextProgressiveQuestionAvailableAt: { type: Date, default: null },
+  // Progressive-question IDs the user has EXPLICITLY answered (via the progressive
+  // flow or the full onboarding questionnaire). This is COMPLETION STATE, not
+  // profile data — it exists so that an indirect field mutation (e.g. a Room topic
+  // being added to humrahRoomInterests during Room creation) does NOT count as
+  // answering the corresponding question. Currently only consulted for Q24.
+  answeredProgressiveQuestionIds: { type: [Number], default: [] }
 }, { _id: false });
 
 const userSchema = new mongoose.Schema({
