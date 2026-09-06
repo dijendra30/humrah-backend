@@ -499,6 +499,7 @@ exports.getRoomMessages = async (req, res) => {
         : 'Member',
       messageType: msg.messageType,
       content: msg.content,
+      clientMessageId: msg.clientMessageId || null,
       createdAt: msg.createdAt
     }));
 
