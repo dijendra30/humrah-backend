@@ -11,6 +11,7 @@ const { uploadLimiter } = require('../middleware/rateLimitMiddleware');
 const User            = require('../models/User');
 const MatchingTodayMood = require('../models/MatchingTodayMood');
 const { upload, uploadBuffer, uploadBase64, deleteImage } = require('../config/cloudinary');
+const { canonicalizeTopics } = require('../utils/roomTopicConfig');
 const crypto = require('crypto');
 const ModerationLog = require('../models/ModerationLog');
 const ModerationCache = require('../models/ModerationCache');
@@ -754,6 +755,20 @@ router.put('/me/questionnaire', authenticate, async (req, res) => {
             .filter(Boolean);
         }
       }
+    }
+
+    // --- Q24 TOPIC CANONICALIZATION ---
+    // humrahRoomInterests is the ONE array field the backend later matches by exact
+    // string (System Room topic selection). Older app builds send the Q24 list in
+    // sentence case ("Food & cooking") while the canonical topics are title case,
+    // which made those answers unusable for Room generation. Canonicalize on write
+    // so the stored value is correct regardless of which app version sent it.
+    // Case/whitespace only — an unrecognised topic is dropped, never invented.
+    if (Array.isArray(incomingUpdates.humrahRoomInterests)) {
+      const canonical = canonicalizeTopics(incomingUpdates.humrahRoomInterests);
+      // Never let canonicalization silently empty a real answer: if nothing is
+      // recognised, keep what the user sent rather than discarding their choice.
+      if (canonical.length > 0) incomingUpdates.humrahRoomInterests = canonical;
     }
 
     for (const field of STRING_FIELDS) {
