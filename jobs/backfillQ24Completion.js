@@ -18,13 +18,31 @@
 // the worse outcome. Users created / mutated AFTER this backfill are handled
 // correctly by the route logic and are unaffected.
 //
-// Runs once at startup. One updateMany. Idempotent ($ne guard + $addToSet).
+// BUGFIX — this was described as "one-shot" but was wired to run on EVERY server
+// start, and it has no way to tell a pre-fix user from a new one. That made it
+// actively harmful after its first run: a user who received a topic ONLY through
+// Room creation (which must NOT complete Q24) was silently grandfathered as
+// "answered" at the next restart, so Q24 disappeared for someone who never saw it.
+//
+// It is now gated behind Q24_BACKFILL_ENABLED, default OFF, following the same
+// kill-switch convention as the other jobs. The grandfathering already ran against
+// production, so the default is the correct steady state; set the flag to true only
+// to re-run it deliberately against a database that has never had it applied.
+//
+// One updateMany. Idempotent ($ne guard + $addToSet).
 // -----------------------------------------------------------------------------
 'use strict';
 
 const User = require('../models/User');
 
+const BACKFILL_ENABLED =
+  String(process.env.Q24_BACKFILL_ENABLED || 'false').trim().toLowerCase() === 'true';
+
 async function backfillQ24Completion() {
+  if (!BACKFILL_ENABLED) {
+    console.log('[BACKFILL] Q24 completion backfill skipped (Q24_BACKFILL_ENABLED != true) — already applied.');
+    return;
+  }
   try {
     const result = await User.updateMany(
       {
@@ -40,4 +58,4 @@ async function backfillQ24Completion() {
   }
 }
 
-module.exports = { backfillQ24Completion };
+module.exports = { backfillQ24Completion, BACKFILL_ENABLED };
