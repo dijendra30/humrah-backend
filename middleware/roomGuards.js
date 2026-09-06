@@ -75,9 +75,23 @@ const roomJoinLimiter = buildLimiter({
   message: 'You are joining Rooms too quickly. Please try again later.',
 });
 
+// Phase 2.1 — reaction abuse guard. Generous enough that normal tapping never hits
+// it (60/min ≈ one per second), strict enough to stop a write flood. Independent of
+// the socket room_message limiter, which remains authoritative for messages.
+const REACTION_LIMIT = num(process.env.ROOM_REACTION_RATE_LIMIT, 60);
+const REACTION_WINDOW = num(process.env.ROOM_REACTION_RATE_WINDOW_SECONDS, 60);
+
+const roomReactionLimiter = buildLimiter({
+  action: 'reaction',
+  limit: REACTION_LIMIT,
+  windowSeconds: REACTION_WINDOW,
+  message: 'You are reacting too quickly. Please slow down.',
+});
+
 module.exports = {
   validateRoomId,
   roomCreateLimiter,
   roomJoinLimiter,
-  _config: { CREATE_LIMIT, CREATE_WINDOW, JOIN_LIMIT, JOIN_WINDOW },
+  roomReactionLimiter,
+  _config: { CREATE_LIMIT, CREATE_WINDOW, JOIN_LIMIT, JOIN_WINDOW, REACTION_LIMIT, REACTION_WINDOW },
 };
