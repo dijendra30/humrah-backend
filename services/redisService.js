@@ -110,4 +110,34 @@ exports.get = async (key) => {
   return null;
 };
 
+/**
+ * Bulk read. Returns a Map of key -> parsed value for keys that exist.
+ * Uses a single ioredis pipeline so N keys cost one round trip.
+ * Falls back to the in-memory map when Redis is not configured (dev only).
+ */
+exports.getMany = async (keys) => {
+  const out = new Map();
+  if (!Array.isArray(keys) || keys.length === 0) return out;
+  if (redisClient) {
+    const pipeline = redisClient.pipeline();
+    keys.forEach(k => pipeline.get(k));
+    const results = await pipeline.exec();
+    results.forEach(([err, val], i) => {
+      if (!err && val != null) {
+        try { out.set(keys[i], JSON.parse(val)); } catch (_) { out.set(keys[i], val); }
+      }
+    });
+    return out;
+  }
+  const now = Date.now();
+  keys.forEach(k => {
+    const item = memCache.get(k);
+    if (item && typeof item === 'object' && 'expires' in item) {
+      if (now < item.expires) out.set(k, item.value);
+      else memCache.delete(k);
+    }
+  });
+  return out;
+};
+
 exports.getClient = () => redisClient;

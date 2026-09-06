@@ -190,37 +190,44 @@ async function createSystemRoom(groupEval, discoveryMode = 'ALL_INDIA') {
   // Sort member IDs deterministically to create a stable group hash for concurrency lock
   const sortedIds = [...groupEval.members].sort().join(',');
   const lockKey = `lock:system_room:${sortedIds}:${groupEval.selectedTopic}`;
-  
-  // Concurrency protection: Try to acquire Redis lock
+
+  // Concurrency protection: Try to acquire the per-group Redis lock.
+  // PHASE 1 FIX: this previously referenced `redisService.client` (which does not
+  // exist — redisService exposes getClient()) and used node-redis v4 option syntax
+  // while the project runs ioredis. The guard was therefore always false and the
+  // lock was a silent no-op. redisService.acquireLock() is the ioredis-correct
+  // SET NX EX helper already used by joinRoom/leaveRoom.
   let acquiredLock = false;
   try {
-    if (redisService.client && redisService.client.isReady) {
-      // SET key value NX EX TTL
-      const res = await redisService.client.set(lockKey, '1', { NX: true, EX: CONFIG.LOCK_TTL_SECONDS });
-      if (!res) return { success: false, reason: 'concurrent_generation_lock' };
-      acquiredLock = true;
+    acquiredLock = await redisService.acquireLock(lockKey, CONFIG.LOCK_TTL_SECONDS);
+    if (!acquiredLock) {
+      return { success: false, reason: 'concurrent_generation_lock' };
     }
   } catch (err) {
-    console.warn('[SystemRoomGenerator] Redis lock failed, falling back to DB check only', err);
+    console.warn('[SystemRoomGenerator] Redis lock unavailable, falling back to DB duplicate check only:', err.message);
   }
 
+  let room = null;
   try {
     const isDuplicate = await checkExistingRoom(groupEval.members, groupEval.selectedTopic);
     if (isDuplicate) {
       return { success: false, reason: 'duplicate_room_exists' };
     }
 
-    const room = new HumrahRoom({
+    room = new HumrahRoom({
       creationSource: 'SYSTEM',
       discoveryMode,
-      title: groupEval.selectedTopic,
+      // PHASE 1 FIX: HumrahRoom.title has maxlength 30. Canonical topics such as
+      // "Creative Writing & Storytelling" (31 chars) previously threw a
+      // ValidationError and silently killed generation for that topic.
+      title: buildSystemRoomTitle(groupEval.selectedTopic),
       description: `A system-suggested room for ${groupEval.selectedTopic}`,
       topic: groupEval.selectedTopic,
       languages: [], // Let members speak freely, or could intersect languages
       capacity: groupEval.memberCount,
       status: 'SUGGESTED',
     });
-    
+
     await room.save();
 
     // Add members
@@ -231,28 +238,56 @@ async function createSystemRoom(groupEval, discoveryMode = 'ALL_INDIA') {
       status: 'INVITED'
     }));
 
-    await RoomMember.insertMany(memberDocs);
+    try {
+      await RoomMember.insertMany(memberDocs);
+    } catch (memberErr) {
+      // PHASE 1 FIX: never leave a half-created Room. The HumrahRoom document is
+      // already persisted at this point, so compensate by removing it (and any
+      // partially inserted memberships) before surfacing the failure.
+      console.error('[SystemRoomGenerator] Member insert failed, rolling back room:', memberErr.message);
+      try {
+        await RoomMember.deleteMany({ roomId: room._id });
+        await HumrahRoom.deleteOne({ _id: room._id });
+      } catch (rollbackErr) {
+        console.error('[SystemRoomGenerator] Rollback failed for room', String(room._id), rollbackErr.message);
+      }
+      return { success: false, reason: 'member_insert_failed' };
+    }
 
     // Set 24h transient TTL for lifecycle handling
     if (redisService.setWithJitter) {
       await redisService.setWithJitter(`room:transient:${room._id}`, { status: 'SUGGESTED', creationSource: 'SYSTEM' }, 86400, 3600);
     }
 
-    return { 
-      success: true, 
+    return {
+      success: true,
       room: {
         roomId: room._id,
         topic: room.topic,
         capacity: room.capacity,
         status: room.status,
-        creationSource: room.creationSource
+        creationSource: room.creationSource,
+        discoveryMode: room.discoveryMode,
+        members: groupEval.members
       }
     };
   } finally {
-    if (acquiredLock && redisService.client) {
-      await redisService.client.del(lockKey);
+    if (acquiredLock) {
+      await redisService.releaseLock(lockKey);
     }
   }
+}
+
+/**
+ * Deterministic, non-AI room title derived from the canonical topic.
+ * Clamped to the HumrahRoom.title maxlength of 30.
+ */
+function buildSystemRoomTitle(topic) {
+  const t = String(topic || '').trim();
+  const withSuffix = `${t} Room`;
+  if (withSuffix.length <= 30) return withSuffix;
+  if (t.length <= 30) return t;
+  return t.slice(0, 30).trim();
 }
 
 /**
@@ -316,13 +351,24 @@ function buildCandidateGroups(population) {
 /**
  * Main execution pipeline. Intended to be invoked by a cron job or admin endpoint.
  */
-async function generateSystemRooms(candidatePopulation) {
+async function generateSystemRooms(candidatePopulation, options = {}) {
+  // options (all optional, backward compatible with the original 1-arg signature):
+  //   discoveryMode : 'ALL_INDIA' (default) | 'NEAR_ME'
+  //   maxRooms      : per-call room cap (defaults to CONFIG.MAX_ROOMS_PER_RUN)
+  //   silent        : suppress the per-call console summary (driver logs its own)
+  const discoveryMode = options.discoveryMode || 'ALL_INDIA';
+  const maxRooms = Number.isInteger(options.maxRooms) && options.maxRooms >= 0
+    ? options.maxRooms
+    : CONFIG.MAX_ROOMS_PER_RUN;
+
   const log = {
     startedAt: new Date().toISOString(),
     populationCount: candidatePopulation.length,
+    discoveryMode,
     groupsEvaluated: 0,
     groupsRejected: 0,
     roomsCreated: 0,
+    createdRooms: [],
     rejections: {},
     durationMs: 0
   };
@@ -331,10 +377,11 @@ async function generateSystemRooms(candidatePopulation) {
   const viableGroups = buildCandidateGroups(candidatePopulation.slice(0, CONFIG.MAX_CANDIDATES_PER_RUN));
   log.groupsEvaluated = viableGroups.length;
 
-  for (const group of viableGroups.slice(0, CONFIG.MAX_ROOMS_PER_RUN)) {
-    const res = await createSystemRoom(group.evaluation);
+  for (const group of viableGroups.slice(0, maxRooms)) {
+    const res = await createSystemRoom(group.evaluation, discoveryMode);
     if (res.success) {
       log.roomsCreated++;
+      log.createdRooms.push(res.room);
     } else {
       log.groupsRejected++;
       log.rejections[res.reason] = (log.rejections[res.reason] || 0) + 1;
@@ -342,7 +389,9 @@ async function generateSystemRooms(candidatePopulation) {
   }
 
   log.durationMs = Date.now() - startTime;
-  console.log('[SystemRoomGenerator] Execution finished:', JSON.stringify(log));
+  if (!options.silent) {
+    console.log('[SystemRoomGenerator] Execution finished:', JSON.stringify({ ...log, createdRooms: log.createdRooms.length }));
+  }
   return log;
 }
 
@@ -354,5 +403,6 @@ module.exports = {
   checkExistingRoom,
   createSystemRoom,
   buildCandidateGroups,
-  generateSystemRooms
+  generateSystemRooms,
+  buildSystemRoomTitle
 };
