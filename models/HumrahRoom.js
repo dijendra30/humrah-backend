@@ -11,7 +11,13 @@ const humrahRoomSchema = new mongoose.Schema({
   capacity: { type: Number, required: true, min: 2, max: 5 },
   status: { type: String, enum: ['SUGGESTED', 'ACTIVE', 'FULL', 'INACTIVE', 'CLOSED'], default: 'ACTIVE' },
   expiresAt: { type: Date },
-  lastMessageAt: { type: Date, default: Date.now }
+  // Denormalized count of JOINED RoomMember records. Maintained under the Redis
+  // room lock in joinRoom / leaveRoom / createRoom. INVITED members are excluded.
+  memberCount: { type: Number, default: 0, min: 0 },
+  // R1: no default — a Room only has a lastMessageAt once a real message is
+  // persisted (set from the message's createdAt in humrahRoomSocket.js).
+  // The expiry job already handles lastMessageAt === null explicitly.
+  lastMessageAt: { type: Date, default: null }
 }, { timestamps: true });
 
 humrahRoomSchema.index({ discoveryMode: 1, status: 1 });
