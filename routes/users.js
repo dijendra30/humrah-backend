@@ -434,14 +434,44 @@ const isUnansweredProgressive = (q, key) => {
   return false;
 };
 
+// Progressive-question IDs whose completion is tracked by an EXPLICIT answer marker
+// (questionnaire.answeredProgressiveQuestionIds) rather than "the backend field is
+// non-empty". Q24 (humrahRoomInterests) is here because Room creation legitimately
+// appends the chosen Room topic to that field — which must NOT count as answering
+// the question. Every other question keeps the original "field non-empty" rule.
+const EXPLICIT_ANSWER_QUESTION_IDS = new Set([24]);
+
+/**
+ * The list of PROGRESSIVE_POOL entries the user has NOT answered yet.
+ * - For questions in EXPLICIT_ANSWER_QUESTION_IDS: answered only if the id is in
+ *   questionnaire.answeredProgressiveQuestionIds.
+ * - For all others: answered if the backend field is non-empty (unchanged).
+ */
+const getUnansweredProgressive = (q) => {
+  const answeredIds = new Set((q.answeredProgressiveQuestionIds || []).map(Number));
+  return PROGRESSIVE_POOL.filter(p => {
+    if (EXPLICIT_ANSWER_QUESTION_IDS.has(p.id)) {
+      return !answeredIds.has(p.id);
+    }
+    return isUnansweredProgressive(q, p.key);
+  });
+};
+
+/** Adds an id to questionnaire.answeredProgressiveQuestionIds without duplicates. */
+const markProgressiveAnswered = (q, id) => {
+  const list = Array.isArray(q.answeredProgressiveQuestionIds) ? q.answeredProgressiveQuestionIds.map(Number) : [];
+  if (!list.includes(Number(id))) list.push(Number(id));
+  q.answeredProgressiveQuestionIds = list;
+};
+
 // ── GET /me/next-profile-question: Normal Home Eligibility ───────────────────
 router.get('/me/next-profile-question', authenticate, async (req, res) => {
   try {
     const user = await User.findById(req.userId);
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
-    const q = user.questionnaire || {};
-    const unanswered = PROGRESSIVE_POOL.filter(p => isUnansweredProgressive(q, p.key));
+    const q = user.questionnaire?.toObject?.() || user.questionnaire || {};
+    const unanswered = getUnansweredProgressive(q);
 
     if (unanswered.length === 0) {
       return res.json({ success: true, message: 'All progressive questions completed', question: null, reason: 'complete' });
@@ -585,6 +615,10 @@ router.post('/me/progressive-question/answer', authenticate, async (req, res) =>
       }
     }
 
+    // Record the EXPLICIT answer. This is the completion event — a Room topic being
+    // appended to humrahRoomInterests elsewhere does not reach this code path.
+    markProgressiveAnswered(updatedQ, qDef.id);
+
     // Set server-authoritative cooldown timing
     const now = new Date();
     const availableAt = new Date(now.getTime() + PROGRESSIVE_QUESTION_COOLDOWN_DAYS * 24 * 60 * 60 * 1000);
@@ -632,8 +666,8 @@ router.get('/me/progressive-question/next', authenticate, async (req, res) => {
     const user = await User.findById(req.userId);
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
-    const q = user.questionnaire || {};
-    const unanswered = PROGRESSIVE_POOL.filter(p => isUnansweredProgressive(q, p.key));
+    const q = user.questionnaire?.toObject?.() || user.questionnaire || {};
+    const unanswered = getUnansweredProgressive(q);
 
     if (unanswered.length === 0) {
       return res.json({ success: true, message: 'All progressive questions completed', question: null, reason: 'complete' });
@@ -991,6 +1025,14 @@ router.put('/me/questionnaire', authenticate, async (req, res) => {
       updatedQuestionnaire.costSharingPreference = normalizeCostSharingPreference(updatedQuestionnaire.costSharingPreference);
     }
 
+    // Full onboarding / explicit questionnaire edit: if the user directly supplied
+    // a non-empty humrahRoomInterests here, that IS an explicit Q24 answer (Room
+    // creation goes through roomController.$addToSet, never this route).
+    if (Array.isArray(changedQuestionnaire.humrahRoomInterests) &&
+        changedQuestionnaire.humrahRoomInterests.length > 0) {
+      markProgressiveAnswered(updatedQuestionnaire, 24);
+    }
+
     user.questionnaire = updatedQuestionnaire;
     user.markModified('questionnaire');
 
@@ -1159,3 +1201,11 @@ router.post('/defer-prompt', authenticate, async (req, res) => {
 });
 
 module.exports = router;
+// Exported for unit tests (Q24 completion fix). Not part of the HTTP surface.
+module.exports._q24 = {
+  PROGRESSIVE_POOL,
+  EXPLICIT_ANSWER_QUESTION_IDS,
+  isUnansweredProgressive,
+  getUnansweredProgressive,
+  markProgressiveAnswered,
+};
