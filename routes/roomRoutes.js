@@ -2,13 +2,17 @@ const express = require('express');
 const router = express.Router();
 const roomController = require('../controllers/roomController');
 const { authenticate } = require('../middleware/auth');
+const { validateRoomId, roomCreateLimiter, roomJoinLimiter } = require('../middleware/roomGuards');
 
-router.post('/', authenticate, roomController.createRoom);
+router.post('/', authenticate, roomCreateLimiter, roomController.createRoom);
+router.get('/topics', authenticate, roomController.getTopics);
 router.post('/discover', authenticate, roomController.discoverRooms);
-router.post('/:roomId/join', authenticate, roomController.joinRoom);
-router.post('/:roomId/leave', authenticate, roomController.leaveRoom);
 router.get('/', authenticate, roomController.getMyRooms);
-router.get('/:roomId', authenticate, roomController.getRoomDetails);
-router.get('/:roomId/messages', authenticate, roomController.getRoomMessages);
+
+// All :roomId routes validate the id shape first (malformed -> 400, not 500).
+router.post('/:roomId/join', authenticate, validateRoomId, roomJoinLimiter, roomController.joinRoom);
+router.post('/:roomId/leave', authenticate, validateRoomId, roomController.leaveRoom);
+router.get('/:roomId', authenticate, validateRoomId, roomController.getRoomDetails);
+router.get('/:roomId/messages', authenticate, validateRoomId, roomController.getRoomMessages);
 
 module.exports = router;

@@ -14,6 +14,18 @@ const express = require("express");
 const router  = express.Router();
 const User    = require("../models/User");
 
+/**
+ * Strict boolean normalisation for a device capability flag.
+ * NEVER use !!value here: !!"false" === true would silently grant Room capability.
+ *   true  / "true"  (any case, trimmed) -> true
+ *   everything else (false, "false", "0", "", undefined, null, numbers, junk) -> false
+ */
+function normalizeCapabilityBool(value) {
+  if (value === true) return true;
+  if (typeof value === "string" && value.trim().toLowerCase() === "true") return true;
+  return false;
+}
+
 // POST /api/auth/fcm-token
 // Body: { fcmToken: string, androidVersion?: string, appVersion?: string }
 // Saves (or deduplicates) the FCM token for the authenticated user.
@@ -39,13 +51,15 @@ router.post("/fcm-token", async (req, res) => {
       user.fcmDevices[existingDeviceIndex].androidVersion = androidVersion || user.fcmDevices[existingDeviceIndex].androidVersion;
       user.fcmDevices[existingDeviceIndex].appVersion = appVersion || user.fcmDevices[existingDeviceIndex].appVersion;
       user.fcmDevices[existingDeviceIndex].updatedAt = new Date();
-      if (supportsHumrahRooms !== undefined) user.fcmDevices[existingDeviceIndex].supportsHumrahRooms = !!supportsHumrahRooms;
+      if (supportsHumrahRooms !== undefined) {
+        user.fcmDevices[existingDeviceIndex].supportsHumrahRooms = normalizeCapabilityBool(supportsHumrahRooms);
+      }
     } else {
       user.fcmDevices.push({
         token: tokenStr,
         androidVersion: androidVersion || "Unknown",
         appVersion: appVersion || "Unknown",
-        supportsHumrahRooms: !!supportsHumrahRooms,
+        supportsHumrahRooms: normalizeCapabilityBool(supportsHumrahRooms),
         updatedAt: new Date()
       });
     }
@@ -97,3 +111,4 @@ router.get("/fcm-debug", async (req, res) => {
 });
 
 module.exports = router;
+module.exports.normalizeCapabilityBool = normalizeCapabilityBool;
