@@ -16,6 +16,26 @@ const logRoomEvent = async (eventType, metadata = {}) => {
 
 const { resolveRoomTopicImage, getAvailableTopics, isValidTopicForUser } = require('../utils/roomTopicConfig');
 
+/**
+ * Batch-resolves JOINED member counts for rooms whose denormalized `memberCount`
+ * is not yet populated (pre-backfill window right after a deploy). One aggregation
+ * for all such rooms — never one query per room. Returns a fn (room) -> count.
+ */
+async function memberCountResolver(rooms) {
+  const missing = rooms.filter(r => typeof r.memberCount !== 'number');
+  if (missing.length === 0) {
+    return (room) => room.memberCount;
+  }
+  const agg = await RoomMember.aggregate([
+    { $match: { roomId: { $in: missing.map(r => r._id) }, status: 'JOINED' } },
+    { $group: { _id: '$roomId', c: { $sum: 1 } } },
+  ]);
+  const byRoom = new Map(agg.map(a => [String(a._id), a.c]));
+  return (room) => (typeof room.memberCount === 'number'
+    ? room.memberCount
+    : (byRoom.get(String(room._id)) || 0));
+}
+
 exports.createRoom = async (req, res) => {
   if (process.env.ENABLE_HUMRAH_ROOMS === 'false') {
     return res.status(503).json({ success: false, message: 'Humrah Rooms are currently undergoing maintenance.' });
@@ -56,7 +76,8 @@ exports.createRoom = async (req, res) => {
       topic,
       languages: Array.isArray(languages) ? languages : [],
       capacity: finalCapacity,
-      status: 'ACTIVE'
+      status: 'ACTIVE',
+      memberCount: 1 // creator auto-joins below
     });
 
     await room.save();
@@ -154,7 +175,7 @@ exports.discoverRooms = async (req, res) => {
 
     if (discoveryMode === 'NEAR_ME') {
       if (!userLat || !userLng) {
-        return res.status(400).json({ success: false, message: 'Valid location required for Near Me mode' });
+        return res.status(400).json({ success: false, message: 'Location is required for nearby Rooms' });
       }
 
       const radii = [5000, 8000, 10000, 15000];
@@ -168,10 +189,10 @@ exports.discoverRooms = async (req, res) => {
             }
           }
         }).select('_id liveLocation');
-        
+
         const nearbyUserMap = new Map();
         nearbyUsers.forEach(u => nearbyUserMap.set(u._id.toString(), u));
-        
+
         const nearbyUserIds = Array.from(nearbyUserMap.keys());
 
         const rooms = await HumrahRoom.find({
@@ -182,11 +203,11 @@ exports.discoverRooms = async (req, res) => {
         }).limit(20);
 
         if (rooms.length > 0) {
-          discoveredRooms = await Promise.all(rooms.map(async (room) => {
+          const countOf = await memberCountResolver(rooms);
+          discoveredRooms = rooms.map((room) => {
             const creator = nearbyUserMap.get(room.createdBy.toString());
             const dist = getDistance(userLat, userLng, creator.liveLocation?.lat, creator.liveLocation?.lng);
             const distanceTier = dist <= 5 ? '< 5 km' : dist <= 8 ? '5-8 km' : dist <= 10 ? '8-10 km' : '10-15 km';
-            const memberCount = await RoomMember.countDocuments({ roomId: room._id, status: 'JOINED' });
             return {
               roomId: room._id,
               title: room.title,
@@ -196,14 +217,14 @@ exports.discoverRooms = async (req, res) => {
               languages: room.languages,
               discoveryMode: room.discoveryMode,
               capacity: room.capacity,
-              memberCount,
+              memberCount: countOf(room),
               status: room.status,
               distanceTier,
               lastMessageAt: null,
               lastMessage: null,
               createdAt: room.createdAt
             };
-          }));
+          });
           break;
         }
       }
@@ -214,25 +235,23 @@ exports.discoverRooms = async (req, res) => {
         createdBy: { $nin: excludeIds },
         _id: { $nin: myRoomIds }
       }).limit(50);
-      
-      discoveredRooms = await Promise.all(rooms.map(async (room) => {
-        const memberCount = await RoomMember.countDocuments({ roomId: room._id, status: 'JOINED' });
-        return {
-          roomId: room._id,
-          title: room.title,
-          description: room.description,
-          topic: room.topic,
-          imageUrl: resolveRoomTopicImage(room.topic),
-          languages: room.languages,
-          discoveryMode: room.discoveryMode,
-          capacity: room.capacity,
-          memberCount,
-          status: room.status,
-          distanceTier: 'All India',
-          lastMessageAt: null,
-          lastMessage: null,
-          createdAt: room.createdAt
-        };
+
+      const countOf = await memberCountResolver(rooms);
+      discoveredRooms = rooms.map((room) => ({
+        roomId: room._id,
+        title: room.title,
+        description: room.description,
+        topic: room.topic,
+        imageUrl: resolveRoomTopicImage(room.topic),
+        languages: room.languages,
+        discoveryMode: room.discoveryMode,
+        capacity: room.capacity,
+        memberCount: countOf(room),
+        status: room.status,
+        distanceTier: 'All India',
+        lastMessageAt: null,
+        lastMessage: null,
+        createdAt: room.createdAt
       }));
     } else {
       return res.status(400).json({ success: false, message: 'Invalid discovery mode' });
@@ -276,18 +295,37 @@ exports.joinRoom = async (req, res) => {
       return res.status(400).json({ success: false, message: `Cannot join room. Status is ${room.status}` });
     }
 
-    if (user.blockedUsers && user.blockedUsers.includes(room.createdBy)) {
-      return res.status(403).json({ success: false, message: 'Cannot join this room due to block list.' });
-    }
-
     const existingMember = await RoomMember.findOne({ roomId, userId });
     if (existingMember && existingMember.status === 'JOINED') {
       return res.status(400).json({ success: false, message: 'Already a member of this room' });
     }
 
-    const currentMemberCount = await RoomMember.countDocuments({ roomId, status: 'JOINED' });
+    // Current JOINED members (one query — also gives us the authoritative count).
+    const joinedMembers = await RoomMember.find({ roomId, status: 'JOINED' }).select('userId');
+    const currentMemberCount = joinedMembers.length;
+
+    // ── Block-pair check ──────────────────────────────────────────────────────
+    // Reject if the joining user has blocked, OR is blocked by, the room creator
+    // or any current JOINED member. Response is deliberately generic — it never
+    // reveals which user, or that a block exists.
+    const counterpartIds = new Set([String(room.createdBy)]);
+    joinedMembers.forEach(m => counterpartIds.add(String(m.userId)));
+    counterpartIds.delete(String(userId));
+    if (counterpartIds.size > 0) {
+      const ids = Array.from(counterpartIds);
+      const iBlockedThem = (user.blockedUsers || []).some(b => counterpartIds.has(String(b)));
+      let theyBlockedMe = false;
+      if (!iBlockedThem) {
+        theyBlockedMe = !!(await User.exists({ _id: { $in: ids }, blockedUsers: userId }));
+      }
+      if (iBlockedThem || theyBlockedMe) {
+        return res.status(403).json({ success: false, message: "You can't join this Room right now." });
+      }
+    }
+
     if (currentMemberCount >= room.capacity) {
       room.status = 'FULL';
+      room.memberCount = currentMemberCount;
       await room.save();
       logRoomEvent('ROOM_BECAME_FULL', { roomId });
       return res.status(400).json({ success: false, message: 'Room is at full capacity' });
@@ -307,15 +345,15 @@ exports.joinRoom = async (req, res) => {
     }
 
     const newMemberCount = currentMemberCount + 1;
+    room.memberCount = newMemberCount; // maintained under the room lock
     if (newMemberCount >= room.capacity) {
       room.status = 'FULL';
-      await room.save();
       logRoomEvent('ROOM_BECAME_FULL', { roomId });
     } else if (room.status === 'SUGGESTED' && newMemberCount >= 2) {
       room.status = 'ACTIVE';
-      await room.save();
       logRoomEvent('ROOM_BECAME_ACTIVE', { roomId });
     }
+    await room.save();
 
     logRoomEvent('ROOM_JOINED', { roomId, userId });
 
@@ -374,12 +412,14 @@ exports.leaveRoom = async (req, res) => {
       await redisService.del(`presence:room:${roomId}:${userId}`);
     }
 
+    // Authoritative recount under the room lock; keep the denormalized field in sync.
     const newMemberCount = await RoomMember.countDocuments({ roomId, status: 'JOINED' });
+    room.memberCount = newMemberCount;
     if (room.status === 'FULL' && newMemberCount < room.capacity) {
       room.status = 'ACTIVE';
-      await room.save();
       logRoomEvent('ROOM_REOPENED_FROM_FULL', { roomId });
     }
+    await room.save();
 
     logRoomEvent('ROOM_LEFT', { roomId, userId });
     return res.status(200).json({ success: true, message: 'Successfully left room' });
@@ -399,24 +439,37 @@ exports.getMyRooms = async (req, res) => {
     const userId = req.userId;
     const memberships = await RoomMember.find({ userId, status: 'JOINED' }).select('roomId');
     const roomIds = memberships.map(m => m.roomId);
-    // Sort by lastMessageAt desc so most recently active rooms appear first
+    // Most recently active first (null lastMessageAt sorts last in desc order).
     const rooms = await HumrahRoom.find({ _id: { $in: roomIds } }).sort({ lastMessageAt: -1, createdAt: -1 });
 
-    const formattedRooms = await Promise.all(rooms.map(async (room) => {
-      const memberCount = await RoomMember.countDocuments({ roomId: room._id, status: 'JOINED' });
+    if (rooms.length === 0) {
+      return res.status(200).json({ success: true, rooms: [] });
+    }
 
-      // Fetch last message for session card preview
-      let lastMessage = null;
-      const lastMessageAt = room.lastMessageAt || null;
-      if (lastMessageAt) {
-        const lastMsg = await RoomMessage.findOne({ roomId: room._id, messageType: 'TEXT' })
-          .sort({ createdAt: -1 })
-          .populate('senderId', 'firstName');
-        if (lastMsg) {
-          const senderName = lastMsg.senderId?.firstName || 'Someone';
-          lastMessage = `${senderName}: ${lastMsg.content}`;
-        }
-      }
+    // ── One aggregation for the newest TEXT message per room (no N+1) ──────────
+    const lastMsgs = await RoomMessage.aggregate([
+      { $match: { roomId: { $in: rooms.map(r => r._id) }, messageType: 'TEXT' } },
+      { $sort: { createdAt: -1 } },
+      { $group: { _id: '$roomId', content: { $first: '$content' }, senderId: { $first: '$senderId' }, createdAt: { $first: '$createdAt' } } },
+    ]);
+    const lastByRoom = new Map(lastMsgs.map(m => [String(m._id), m]));
+
+    // One query for the sender first-names referenced by those messages.
+    const senderIds = [...new Set(lastMsgs.map(m => String(m.senderId)))];
+    const senders = senderIds.length
+      ? await User.find({ _id: { $in: senderIds } }).select('firstName')
+      : [];
+    const nameById = new Map(senders.map(u => [String(u._id), u.firstName || 'Someone']));
+
+    const countOf = await memberCountResolver(rooms);
+
+    const formattedRooms = rooms.map((room) => {
+      const lm = lastByRoom.get(String(room._id));
+      // lastMessageAt is derived from an ACTUAL persisted message, never the room
+      // field alone — a room with no messages reports null even if a legacy
+      // default left a stale timestamp on the document.
+      const lastMessage = lm ? `${nameById.get(String(lm.senderId)) || 'Someone'}: ${lm.content}` : null;
+      const lastMessageAt = lm ? new Date(lm.createdAt).toISOString() : null;
 
       return {
         roomId: room._id,
@@ -427,14 +480,14 @@ exports.getMyRooms = async (req, res) => {
         languages: room.languages,
         discoveryMode: room.discoveryMode,
         capacity: room.capacity,
-        memberCount: memberCount,
+        memberCount: countOf(room),
         status: room.status,
         distanceTier: null,
-        lastMessageAt: lastMessageAt ? lastMessageAt.toISOString() : null,
-        lastMessage: lastMessage,
-        createdAt: room.createdAt
+        lastMessageAt,
+        lastMessage,
+        createdAt: room.createdAt,
       };
-    }));
+    });
 
     res.status(200).json({ success: true, rooms: formattedRooms });
   } catch (error) {
@@ -465,7 +518,9 @@ exports.getRoomDetails = async (req, res) => {
       discoveryMode: room.discoveryMode,
       capacity: room.capacity,
       status: room.status,
-      memberCount: members.length,
+      // members[] is already loaded for the payload below; use it as the fallback
+      // for rooms not yet touched by the memberCount backfill.
+      memberCount: typeof room.memberCount === 'number' ? room.memberCount : members.length,
       lastMessageAt: room.lastMessageAt ? room.lastMessageAt.toISOString() : null,
       createdAt: room.createdAt,
       createdBy: room.createdBy
