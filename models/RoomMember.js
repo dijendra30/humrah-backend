@@ -6,7 +6,11 @@ const roomMemberSchema = new mongoose.Schema({
   role: { type: String, enum: ['HOST', 'PARTICIPANT'], default: 'PARTICIPANT' },
   status: { type: String, enum: ['INVITED', 'JOINED', 'LEFT', 'KICKED'], default: 'JOINED' },
   joinedAt: { type: Date, default: Date.now },
-  leftAt: { type: Date }
+  leftAt: { type: Date },
+  // Phase 2.1: server-authoritative read state. Set only when the user actually
+  // opens / catches up in the Room (POST /api/rooms/:roomId/read) — never by a
+  // push notification being delivered. null = never read.
+  lastReadAt: { type: Date, default: null }
 }, { timestamps: true });
 
 roomMemberSchema.index({ roomId: 1, userId: 1 }, { unique: true });

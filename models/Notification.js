@@ -20,8 +20,22 @@ const notificationSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    enum: ['ADMIN_BROADCAST', 'SYSTEM', 'MATCH', 'ACTIVITY', 'ROOM_INVITATION'],
+    enum: ['ADMIN_BROADCAST', 'SYSTEM', 'MATCH', 'ACTIVITY', 'ROOM_INVITATION', 'ROOM_MESSAGE'],
     default: 'ADMIN_BROADCAST'
+  },
+
+  // =============================================
+  // HUMRAH ROOM REFERENCES (Phase 2.1) — additive, null for every other type
+  // =============================================
+  roomId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'HumrahRoom',
+    default: null
+  },
+  messageId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'RoomMessage',
+    default: null
   },
   broadcastId: {
     type: mongoose.Schema.Types.ObjectId,
