@@ -101,7 +101,14 @@ function isQuestionAnswered(question, q, answeredIds) {
     return answeredIds.has(question.id);
   }
   if (question.type === 'host_interest') {
-    return q[question.key] === HOST_INTERESTED_ANSWER;
+    // SPEC CHANGE: all three options — "Yes, I'm interested", "Maybe later" and
+    // "No, just looking for friends" — are valid ANSWERS to Q501, so any of them
+    // completes the item. This previously required the affirmative answer, which
+    // meant a user who answered every question but declined hosting was stuck at
+    // 96% forever with Q501 reported as "missing" despite having answered it.
+    // HOST_INTERESTED_ANSWER still gates whether 502-505 are APPLICABLE below —
+    // that is a separate question from whether 501 was answered.
+    return !isBlank(q[question.key]);
   }
   if (question.type === 'array') return !isEmpty(q[question.key]);
   return !isBlank(q[question.key]);
