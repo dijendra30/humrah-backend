@@ -60,6 +60,27 @@ const AI_HOST_CONFIG = {
   MIN_MEMBERS: num(process.env.AI_HOST_MIN_MEMBERS, 2),
   MIN_PRIOR_PARTICIPANTS: num(process.env.AI_HOST_MIN_PRIOR_PARTICIPANTS, 2),
 
+  // ── R6.3: global spend ceiling ───────────────────────────────────────────
+  // Above the per-Room cooldown: however many Rooms qualify and however many
+  // workers run, provider calls cannot exceed these. Deliberately small — this
+  // is a nudge feature, not a chat assistant. Raise them consciously.
+  MAX_CALLS_PER_HOUR: num(process.env.AI_HOST_MAX_CALLS_PER_HOUR, 20),
+  MAX_CALLS_PER_DAY: num(process.env.AI_HOST_MAX_CALLS_PER_DAY, 100),
+  MAX_ACTIONS_PER_RUN: num(process.env.AI_HOST_MAX_ACTIONS_PER_RUN, 3),
+  MAX_ROOMS_SCANNED_PER_RUN: num(process.env.AI_HOST_MAX_ROOMS_SCANNED, 200),
+
+  // ── R6.3: scheduler ──────────────────────────────────────────────────────
+  // The scheduler ALSO requires ENABLED — see jobs/aiHostJob.js. There is no
+  // configuration that starts AI work while the master switch is off.
+  SCHEDULER_ENABLED: bool(process.env.AI_HOST_SCHEDULER_ENABLED, false),
+  SCHEDULER_INTERVAL_MINUTES: num(process.env.AI_HOST_SCHEDULER_INTERVAL_MINUTES, 60),
+  SCHEDULER_LOCK_TTL_SECONDS: num(process.env.AI_HOST_SCHEDULER_LOCK_TTL_SECONDS, 300),
+
+  // ── R6.3: outcome attribution ────────────────────────────────────────────
+  // How long after an AI message subsequent HUMAN activity may still be
+  // attributed to it. Outside this window nothing is claimed.
+  ATTRIBUTION_WINDOW_HOURS: num(process.env.AI_HOST_ATTRIBUTION_WINDOW_HOURS, 24),
+
   // ── Provider + credentials (Step 13) ─────────────────────────────────────
   // The AI Host has its OWN keys and never borrows GROQ_API_KEY / GEMINI_API_KEY,
   // which belong to profile extraction and the profile assistant. Separate keys

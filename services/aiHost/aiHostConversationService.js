@@ -34,6 +34,8 @@ const { evaluateRoom } = require('../roomEngagementService');
 const { AI_HOST_CONFIG, AI_HOST_IDENTITY } = require('./aiHostConfig');
 const { assessRoom, prepareRequest, executePrepared, logAiHost, isAiHostEnabled } = require('./aiHostService');
 const { validateAiHostResponse, REJECTION } = require('./aiHostResponseValidator');
+const { emitAiHostEvent, AI_EVENT, newInterventionId, classifyError } = require('./aiHostTelemetry');
+const aiHostBudget = require('./aiHostBudgetService');
 
 /** Message types the AI Host is allowed to read as conversation. */
 const HUMAN_MESSAGE_TYPE = 'TEXT';
@@ -57,6 +59,7 @@ const OUTCOME = {
   MODERATION_REJECTED: 'MODERATION_REJECTED',
   PERSIST_FAILED: 'PERSIST_FAILED',
   DRY_RUN: 'DRY_RUN',
+  BUDGET_EXHAUSTED: 'BUDGET_EXHAUSTED',
   DELIVERED: 'DELIVERED',
   ERROR: 'ERROR',
 };
@@ -97,7 +100,16 @@ function redisAvailable() {
  */
 async function runAiHostIntervention(params = {}) {
   const { roomId, io = null, provider = null, force = false } = params;
-  const result = { roomId: roomId ? String(roomId) : null, outcome: OUTCOME.ERROR, delivered: false };
+  // R6.3 - one correlation id per attempt, threaded through every lifecycle
+  // event so a single intervention is traceable end to end in the logs.
+  const aiInterventionId = params.aiInterventionId || newInterventionId();
+  const startedAt = Date.now();
+  const result = {
+    roomId: roomId ? String(roomId) : null,
+    aiInterventionId,
+    outcome: OUTCOME.ERROR,
+    delivered: false,
+  };
   if (!roomId) return result;
 
   // 1. Master switch. Nothing is read, claimed or called while disabled.
@@ -105,18 +117,28 @@ async function runAiHostIntervention(params = {}) {
 
   // 2. Idempotency and pacing both need Redis. Without it we cannot guarantee a
   //    single intervention, so we decline rather than risk duplicates.
-  if (!redisAvailable()) return { ...result, outcome: OUTCOME.REDIS_UNAVAILABLE };
+  if (!redisAvailable()) {
+    emitAiHostEvent(AI_EVENT.REDIS_UNAVAILABLE, { aiInterventionId, roomId: String(roomId), reason: 'claim_unavailable' });
+    return { ...result, outcome: OUTCOME.REDIS_UNAVAILABLE };
+  }
 
   let claimed = false;
   try {
     // 3. Room cooldown, checked before any work.
     const onCooldown = await redisService.get(cooldownKey(roomId));
-    if (onCooldown) return { ...result, outcome: OUTCOME.COOLDOWN };
+    if (onCooldown) {
+      emitAiHostEvent(AI_EVENT.COOLDOWN, { aiInterventionId, roomId: String(roomId) });
+      return { ...result, outcome: OUTCOME.COOLDOWN };
+    }
 
     // 4. Atomic claim (SET NX EX). Two workers cannot both win, so a Room can
     //    never receive two simultaneous interventions.
     claimed = await redisService.acquireLock(claimKey(roomId), AI_HOST_CONFIG.CLAIM_TTL_SECONDS);
-    if (!claimed) return { ...result, outcome: OUTCOME.ALREADY_CLAIMED };
+    if (!claimed) {
+      emitAiHostEvent(AI_EVENT.CLAIM_FAILED, { aiInterventionId, roomId: String(roomId) });
+      return { ...result, outcome: OUTCOME.ALREADY_CLAIMED };
+    }
+    emitAiHostEvent(AI_EVENT.CLAIMED, { aiInterventionId, roomId: String(roomId) });
 
     const room = await HumrahRoom.findById(roomId).lean();
     if (!room) return { ...result, outcome: OUTCOME.NOT_ELIGIBLE };
@@ -135,7 +157,17 @@ async function runAiHostIntervention(params = {}) {
       presentMemberCount: inside.size,
       recentIntervention: false, // the cooldown check above is the authority
     });
-    if (!decision.eligible) return { ...result, outcome: OUTCOME.NOT_ELIGIBLE, reason: decision.reason };
+    if (!decision.eligible) {
+      emitAiHostEvent(AI_EVENT.SKIPPED, {
+        aiInterventionId, roomId: String(roomId), reason: decision.reason,
+        engagementState: snapshot ? snapshot.state : null, lifecycleStatus: room.status,
+      });
+      return { ...result, outcome: OUTCOME.NOT_ELIGIBLE, reason: decision.reason };
+    }
+    emitAiHostEvent(AI_EVENT.ELIGIBLE, {
+      aiInterventionId, roomId: String(roomId),
+      engagementState: snapshot ? snapshot.state : null, lifecycleStatus: room.status,
+    });
 
     // 6. Context. ONLY human TEXT messages are read, so an AI message can never
     //    become input to another AI message (loop prevention, part 1).
@@ -159,33 +191,65 @@ async function runAiHostIntervention(params = {}) {
     // 7. DRY RUN stops here: evaluated and logged, but no provider call, no
     //    persistence, no delivery, no state change of any kind.
     if (AI_HOST_CONFIG.DRY_RUN && !force) {
-      logAiHost('ai_host_dry_run', {
-        roomId: String(roomId),
+      // R6.3 - dry-run consumes the SAME budget a real call would, so dry-run
+      // capacity numbers are not optimistic fiction. It stops before the
+      // provider, so no money is spent and nothing is persisted or emitted.
+      const dryBudget = await aiHostBudget.consume({ aiInterventionId });
+      if (!dryBudget.allowed) {
+        return { ...result, outcome: OUTCOME.BUDGET_EXHAUSTED, reason: dryBudget.reason };
+      }
+      emitAiHostEvent(AI_EVENT.SKIPPED, {
+        aiInterventionId, roomId: String(roomId), reason: 'dry_run',
         engagementState: snapshot ? snapshot.state : null,
         messagesInContext: prepared.stats.messagesIncluded,
         contextChars: prepared.stats.contextChars,
+        callsThisHour: dryBudget.callsThisHour, callsToday: dryBudget.callsToday,
       });
       return { ...result, outcome: OUTCOME.DRY_RUN, stats: prepared.stats };
     }
 
-    // 8. Generate.
+    // 8. Budget, then generate. The budget is consumed BEFORE the request, so a
+    //    provider that hangs or crashes has still counted against the ceiling.
+    const budget = await aiHostBudget.consume({ aiInterventionId });
+    if (!budget.allowed) {
+      return { ...result, outcome: OUTCOME.BUDGET_EXHAUSTED, reason: budget.reason };
+    }
+
+    emitAiHostEvent(AI_EVENT.GENERATION_STARTED, {
+      aiInterventionId, roomId: String(roomId),
+      provider: AI_HOST_CONFIG.PROVIDER, model: AI_HOST_CONFIG.MODEL || 'provider_default',
+      callsThisHour: budget.callsThisHour, callsToday: budget.callsToday,
+    });
+
     const completion = await executePrepared(prepared, { provider, force: true });
     if (!completion.ok) {
       // No retry loop by design: the next scheduled attempt is the retry.
+      emitAiHostEvent(AI_EVENT.GENERATION_FAILED, {
+        aiInterventionId, roomId: String(roomId),
+        provider: AI_HOST_CONFIG.PROVIDER,
+        errorKind: completion.errorKind || 'unknown',
+        // Classification only - raw provider text may echo the prompt.
+        reason: classifyError(completion.error),
+        providerLatencyMs: completion.latencyMs || 0,
+      });
       return { ...result, outcome: OUTCOME.PROVIDER_FAILED, errorKind: completion.errorKind };
     }
+    emitAiHostEvent(AI_EVENT.GENERATION_SUCCEEDED, {
+      aiInterventionId, roomId: String(roomId),
+      provider: AI_HOST_CONFIG.PROVIDER, providerLatencyMs: completion.latencyMs || 0,
+    });
 
     // 9. Validate — nothing raw from a provider is ever persisted.
     const validated = validateAiHostResponse(completion.text);
     if (!validated.ok) {
-      logAiHost('ai_host_response_rejected', { roomId: String(roomId), reason: validated.reason });
+      emitAiHostEvent(AI_EVENT.OUTPUT_REJECTED, { aiInterventionId, roomId: String(roomId), reason: validated.reason });
       return { ...result, outcome: OUTCOME.RESPONSE_REJECTED, reason: validated.reason };
     }
 
     // 10. Moderation — AI content passes the same safety boundary as user content.
     const moderated = await moderateHostMessage(validated.text);
     if (!moderated.ok) {
-      logAiHost('ai_host_response_moderated', { roomId: String(roomId), reason: moderated.reason });
+      emitAiHostEvent(AI_EVENT.MODERATION_REJECTED, { aiInterventionId, roomId: String(roomId), reason: moderated.reason });
       return { ...result, outcome: OUTCOME.MODERATION_REJECTED, reason: moderated.reason };
     }
 
@@ -201,6 +265,7 @@ async function runAiHostIntervention(params = {}) {
         clientMessageId: null,
       }).save();
     } catch (persistErr) {
+      emitAiHostEvent(AI_EVENT.PERSIST_FAILED, { aiInterventionId, roomId: String(roomId), reason: 'mongo_write_failed' });
       console.error('[AI_HOST] persist failed:', persistErr.message);
       return { ...result, outcome: OUTCOME.PERSIST_FAILED };
     }
@@ -213,18 +278,24 @@ async function runAiHostIntervention(params = {}) {
     ).catch(() => {});
 
     // 13. Deliver over the EXISTING room_message channel, same payload shape.
-    const payload = buildAiHostEmitPayload(saved, roomId);
+    const payload = buildAiHostEmitPayload(saved, roomId, aiInterventionId);
     let emitted = false;
     if (io && typeof io.to === 'function') {
       try { io.to(`room:${roomId}`).emit('room_message', payload); emitted = true; }
       catch (emitErr) { console.error('[AI_HOST] emit failed:', emitErr.message); }
     }
 
-    logAiHost('ai_host_message_delivered', {
-      roomId: String(roomId),
-      messageId: String(saved._id),
+    emitAiHostEvent(AI_EVENT.PERSISTED, {
+      aiInterventionId, roomId: String(roomId), messageId: String(saved._id),
+      messageLength: moderated.text.length,
+    });
+    emitAiHostEvent(AI_EVENT.DELIVERED, {
+      aiInterventionId, roomId: String(roomId), messageId: String(saved._id),
       engagementState: snapshot ? snapshot.state : null,
-      outputChars: moderated.text.length,
+      participantsAtIntervention: snapshot ? snapshot.participatingMemberCount : 0,
+      messageLength: moderated.text.length,
+      providerLatencyMs: completion.latencyMs || 0,
+      totalLatencyMs: Date.now() - startedAt,
       emitted,
     });
 
@@ -267,8 +338,12 @@ async function moderateHostMessage(text) {
  * distinguishes it. senderId is null and senderName is the explicit AI identity —
  * never a human name.
  */
-function buildAiHostEmitPayload(saved, roomId) {
+function buildAiHostEmitPayload(saved, roomId, aiInterventionId = null) {
   return {
+    // R6.3 — correlation id, so the client's "message seen" event can be joined
+    // to the server-side intervention lifecycle. Opaque and non-identifying:
+    // it names an intervention, not a user. Additive, so older clients ignore it.
+    aiInterventionId,
     _id: String(saved._id),
     roomId: String(roomId),
     senderId: null,

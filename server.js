@@ -596,6 +596,11 @@ const connectDB = async () => {
     // notification; never changes Room lifecycle and never posts a chat message.
     require('./jobs/roomEngagementJob').startRoomEngagementJob(io);
 
+    // R6.3: AI Host scheduler. Requires BOTH AI_HOST_ENABLED=true and
+    // AI_HOST_SCHEDULER_ENABLED=true (both default false), so this is a no-op
+    // log line in production. It never posts while AI_HOST_DRY_RUN=true.
+    require('./jobs/aiHostJob').startAiHostJob(io);
+
     await runStartupCleanup();
     scheduleDailyCleanup();
   } catch (err) {
