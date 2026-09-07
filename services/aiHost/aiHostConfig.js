@@ -43,9 +43,18 @@ const AI_HOST_CONFIG = {
   MAX_OUTPUT_TOKENS: num(process.env.AI_HOST_MAX_OUTPUT_TOKENS, 200),
   REQUEST_TIMEOUT_MS: num(process.env.AI_HOST_REQUEST_TIMEOUT_MS, 8000),
 
-  // ── Intervention pacing foundation (consumed by R6.2, not by R6.1) ───────
+  // ── Intervention pacing (R6.2) ───────────────────────────────────────────
   ROOM_COOLDOWN_HOURS: num(process.env.AI_HOST_ROOM_COOLDOWN_HOURS, 24),
   MAX_INTERVENTIONS_PER_ROOM_PER_DAY: num(process.env.AI_HOST_MAX_PER_ROOM_PER_DAY, 1),
+  // How long one worker may hold the right to intervene in a Room while it
+  // generates. Short: it is a claim, not the cooldown.
+  CLAIM_TTL_SECONDS: num(process.env.AI_HOST_CLAIM_TTL_SECONDS, 90),
+
+  // ── Response validation (R6.2, Step 10) ──────────────────────────────────
+  // A Host message is a short nudge, not an essay. Anything longer is rejected
+  // rather than truncated: a cut-off sentence reads like a broken bot.
+  MAX_RESPONSE_CHARS: num(process.env.AI_HOST_MAX_RESPONSE_CHARS, 320),
+  MIN_RESPONSE_CHARS: num(process.env.AI_HOST_MIN_RESPONSE_CHARS, 15),
 
   // ── Eligibility gates (Step 8) ───────────────────────────────────────────
   MIN_MEMBERS: num(process.env.AI_HOST_MIN_MEMBERS, 2),

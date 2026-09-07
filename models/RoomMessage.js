@@ -2,8 +2,20 @@ const mongoose = require('mongoose');
 
 const roomMessageSchema = new mongoose.Schema({
   roomId: { type: mongoose.Schema.Types.ObjectId, ref: 'HumrahRoom', required: true },
-  senderId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  messageType: { type: String, enum: ['TEXT', 'SYSTEM_NOTIFICATION'], default: 'TEXT' },
+  // R6.2: NOT required for AI_HOST messages. The AI Host is not a user, has no
+  // account, and must never borrow a human's senderId — so this stays null for it.
+  // Same conditional-required idiom already used by HumrahRoom.createdBy.
+  senderId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: function () { return this.messageType !== 'AI_HOST'; },
+    default: null,
+  },
+  // AI_HOST (R6.2) makes an AI message distinguishable at the DATA layer, not just
+  // in the UI. It is deliberately NOT 'TEXT': every existing participant/activity
+  // query filters on messageType 'TEXT', so an AI message can never be counted as
+  // human conversation by R5 engagement, discovery or the last-sender lookup.
+  messageType: { type: String, enum: ['TEXT', 'SYSTEM_NOTIFICATION', 'AI_HOST'], default: 'TEXT' },
   content: { type: String, required: true },
   // Client-generated idempotency key. Used to reconcile the sender's optimistic
   // bubble with the persisted message and to drop duplicate sends after a socket
