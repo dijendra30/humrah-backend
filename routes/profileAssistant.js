@@ -37,6 +37,8 @@ const mongoose = require('mongoose');
 const { auth } = require('../middleware/auth');
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const User     = require('../models/User');
+const { calculateProfileCompletion } = require('../utils/profileCompletion');
+const { moderateQuestionnaireSync } = require('../middleware/moderation');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // BIO CACHE  — inline schema, TTL 7 days
@@ -93,30 +95,66 @@ const assistantLimiter = rateLimit({
 // CONFIG
 // ─────────────────────────────────────────────────────────────────────────────
 
-const GROQ_MODEL       = 'llama-3.1-8b-instant';
-const GROQ_DAILY_LIMIT = 5;
+// Groq model. Kept in step with services/providers/groqProvider.js, which already
+// uses openai/gpt-oss-120b — this file was still pinned to llama-3.1-8b-instant,
+// so the two AI paths in the product ran on different models. Env-overridable so
+// a model change never again needs a code deploy.
+const GROQ_MODEL       = process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
+const GROQ_DAILY_LIMIT = Number(process.env.GROQ_DAILY_LIMIT) > 0
+  ? Number(process.env.GROQ_DAILY_LIMIT)
+  : 5;
 
 const getTodayStr = () => new Date().toISOString().slice(0, 10);
 
-async function groqCallsToday(user) {
+function groqCallsToday(user) {
   const e = user.groqUsage;
   if (!e || e.date !== getTodayStr()) return 0;
   return e.count || 0;
 }
 
+/**
+ * Consumes one daily AI credit and returns the resulting count.
+ *
+ * BUGFIX: this used to compute the next value in JS and fire the write off
+ * without awaiting it (`User.updateOne(...).catch(() => {})`). Two concurrent
+ * requests both read the same count and both wrote count+1, so the daily cap was
+ * trivially exceeded — and any write error was swallowed, which silently granted
+ * unlimited paid AI calls. Now a single atomic update: `$inc` when the stored day
+ * is still today, otherwise `$set` to start a new day.
+ */
 async function incrementGroq(user) {
   const today = getTodayStr();
-  const e     = user.groqUsage;
-  user.groqUsage = (!e || e.date !== today)
-    ? { date: today, count: 1 }
-    : { date: today, count: (e.count || 0) + 1 };
-  user.markModified('groqUsage');
-  User.updateOne({ _id: user._id }, { groqUsage: user.groqUsage }).catch(() => {});
+  try {
+    if (user.groqUsage && user.groqUsage.date === today) {
+      const updated = await User.findOneAndUpdate(
+        { _id: user._id, 'groqUsage.date': today },
+        { $inc: { 'groqUsage.count': 1 } },
+        { new: true, projection: { groqUsage: 1 } }
+      );
+      if (updated) {
+        user.groqUsage = updated.groqUsage;
+        return updated.groqUsage.count;
+      }
+    }
+    // First call of the day (or the stored day has rolled over).
+    const reset = await User.findOneAndUpdate(
+      { _id: user._id },
+      { $set: { groqUsage: { date: today, count: 1 } } },
+      { new: true, projection: { groqUsage: 1 } }
+    );
+    user.groqUsage = reset ? reset.groqUsage : { date: today, count: 1 };
+    return user.groqUsage.count;
+  } catch (err) {
+    // Fail CLOSED: if usage cannot be recorded we must not hand out a free call.
+    console.error('[Assistant] groq usage increment failed:', err.message);
+    throw err;
+  }
 }
 
-async function overGroqLimit(user) {
-  return (await groqCallsToday(user)) >= GROQ_DAILY_LIMIT;
+function overGroqLimit(user) {
+  return groqCallsToday(user) >= GROQ_DAILY_LIMIT;
 }
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HUMRAH KNOWLEDGE BASE
@@ -205,7 +243,13 @@ function buildSafeProfileSummary(user) {
   if (preferences.length < 2)   missingFields.push('preferences');
   if (!q.ageGroup)               missingFields.push('ageGroup');
   if (!q.city)                   missingFields.push('city');
-  const completionScore = Math.round(((6 - missingFields.length) / 6) * 100);
+  // BUGFIX: this was a SECOND completion formula — "(6 - missing) / 6" over six
+  // hand-picked fields — so the assistant told the user a different percentage
+  // from the one the Profile screen showed for the same account. The canonical
+  // item-based calculator is the single source of truth for that number.
+  // `missingFields` below stays the assistant's own short coaching list, which is
+  // a different thing: what to nudge the user about next, not what the score is.
+  const completionScore = calculateProfileCompletion(user).percentage;
 
   const isHost     = user.userType === 'COMPANION' || q.becomeCompanion === "Yes, I'm interested";
   const hostActive = user.hostActive !== false;
@@ -802,8 +846,8 @@ async function polishBullets(bullets) {
         { role: 'system', content: 'Rewrite a numbered list of profile tips for a social companion app. Keep each tip warm, short, and actionable. One sentence max. Return ONLY the same numbered list.' },
         { role: 'user', content: `Rewrite:\n${numbered}` },
       ],
-      max_tokens: 400, temperature: 0.4,
-    }, { headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, timeout: 7000 });
+      max_tokens: 1200, temperature: 0.4,
+    }, { headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, timeout: 15000 });
     const raw = res.data?.choices?.[0]?.message?.content?.trim() || '';
     if (!raw) return bullets;
     const lines = raw.split('\n').map(l => l.replace(/^\d+\.\s*/, '').trim()).filter(Boolean);
@@ -838,8 +882,8 @@ async function groqFallback(userMessage, summary) {
         { role: 'system', content: HUMRAH_KNOWLEDGE_BASE },
         { role: 'user', content: `User profile (anonymised):\n${filteredData}\n\nQuestion: ${userMessage}\n\nAnswer in 3-5 lines, specific and actionable.` },
       ],
-      max_tokens: 250, temperature: 0.55,
-    }, { headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, timeout: 9000 });
+      max_tokens: 1000, temperature: 0.55,
+    }, { headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, timeout: 20000 });
     return res.data?.choices?.[0]?.message?.content?.trim() || null;
   } catch (err) {
     console.error('[Assistant] Groq fallback error:', err?.response?.data || err.message);
@@ -879,8 +923,12 @@ async function generateAndApplyAiFix(user, summary) {
         { role: 'system', content: 'Return only valid JSON. No markdown. No explanation.' },
         { role: 'user', content: prompt },
       ],
-      max_tokens: 350, temperature: 0.65,
-    }, { headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, timeout: 15000 });
+      // Ask the model for JSON directly instead of hoping it does not wrap the
+      // answer in markdown (the fence-stripping below stays as a belt-and-braces
+      // fallback). Matches how services/providers/groqProvider.js already calls it.
+      response_format: { type: 'json_object' },
+      max_tokens: 800, temperature: 0.65,
+    }, { headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, timeout: 20000 });
     const raw = res.data?.choices?.[0]?.message?.content?.trim() || '{}';
     generated = JSON.parse(raw.replace(/```json|```/g, '').trim());
   } catch (err) {
@@ -892,8 +940,20 @@ async function generateAndApplyAiFix(user, summary) {
   if (generated.bio && typeof generated.bio === 'string') {
     const bio = generated.bio.trim().slice(0, 140);
     if (bio.length >= 10 && !/https?:\/\//.test(bio) && !/\d{10}/.test(bio)) {
-      user.questionnaire.bio = bio;
-      applied.push({ field: 'bio', value: bio });
+      // BUGFIX: model output was written straight onto the profile, so this was
+      // the one bio path in the product that skipped moderation. Run the same
+      // synchronous check every other questionnaire write uses; if the generated
+      // text trips it, drop the bio rather than publishing it.
+      const { cleanedQuestionnaire, errors } = moderateQuestionnaireSync({ bio });
+      const safeBio = (cleanedQuestionnaire && typeof cleanedQuestionnaire.bio === 'string')
+        ? cleanedQuestionnaire.bio.trim()
+        : '';
+      if ((!errors || errors.length === 0) && safeBio.length >= 10) {
+        user.questionnaire.bio = safeBio;
+        applied.push({ field: 'bio', value: safeBio });
+      } else {
+        console.warn('[Assistant] AI-generated bio rejected by moderation; not applied.');
+      }
     }
   }
   if (Array.isArray(generated.interests) && generated.interests.length > 0) {
@@ -963,8 +1023,8 @@ async function rewriteBio(userId, rawText, tone, summary) {
         { role: 'system', content: 'Return only the bio text. No quotes. No explanation. Max 140 characters.' },
         { role: 'user', content: prompt },
       ],
-      max_tokens: 100, temperature: 0.7,
-    }, { headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, timeout: 10000 });
+      max_tokens: 700, temperature: 0.7,
+    }, { headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, timeout: 20000 });
 
     let bio = (res.data?.choices?.[0]?.message?.content || '').trim().replace(/^["']|["']$/g, '');
     bio = bio.slice(0, 140);
@@ -1049,7 +1109,7 @@ router.post('/chat', assistantLimiter, async (req, res) => {
     }
     if (await overGroqLimit(user)) return res.json({ success: true, source: 'limit', intro: "You have reached today's AI assist limit.", bullets: ['Your daily AI limit resets at midnight.', 'Try one of the quick options below.'], callToAction: null, showOptionsAfter: true, completionScore: summary.completionScore });
     if (!process.env.GROQ_API_KEY) return res.json({ success: true, source: 'fallback', intro: "I didn't fully understand that. Try one of these options:", bullets: [], callToAction: null, showOptionsAfter: true, completionScore: summary.completionScore });
-    incrementGroq(user);
+    await incrementGroq(user);
     let groqReply = null;
     try { groqReply = await groqFallback(trimmed, summary); } catch {}
     if (!groqReply) return res.json({ success: true, source: 'fallback', intro: "I didn't fully understand that. Try one of these options:", bullets: [], callToAction: null, showOptionsAfter: true, completionScore: summary.completionScore });
@@ -1067,37 +1127,13 @@ router.post('/ai-fix', assistantLimiter, async (req, res) => {
     if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
     if (!user.profileBotConsent) return res.status(403).json({ success: false, code: 'CONSENT_REQUIRED', message: 'We need your permission to access your profile data.' });
     if (await overGroqLimit(user)) return res.status(429).json({ success: false, code: 'DAILY_LIMIT', message: "You've reached today's AI assist limit. Try again tomorrow or fill fields manually." });
-    incrementGroq(user);
+    await incrementGroq(user);
     const summary = buildSafeProfileSummary(user);
     const result  = await generateAndApplyAiFix(user, summary);
     return res.status(result.success ? 200 : 400).json(result);
   } catch (err) {
     console.error('[Assistant] ai-fix:', err.message);
     res.status(500).json({ success: false, message: 'Server error.' });
-  }
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// DIAGNOSTIC ROUTE — remove after debugging
-// ─────────────────────────────────────────────────────────────────────────────
-router.get('/debug', assistantLimiter, async (req, res) => {
-  try {
-    const userId = req.userId;
-    console.log(`[Assistant] GET /debug userId=${userId} type=${typeof userId}`);
-    if (!userId) return res.json({ success: false, error: 'req.userId is undefined — authenticate middleware did not run or did not set userId' });
-    const user = await User.findById(userId).select('_id profileBotConsent status firstName');
-    if (!user) return res.json({ success: false, error: `No user found for userId=${userId}` });
-    return res.json({
-      success: true,
-      userId:           userId.toString(),
-      userIdType:       typeof userId,
-      profileBotConsent: user.profileBotConsent,
-      status:           user.status,
-      firstName:        user.firstName,
-    });
-  } catch (err) {
-    console.error('[Assistant] debug error:', err.message);
-    res.status(500).json({ success: false, error: err.message });
   }
 });
 
@@ -1158,7 +1194,7 @@ router.post('/bio', assistantLimiter, async (req, res) => {
     }
 
     if (await overGroqLimit(user)) return res.status(429).json({ success: false, code: 'DAILY_LIMIT', message: "You've reached today's AI assist limit. Try again tomorrow." });
-    incrementGroq(user);
+    await incrementGroq(user);
     const summary = buildSafeProfileSummary(user);
     const result  = await rewriteBio(req.userId, rawText.trim(), safeTone, summary);
     return res.status(result.success ? 200 : 400).json(result);
