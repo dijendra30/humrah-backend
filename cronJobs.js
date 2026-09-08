@@ -101,6 +101,21 @@ cron.schedule('0 * * * *', async () => {
       console.error('[CRON] Letters orphan cleanup error:', err.message);
     }
 
+    // 6. R7.1 — expire overdue Meetup proposals.
+    //    Reuses this existing hourly cleanup rather than adding a new scheduler.
+    //    A no-op while MEETUP_ENABLED is false. Correctness does not depend on it:
+    //    the proposal path self-heals a Room's expired Meetups before checking the
+    //    one-active-Meetup rule, so this is a housekeeping sweep, not the guarantee.
+    try {
+      const { expireStaleMeetups } = require('./services/meetup/meetupExpiryService');
+      const meetupExpiry = await expireStaleMeetups();
+      if (!meetupExpiry.skipped) {
+        console.log(`✅ [CRON] Meetup proposals expired: ${meetupExpiry.expiredCount}`);
+      }
+    } catch (err) {
+      console.error('[CRON] Meetup expiry error:', err.message);
+    }
+
     console.log('✨ [CRON] Hourly cleanup complete\n');
   } catch (err) {
     console.error('❌ [CRON] Hourly cleanup error:', err);
