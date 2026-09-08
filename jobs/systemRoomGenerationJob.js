@@ -110,6 +110,7 @@ async function runSystemRoomGeneration(options = {}) {
     summary.candidates_found = stats.candidatesFound;
     summary.candidates_eligible = stats.candidatesEligible;
     summary.excluded_cooldown = stats.excludedCooldown;
+    summary.excluded_unreachable = stats.excludedUnreachable;
     summary.excluded_pending_invite = stats.excludedPendingInvite;
     summary.excluded_too_many_rooms = stats.excludedTooManyRooms;
 

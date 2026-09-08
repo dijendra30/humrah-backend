@@ -1,13 +1,14 @@
 const HumrahRoom = require('../models/HumrahRoom');
+const { suggestedCutoff, ROOM_LIFECYCLE_CONFIG } = require('../services/roomLifecycleConfig');
 
 exports.runHumrahRoomExpiry = async () => {
   try {
     const now = new Date();
 
-    // SUGGESTED -> CLOSED (expired after 2 hours)
-    const twoHoursAgo = new Date(now.getTime() - 2 * 60 * 60 * 1000);
+    // SUGGESTED -> CLOSED. The window is shared with the invitation worker via
+    // roomLifecycleConfig so the two can never disagree; it was a hard-coded 2h.
     await HumrahRoom.updateMany(
-      { status: 'SUGGESTED', createdAt: { $lt: twoHoursAgo } },
+      { status: 'SUGGESTED', createdAt: { $lt: suggestedCutoff(now.getTime()) } },
       { $set: { status: 'CLOSED' } }
     );
 
@@ -43,7 +44,7 @@ exports.runHumrahRoomExpiry = async () => {
       { $set: { status: 'CLOSED' } }
     );
 
-    console.log('[JOBS] HumrahRoom expiry job completed.');
+    console.log(`[JOBS] HumrahRoom expiry job completed (SUGGESTED lifetime ${ROOM_LIFECYCLE_CONFIG.SUGGESTED_LIFETIME_HOURS}h).`);
   } catch (error) {
     console.error('[JOBS] Error running HumrahRoom expiry:', error);
   }
