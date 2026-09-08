@@ -167,6 +167,32 @@ const mongoose = require('mongoose');
   console.log('\nSTAGE 3.5 — group viability (the gate after pairwise)');
   const gen = require('../services/systemRoomGeneratorService');
 
+  // THE DIRECT ANSWER TO "will Rooms be created?". Runs the REAL production
+  // evaluateGroupViability() over every candidate pair, so it accounts for the
+  // pairwise gate, the cohesion gate, evidence confidence AND the shared-topic
+  // requirement together — which no single earlier stage does.
+  let pairGroupsViable = 0;
+  const pairReasons = {};
+  for (let i = 0; i < pool.length; i++) {
+    for (let j = i + 1; j < pool.length; j++) {
+      let v;
+      try { v = gen.evaluateGroupViability([pool[i], pool[j]]); } catch (_) { continue; }
+      if (v.viable) pairGroupsViable++;
+      else {
+        // Collapse the numeric suffix so "min_pairwise_too_low (54)" and "(28)"
+        // aggregate into one bucket.
+        const key = String(v.reason || 'unknown').replace(/\s*\(.*\)$/, '');
+        pairReasons[key] = (pairReasons[key] || 0) + 1;
+      }
+    }
+  }
+  line('2-person groups that WOULD be created', pairGroupsViable);
+  Object.entries(pairReasons).sort((a, b) => b[1] - a[1])
+    .forEach(([r, c]) => line(`    blocked by: ${r}`, c));
+  if (pairGroupsViable > 0) {
+    console.log(`\n  >>> ${pairGroupsViable} Room(s) can be created on the next generator run.\n`);
+  }
+
   // Topic overlap: selectRoomTopic() needs >= 2 users wanting the SAME topic.
   const topicCounts = {};
   pool.forEach(u => (u.questionnaire?.humrahRoomInterests || []).forEach(t => {
