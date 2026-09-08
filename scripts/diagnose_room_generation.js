@@ -84,12 +84,34 @@ const mongoose = require('mongoose');
   const pool = candidates.slice(0, 200);
   let pairs = 0, eligiblePairs = 0, passingPairs = 0, best = 0;
   const buckets = { '0-39': 0, '40-59': 0, '60-69': 0, '70-79': 0, '80+': 0 };
+  // WHY a pair failed, not just that it did. Ineligibility is a HARD gate
+  // (checkEligibility) and is invisible in the score distribution — a pair
+  // rejected for no_shared_language reports score 0 and looks like a bad match.
+  const ineligibleReasons = {};
+  // Per-signal breakdown. A component scoring 0 keeps its weight and drags the
+  // weighted average down; a component that is null is skipped entirely and costs
+  // nothing. Separating the two is what identifies the real blocker.
+  const comp = {};
+  const noteComponent = (name, value) => {
+    comp[name] = comp[name] || { zero: 0, partial: 0, full: 0, missing: 0 };
+    if (value === null || value === undefined) comp[name].missing++;
+    else if (value === 0) comp[name].zero++;
+    else if (value >= 1) comp[name].full++;
+    else comp[name].partial++;
+  };
+
   for (let i = 0; i < pool.length; i++) {
     for (let j = i + 1; j < pool.length; j++) {
       pairs++;
       let p;
       try { p = matching.calculatePairwiseCompatibility(pool[i], pool[j]); } catch (_) { continue; }
-      if (p.eligible) eligiblePairs++;
+      if (p.eligible) {
+        eligiblePairs++;
+        Object.entries(p.components || {}).forEach(([k, v]) => noteComponent(k, v));
+      } else {
+        const r = p.reason || 'unknown';
+        ineligibleReasons[r] = (ineligibleReasons[r] || 0) + 1;
+      }
       const s = p.overallScore || 0;
       if (s > best) best = s;
       if (s >= 80) buckets['80+']++;
@@ -102,14 +124,84 @@ const mongoose = require('mongoose');
   }
   line('pairs compared', pairs);
   line('pairs marked eligible', eligiblePairs);
+  line('pairs REJECTED as ineligible (hard gate)', pairs - eligiblePairs);
+  Object.entries(ineligibleReasons).sort((a, b) => b[1] - a[1])
+    .forEach(([r, c]) => line(`    reason: ${r}`, c));
   line(`pairs scoring >= ${CONFIG.MIN_PAIRWISE_SCORE}  <-- groups need these`, passingPairs);
   line('best score seen', best);
   console.log('  score distribution:');
   Object.entries(buckets).forEach(([k, v]) => line(`    ${k}`, v));
 
+  console.log('  per-signal breakdown across eligible pairs');
+  console.log('    (zero = both had data but NOTHING in common -> keeps its weight, drags score down)');
+  console.log('    (missing = one side had no data -> signal skipped, costs nothing)');
+  const WEIGHTS = matching.WEIGHTS || {};
+  Object.entries(comp)
+    .sort((a, b) => (WEIGHTS[b[0]] || 0) - (WEIGHTS[a[0]] || 0))
+    .forEach(([name, c]) => {
+      const w = WEIGHTS[name] !== undefined ? `${Math.round(WEIGHTS[name] * 100)}%` : '?';
+      line(`    ${name} (weight ${w})`, `zero=${c.zero}  partial=${c.partial}  full=${c.full}  missing=${c.missing}`);
+    });
+
   if (passingPairs === 0) {
     console.log(`\n  >>> DEAD END: no two candidates are compatible enough to seed a Room.`);
-    console.log(`      Best pair scored ${best} against a required ${CONFIG.MIN_PAIRWISE_SCORE}.\n`);
+    console.log(`      Best pair scored ${best} against a required ${CONFIG.MIN_PAIRWISE_SCORE}.`);
+    if ((pairs - eligiblePairs) === pairs && pairs > 0) {
+      console.log('      EVERY pair failed the HARD eligibility gate — scores are irrelevant.');
+      console.log('      See the reason counts above (usually no_shared_language).');
+    } else {
+      const worst = Object.entries(comp)
+        .filter(([n]) => (WEIGHTS[n] || 0) >= 0.2)
+        .sort((a, b) => b[1].zero - a[1].zero)[0];
+      if (worst && worst[1].zero > 0) {
+        console.log(`      Biggest drag: "${worst[0]}" scored ZERO on ${worst[1].zero} eligible pairs`);
+        console.log(`      at weight ${Math.round((WEIGHTS[worst[0]] || 0) * 100)}%.`);
+        console.log('      NOTE: topic(35%) + conversation(20%) both zero caps a pair at 45 —');
+        console.log('      mathematically below the required 60, however good everything else is.');
+      }
+    }
+    console.log('');
+  }
+
+  // ── Stage 3.5: the group gates the pairwise score does NOT cover ───────────
+  console.log('\nSTAGE 3.5 — group viability (the gate after pairwise)');
+  const gen = require('../services/systemRoomGeneratorService');
+
+  // Topic overlap: selectRoomTopic() needs >= 2 users wanting the SAME topic.
+  const topicCounts = {};
+  pool.forEach(u => (u.questionnaire?.humrahRoomInterests || []).forEach(t => {
+    topicCounts[t] = (topicCounts[t] || 0) + 1;
+  }));
+  const sharedTopics = Object.entries(topicCounts).filter(([, n]) => n >= 2);
+  line('distinct topics chosen across candidates', Object.keys(topicCounts).length);
+  Object.entries(topicCounts).sort((a, b) => b[1] - a[1]).forEach(([t, n]) =>
+    line(`    "${t}"`, `${n} user(s)`));
+  line('topics wanted by >= 2 users  <-- REQUIRED', sharedTopics.length);
+  if (sharedTopics.length === 0) {
+    console.log('\n  >>> DEAD END: selectRoomTopic() requires at least TWO candidates to have');
+    console.log('      chosen the SAME topic. No topic is shared, so no group can be formed.');
+    console.log('      This is why nothing is created and nothing is logged as rejected.\n');
+  }
+
+  // Run the real group builder and report the real reason.
+  const groups = gen.buildCandidateGroups(pool);
+  line('viable groups built by the real builder', groups.length);
+
+  if (groups.length === 0 && pool.length >= gen.CONFIG.MIN_GROUP_SIZE) {
+    const cohesion = gen.calculateGroupCohesion(pool.slice(0, gen.CONFIG.MAX_GROUP_SIZE));
+    line('  cohesion.valid', cohesion.valid);
+    line('  cohesion.cohesionScore', cohesion.cohesionScore);
+    line('  cohesion.minPairwiseScore', cohesion.minPairwiseScore);
+    line('  cohesion.avgConfidence (needs >= 2)', cohesion.avgConfidence !== undefined ? cohesion.avgConfidence.toFixed(2) : 'n/a');
+    const verdict = gen.evaluateGroupViability(pool.slice(0, gen.CONFIG.MAX_GROUP_SIZE));
+    line('  evaluateGroupViability.viable', verdict.viable);
+    line('  >>> EXACT REJECTION REASON', verdict.reason || '(none)');
+    const topic = gen.selectRoomTopic(pool.slice(0, gen.CONFIG.MAX_GROUP_SIZE));
+    line('  selectRoomTopic()', topic ? `"${topic.topic}" (support ${topic.supportCount})` : 'null — no shared valid topic');
+  } else if (groups.length > 0) {
+    groups.forEach(g => line('  group', `${g.users.length} members, topic "${g.evaluation.selectedTopic}", score ${g.evaluation.groupScore}`));
+    console.log('\n  >>> Groups ARE viable. If no Room exists, the blocker is in createSystemRoom()');
+    console.log('      (duplicate-room check or a write failure) — check [RoomGenerator] logs.\n');
   }
 
   // ── Stage 4: what already exists ───────────────────────────────────────────
