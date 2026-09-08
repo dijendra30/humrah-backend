@@ -61,10 +61,36 @@ const isBlockedPair = (a, b) => {
     line(`    ${String(r._id)}`, `"${r.topic}"  age ${ageMin} min  ${ageMin > 120 ? 'EXPIRED FROM WINDOW' : 'in window'}`);
   });
 
+  // WHAT HAPPENED TO THE ROOMS THAT ARE NO LONGER SUGGESTED.
+  // A Room leaving SUGGESTED means one of two OPPOSITE things:
+  //   -> ACTIVE  : people joined. The pipeline worked end to end.
+  //   -> CLOSED  : the 2h expiry job closed it. Nobody joined in time.
+  // Without this, an empty SUGGESTED list looks identical in both cases.
+  console.log('\n  outcome of every SYSTEM Room');
+  const systemRooms = await HumrahRoom.find({ creationSource: 'SYSTEM' })
+    .sort({ createdAt: -1 }).limit(20).lean();
+  const byStatus = {};
+  systemRooms.forEach(r => { byStatus[r.status] = (byStatus[r.status] || 0) + 1; });
+  Object.entries(byStatus).forEach(([s, c]) => line(`    ${s}`, c));
+
+  const recent = systemRooms.slice(0, 6);
+  if (recent.length > 0) {
+    console.log('  most recent SYSTEM Rooms');
+    for (const r of recent) {
+      const ageMin = Math.round((now - new Date(r.createdAt).getTime()) / 60000);
+      const joined = await RoomMember.countDocuments({ roomId: r._id, status: 'JOINED' });
+      const invited = await RoomMember.countDocuments({ roomId: r._id, status: 'INVITED' });
+      const verdict = r.status === 'ACTIVE' || r.status === 'FULL'
+        ? 'JOINED — pipeline worked'
+        : (r.status === 'CLOSED' ? 'EXPIRED — nobody joined in 2h' : '');
+      line(`    ${String(r._id)}`,
+        `${String(r.status).padEnd(9)} "${r.topic}"  age ${ageMin}m  joined=${joined} invited=${invited}  ${verdict}`);
+    }
+  }
+
   if (allSuggested.length === 0) {
-    console.log('\n  >>> No SUGGESTED Rooms exist. Either none were generated, or the');
-    console.log('      2h expiry job already closed them. Check STAGE 4 of the');
-    console.log('      generator diagnostic for SYSTEM/CLOSED counts.\n');
+    console.log('\n  >>> No SUGGESTED Rooms right now. Read the outcome list above:');
+    console.log('      ACTIVE/FULL = people joined. CLOSED = expired unjoined.\n');
   }
 
   // ── Stage 1: per-Room, per-member gate replay ─────────────────────────────
