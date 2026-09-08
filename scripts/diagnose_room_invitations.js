@@ -140,6 +140,27 @@ const isBlockedPair = (a, b) => {
   line('...with a ROOM-CAPABLE device  <-- REQUIRED', capable);
   line('...who disabled push entirely', pushOff);
 
+  // THE NUMBER THAT DECIDES EVERYTHING. The generator draws candidates from users
+  // who answered Q24, but a Room is only useful if those users can actually be told
+  // about it inside the 2h SUGGESTED window. The ADDRESSABLE population is the
+  // intersection, and roomCandidateService does not currently consider it at all.
+  const q24 = await User.find({
+    status: 'ACTIVE',
+    'questionnaire.humrahRoomInterests.0': { $exists: true },
+  }).select('_id fcmDevices').lean();
+  const q24Capable = q24.filter(u => (u.fcmDevices || [])
+    .some(d => d.supportsHumrahRooms === true && typeof d.token === 'string' && d.token.trim()));
+  console.log('  ADDRESSABLE POPULATION (what the generator can usefully seed)');
+  line('    answered Q24', q24.length);
+  line('    ...AND have a room-capable device  <-- REAL POOL', q24Capable.length);
+  if (q24.length > 0) {
+    line('    reachable share of Q24 users',
+      `${Math.round((q24Capable.length / q24.length) * 100)}%`);
+  }
+  if (q24Capable.length < 2) {
+    console.log('    >>> Below 2, no Room can be seeded with two reachable people.');
+  }
+
   if (hasDevice > 0 && capable === 0) {
     console.log('\n  >>> DEAD END: not a single device is flagged supportsHumrahRooms.');
     console.log('      No Room invitation can EVER be delivered. The flag is set when');
