@@ -601,6 +601,12 @@ const connectDB = async () => {
     // log line in production. It never posts while AI_HOST_DRY_RUN=true.
     require('./jobs/aiHostJob').startAiHostJob(io);
 
+    // R7.1: Meetups. There is no Meetup scheduler — expiry rides the existing
+    // hourly cleanup in cronJobs.js, and nothing creates a Meetup except an
+    // explicit user request to POST /api/rooms/:roomId/meetups. This is only a
+    // startup banner so an operator can see the flag state without reading env.
+    require('./services/meetup/meetupConfig').logMeetupStartupBanner();
+
     await runStartupCleanup();
     scheduleDailyCleanup();
   } catch (err) {
