@@ -41,30 +41,61 @@ const isBlockedPair = (a, b) => {
   console.log('Connected.\n');
 
   const now = Date.now();
-  const twoHoursAgo = new Date(now - 2 * 60 * 60 * 1000);
+
+  // ── Deployed configuration ────────────────────────────────────────────────
+  // Printed FIRST so one run tells you whether the fixes are actually live on
+  // this container, instead of inferring it from downstream symptoms.
+  let lifetimeHours = 2;
+  let requireReachable = false;
+  let configLoaded = false;
+  try {
+    const lc = require('../services/roomLifecycleConfig');
+    lifetimeHours = lc.ROOM_LIFECYCLE_CONFIG.SUGGESTED_LIFETIME_HOURS;
+    configLoaded = true;
+  } catch (_) { /* old build: roomLifecycleConfig does not exist yet */ }
+  try {
+    requireReachable = require('../services/roomCandidateService')
+      .CANDIDATE_CONFIG.REQUIRE_REACHABLE === true;
+  } catch (_) { /* old build */ }
+
+  console.log('DEPLOYED CONFIG');
+  line('SUGGESTED Room lifetime', configLoaded
+    ? `${lifetimeHours}h  (shared config LIVE)`
+    : '2h  <-- OLD BUILD: roomLifecycleConfig not deployed');
+  line('seed Rooms only with reachable users', requireReachable
+    ? 'ON  (reachability gate LIVE)'
+    : 'OFF <-- OLD BUILD: candidate gate not deployed');
+  if (!configLoaded || !requireReachable) {
+    console.log('  >>> The fixes are NOT fully deployed. Everything below reflects');
+    console.log('      the OLD behaviour, so judge the fixes only after deploying.');
+  }
+  console.log('');
+
+  const windowMs = lifetimeHours * 60 * 60 * 1000;
+  const windowStart = new Date(now - windowMs);
 
   // ── Stage 0: what the worker would actually scan ──────────────────────────
   console.log('STAGE 0 — Rooms the invitation worker can see');
   const inWindow = await HumrahRoom.find({
-    creationSource: 'SYSTEM', status: 'SUGGESTED', createdAt: { $gte: twoHoursAgo },
+    creationSource: 'SYSTEM', status: 'SUGGESTED', createdAt: { $gte: windowStart },
   }).lean();
   const allSuggested = await HumrahRoom.find({
     creationSource: 'SYSTEM', status: 'SUGGESTED',
   }).lean();
 
   line('SYSTEM+SUGGESTED Rooms total', allSuggested.length);
-  line('...inside the 2h invitation window  <-- SCANNED', inWindow.length);
+  line(`...inside the ${lifetimeHours}h invitation window  <-- SCANNED`, inWindow.length);
   line('...aged OUT of the window (never invitable again)', allSuggested.length - inWindow.length);
 
   allSuggested.forEach(r => {
     const ageMin = Math.round((now - new Date(r.createdAt).getTime()) / 60000);
-    line(`    ${String(r._id)}`, `"${r.topic}"  age ${ageMin} min  ${ageMin > 120 ? 'EXPIRED FROM WINDOW' : 'in window'}`);
+    line(`    ${String(r._id)}`, `"${r.topic}"  age ${ageMin} min  ${ageMin > lifetimeHours * 60 ? 'EXPIRED FROM WINDOW' : 'in window'}`);
   });
 
   // WHAT HAPPENED TO THE ROOMS THAT ARE NO LONGER SUGGESTED.
   // A Room leaving SUGGESTED means one of two OPPOSITE things:
   //   -> ACTIVE  : people joined. The pipeline worked end to end.
-  //   -> CLOSED  : the 2h expiry job closed it. Nobody joined in time.
+  //   -> CLOSED  : the expiry job closed it. Nobody joined inside the lifetime.
   // Without this, an empty SUGGESTED list looks identical in both cases.
   console.log('\n  outcome of every SYSTEM Room');
   const systemRooms = await HumrahRoom.find({ creationSource: 'SYSTEM' })
@@ -82,7 +113,7 @@ const isBlockedPair = (a, b) => {
       const invited = await RoomMember.countDocuments({ roomId: r._id, status: 'INVITED' });
       const verdict = r.status === 'ACTIVE' || r.status === 'FULL'
         ? 'JOINED — pipeline worked'
-        : (r.status === 'CLOSED' ? 'EXPIRED — nobody joined in 2h' : '');
+        : (r.status === 'CLOSED' ? `EXPIRED — nobody joined in ${lifetimeHours}h` : '');
       line(`    ${String(r._id)}`,
         `${String(r.status).padEnd(9)} "${r.topic}"  age ${ageMin}m  joined=${joined} invited=${invited}  ${verdict}`);
     }
@@ -114,9 +145,9 @@ const isBlockedPair = (a, b) => {
     line('    JOINED members', joined.length);
     totalInvited += invited.length;
 
-    if (ageMin > 120) {
-      line('    worker verdict', 'NOT SCANNED — outside the 2h window');
-      invited.forEach(() => bump('room_outside_2h_window'));
+    if (ageMin > lifetimeHours * 60) {
+      line('    worker verdict', `NOT SCANNED — outside the ${lifetimeHours}h window`);
+      invited.forEach(() => bump('room_outside_window'));
       continue;
     }
 
