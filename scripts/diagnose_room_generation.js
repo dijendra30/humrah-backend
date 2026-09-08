@@ -127,6 +127,48 @@ const mongoose = require('mongoose');
   line('pairs REJECTED as ineligible (hard gate)', pairs - eligiblePairs);
   Object.entries(ineligibleReasons).sort((a, b) => b[1] - a[1])
     .forEach(([r, c]) => line(`    reason: ${r}`, c));
+
+  // WHICH language, and WHO is isolated by it. The hard gate only fires when BOTH
+  // users listed languages, so this is never missing data — it is a user whose
+  // language set does not intersect anyone else's. Names are never printed.
+  if ((ineligibleReasons.no_shared_language || 0) > 0) {
+    const langCount = {};
+    pool.forEach(u => {
+      const langs = (u.questionnaire?.preferredLanguages || [])
+        .filter(l => typeof l === 'string' && l.trim())
+        .map(l => l.trim().toLowerCase());
+      [...new Set(langs)].forEach(l => { langCount[l] = (langCount[l] || 0) + 1; });
+    });
+    console.log('  language spread across candidates');
+    Object.entries(langCount).sort((a, b) => b[1] - a[1])
+      .forEach(([l, c]) => line(`    "${l}"`, `${c} candidate(s)`));
+
+    // Per-candidate isolation: how many others they can never be paired with.
+    const isolation = [];
+    for (let i = 0; i < pool.length; i++) {
+      const mine = new Set((pool[i].questionnaire?.preferredLanguages || [])
+        .filter(l => typeof l === 'string' && l.trim()).map(l => l.trim().toLowerCase()));
+      if (mine.size === 0) continue; // blank = exempt from the gate entirely
+      let blocked = 0;
+      for (let j = 0; j < pool.length; j++) {
+        if (i === j) continue;
+        const theirs = new Set((pool[j].questionnaire?.preferredLanguages || [])
+          .filter(l => typeof l === 'string' && l.trim()).map(l => l.trim().toLowerCase()));
+        if (theirs.size === 0) continue;
+        if (![...mine].some(l => theirs.has(l))) blocked++;
+      }
+      if (blocked > 0) isolation.push({ id: String(pool[i]._id), langs: [...mine], blocked });
+    }
+    isolation.sort((a, b) => b.blocked - a.blocked);
+    if (isolation.length > 0) {
+      console.log('  candidates isolated by their own language choice');
+      isolation.slice(0, 5).forEach(x =>
+        line(`    ${x.id}`, `[${x.langs.join(', ')}] blocked from ${x.blocked} other candidate(s)`));
+      console.log('    NOTE: a candidate who left languages BLANK is exempt from this gate,');
+      console.log('          so answering the question can only ever reduce their matches.');
+    }
+  }
+
   line(`pairs scoring >= ${CONFIG.MIN_PAIRWISE_SCORE}  <-- groups need these`, passingPairs);
   line('best score seen', best);
   console.log('  score distribution:');
