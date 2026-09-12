@@ -10,6 +10,11 @@ const FCM_AVAILABLE = (() => {
   try { require('../config/firebase'); return true; } catch { return false; }
 })();
 
+// The waving hand a People Nearby greeting opens with. Stored as its own plain
+// text message so it stays a separate element from the words that follow; the
+// client animates a message whose whole body is this emoji.
+const GREETING_WAVE = '👋'; // 👋
+
 async function safePush(userId, title, body, data = {}) {
   if (!FCM_AVAILABLE) return;
   try {
@@ -72,13 +77,45 @@ exports.sendRequest = async (req, res) => {
       }
     }
 
-    // No duplicate pending request
+    // ── Existing active conversation — people_nearby only ────────────────────
+    // If these two already have a live chat, tapping Chat must reopen it rather
+    // than raise a second request. Scoped to people_nearby so the mood-match
+    // path, which the published app uses, keeps its original behaviour exactly.
+    if (isPeopleNearby) {
+      const activeChat = await MoodChat.findOne({
+        users:     { $all: [senderId, receiverId] },
+        active:    true,
+        expiresAt: { $gt: now },
+      }).select('_id').lean();
+
+      if (activeChat) {
+        return res.json({
+          success:      true,
+          message:      'Conversation already active',
+          chatRoomId:   activeChat._id,
+          alreadyActive: true,
+        });
+      }
+    }
+
+    // No duplicate pending request.
+    // Still a 409 — the published app's contract is unchanged — but the existing
+    // requestId is now included so a client can reopen that pending request
+    // instead of treating a second tap as an error. Unknown fields are ignored
+    // by older clients.
     const exists = await MoodRequest.findOne({
       senderId, receiverId,
       status:    'pending',
       expiresAt: { $gt: now },
     }).lean();
-    if (exists) return res.status(409).json({ success: false, message: 'Request already pending' });
+    if (exists) {
+      return res.status(409).json({
+        success:        false,
+        message:        'Request already pending',
+        requestId:      exists._id,
+        alreadyPending: true,
+      });
+    }
 
     // `mood` and `expiresAt` are required by the MoodRequest schema, and `mood` is
     // also rendered directly by the existing Requests screen. Rather than relax
@@ -144,7 +181,15 @@ exports.sendRequest = async (req, res) => {
       console.error('❌ [MoodReq] Socket emit failed:', e.message);
     }
 
-    return res.json({ success: true, message: 'Request sent', requestId: req_._id });
+    // `greeting` and `status` are additive: they let the new client render the
+    // pending chat immediately from this response, with no follow-up fetch.
+    return res.json({
+      success:   true,
+      message:   'Request sent',
+      requestId: req_._id,
+      status:    'pending',
+      greeting:  req_.message,
+    });
   } catch (err) {
     console.error('❌ [MoodReq] sendRequest:', err);
     return res.status(500).json({ success: false, message: 'Server error' });
@@ -248,13 +293,41 @@ exports.acceptRequest = async (req, res) => {
 
     if (!chat) {
       const chatExpiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000); // 24h
-      chat = await MoodChat.create({
+
+      // A People Nearby greeting opens the conversation, attributed to the
+      // sender — and it is TWO messages, not one: a wave, then the words. They
+      // are stored as two ordinary text rows; the wave is the emoji on its own,
+      // which the client renders with an animation. Nothing here needs a message
+      // type, an attachment, or any schema change, and any other client simply
+      // shows the emoji unanimated.
+      //
+      // Strictly scoped to requestSource === 'people_nearby'. Mood-match requests
+      // DO carry a message (the published app sends an auto-generated "You both
+      // seem open to … vibes today" line), so seeding on `message` alone would
+      // have injected that sentence into every accepted mood-match chat, which
+      // today opens empty. That path is left exactly as it was.
+      //
+      // Seeded only inside this creation branch, so the `findOne` reuse above can
+      // never produce a second copy — accepting twice, reconnecting, or reopening
+      // the chat all reuse the existing conversation untouched.
+      const seeded = [];
+      if (moodReq.requestSource === 'people_nearby' && moodReq.message) {
+        seeded.push({ senderId: moodReq.senderId, text: GREETING_WAVE, createdAt: now });
+        seeded.push({ senderId: moodReq.senderId, text: moodReq.message, createdAt: new Date(now.getTime() + 1) });
+      }
+
+      const chatDoc = {
         users:     [moodReq.senderId, moodReq.receiverId],
         mood:      moodReq.mood,
         vibeLevel: moodReq.vibeLevel,
         requestId: moodReq._id,
         expiresAt: chatExpiresAt,
-      });
+      };
+      // Only add the field at all when there is something to seed, so the
+      // mood-match create call is byte-identical to the original.
+      if (seeded.length) chatDoc.messages = seeded;
+
+      chat = await MoodChat.create(chatDoc);
     }
 
     moodReq.status     = 'accepted';
