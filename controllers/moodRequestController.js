@@ -29,11 +29,47 @@ exports.sendRequest = async (req, res) => {
     if (!receiverId) return res.status(400).json({ success: false, message: 'receiverId required' });
     if (receiverId === senderId) return res.status(400).json({ success: false, message: 'Cannot request yourself' });
 
-    // Sender must be live
-    const senderMood = await MatchingTodayMood.findOne({ userId: senderId }).lean();
     const now = new Date();
-    if (!senderMood?.visible || !senderMood?.expiresAt || new Date(senderMood.expiresAt) <= now) {
-      return res.status(400).json({ success: false, message: 'Go live before sending a request' });
+    const source = requestSource || 'mood_match';
+
+    // People Nearby requests originate from proximity discovery, not from a live
+    // mood session, so the "go live first" rule below does not apply to them.
+    // Every other source — including every request the published app sends, which
+    // never supplies requestSource and therefore always resolves to 'mood_match' —
+    // keeps the original behaviour untouched.
+    const isPeopleNearby = source === 'people_nearby';
+
+    // ── Receiver validity + blocking (applies to ALL sources) ─────────────────
+    // Discovery already filters blocked and inactive users out of the LIST, but a
+    // crafted receiverId reaches this endpoint directly. This guard closes that
+    // hole. It can only reject requests that discovery would never have surfaced,
+    // so legitimate traffic from any client is unaffected.
+    const receiver = await User.findById(receiverId, 'status blockedUsers').lean();
+    if (!receiver) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+    if (receiver.status !== 'ACTIVE') {
+      return res.status(403).json({ success: false, message: 'This user is not available' });
+    }
+    const receiverBlockedSender = (receiver.blockedUsers || [])
+      .some(id => id.toString() === senderId.toString());
+    if (receiverBlockedSender) {
+      return res.status(403).json({ success: false, message: 'This user is not available' });
+    }
+    const sender = await User.findById(senderId, 'firstName blockedUsers').lean();
+    const senderBlockedReceiver = (sender?.blockedUsers || [])
+      .some(id => id.toString() === receiverId.toString());
+    if (senderBlockedReceiver) {
+      return res.status(403).json({ success: false, message: 'You have blocked this user' });
+    }
+
+    // ── Mood session gate — mood_match only ───────────────────────────────────
+    let senderMood = null;
+    if (!isPeopleNearby) {
+      senderMood = await MatchingTodayMood.findOne({ userId: senderId }).lean();
+      if (!senderMood?.visible || !senderMood?.expiresAt || new Date(senderMood.expiresAt) <= now) {
+        return res.status(400).json({ success: false, message: 'Go live before sending a request' });
+      }
     }
 
     // No duplicate pending request
@@ -44,23 +80,33 @@ exports.sendRequest = async (req, res) => {
     }).lean();
     if (exists) return res.status(409).json({ success: false, message: 'Request already pending' });
 
+    // `mood` and `expiresAt` are required by the MoodRequest schema, and `mood` is
+    // also rendered directly by the existing Requests screen. Rather than relax
+    // either field on a shared production collection, a People Nearby request
+    // carries the literal label "Nearby" and its own fixed window. Mood-match
+    // requests are untouched: they still take both values from the live session.
+    const PEOPLE_NEARBY_MOOD_LABEL = 'Nearby';
+    const PEOPLE_NEARBY_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
     const req_ = await MoodRequest.create({
       senderId,
       receiverId,
-      mood:          senderMood.mood,
-      vibeLevel:     senderMood.vibeLevel,
+      mood:          isPeopleNearby ? PEOPLE_NEARBY_MOOD_LABEL : senderMood.mood,
+      vibeLevel:     isPeopleNearby ? 'normal' : senderMood.vibeLevel,
       message:       message?.trim().slice(0, 120) || null,
-      requestSource: requestSource || 'mood_match',
-      expiresAt:     senderMood.expiresAt,
+      requestSource: source,
+      expiresAt:     isPeopleNearby ? new Date(now.getTime() + PEOPLE_NEARBY_TTL_MS) : senderMood.expiresAt,
     });
 
-    // Realtime push to receiver
-    const sender = await User.findById(senderId, 'firstName').lean();
-    console.log(`[MoodReq] Request created: ${req_._id} by User ${senderId} for User ${receiverId}`);
-    
+    // Realtime push to receiver — `sender` was already loaded by the block above.
+    console.log(`[MoodReq] Request created: ${req_._id} by User ${senderId} for User ${receiverId} (source=${source})`);
+
+    // Same FCM `type` as before, so the published app's handler is unchanged.
+    // Only the human-readable title differs, because "Companion Request" would
+    // misdescribe a request from a normal Member discovered via People Nearby.
     await safePush(
       receiverId,
-      'New Companion Request 🤝',
+      isPeopleNearby ? 'New Chat Request 👋' : 'New Companion Request 🤝',
       `${sender?.firstName ?? 'Someone'} wants to connect with you.`,
       {
         type:       'companion_request',
@@ -68,8 +114,8 @@ exports.sendRequest = async (req, res) => {
         screen:     'requests',
         senderId:   senderId.toString(),
         senderName: sender?.firstName ?? 'Someone',
-        mood:       senderMood.mood       ?? '',
-        vibeLevel:  senderMood.vibeLevel  ?? 'normal',
+        mood:       req_.mood      ?? '',
+        vibeLevel:  req_.vibeLevel ?? 'normal',
       }
     );
     console.log(`[MoodReq] FCM push sent to User ${receiverId}`);
@@ -82,8 +128,10 @@ exports.sendRequest = async (req, res) => {
         senderId:  senderId.toString(),
         senderName: sender?.firstName ?? 'Someone',
         firstName: sender?.firstName ?? 'Someone',
-        mood:      senderMood.mood,
-        vibeLevel: senderMood.vibeLevel,
+        // Read from the created document, not from senderMood — the latter is
+        // null for People Nearby requests, which have no mood session.
+        mood:      req_.mood,
+        vibeLevel: req_.vibeLevel,
         message:   req_.message,
       };
       
@@ -129,6 +177,10 @@ exports.getIncoming = async (req, res) => {
       mood:      r.mood,
       vibeLevel: r.vibeLevel,
       message:   r.message,
+      // Additive: lets the client label a People Nearby request correctly instead
+      // of calling every request a "Companion Request". Older clients that do not
+      // declare this field simply ignore it.
+      requestSource: r.requestSource || 'mood_match',
       createdAt: r.createdAt,
       expiresAt: r.expiresAt,
     }));
