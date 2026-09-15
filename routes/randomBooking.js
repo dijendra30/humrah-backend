@@ -110,17 +110,14 @@ function parseStartTime(startTime) {
 // ══════════════════════════════════════════════════════════════════════════════
 
 // ── BOOKING WINDOW STATUS ─────────────────────────────────────────────────────
+// The 06:00-19:40 IST booking window has been removed as a product decision, so
+// this always reports open. The endpoint itself is kept, and keeps its exact
+// response shape, because the published Humrah app calls it on entry to the
+// Surprise Activity flow and would treat a 404 as a failure.
+//
+// Creation is still limited to one per user per calendar day; that rule lives in
+// POST /create and is entirely independent of this endpoint.
 router.get('/status', authenticate, async (req, res) => {
-  const now = new Date();
-  const nowIST = new Date(now.getTime() + 5.5 * 3600 * 1000);
-  const nowHour = nowIST.getUTCHours();
-  const nowMinute = nowIST.getUTCMinutes();
-  
-  const isClosed = nowHour < 6 || nowHour > 19 || (nowHour === 19 && nowMinute >= 40);
-  
-  if (isClosed) {
-    return res.status(400).json({ success: false, code: 'BOOKING_CLOSED', message: 'Bookings are closed' });
-  }
   return res.json({ success: true, message: 'Bookings are open' });
 });
 
@@ -180,21 +177,11 @@ router.post('/create', authenticate, async (req, res) => {
       if (bad.length) return res.status(400).json({ success: false, message: `Invalid meetupEnergy values: ${bad.join(', ')}` });
     }
 
+    // The 06:00-19:40 IST booking window that used to gate creation here has been
+    // removed as a product decision: a Surprise Activity can now be created at any
+    // hour. Deliberately untouched below: the >= 20 minute lead time, the
+    // today-or-tomorrow bound, and the one-per-calendar-day allowance.
     const now = new Date();
-    const nowIST = new Date(now.getTime() + 5.5 * 3600 * 1000);
-    const nowHour = nowIST.getUTCHours();
-    const nowMinute = nowIST.getUTCMinutes();
-    
-    // Booking is closed from 19:40 to 05:59.
-    const isClosed = nowHour < 6 || nowHour > 19 || (nowHour === 19 && nowMinute >= 40);
-    
-    if (isClosed) {
-      return res.status(400).json({ 
-        success: false, 
-        code: 'BOOKING_CLOSED', 
-        message: 'Bookings are open every day from 6:00 AM to 7:40 PM.' 
-      });
-    }
 
     const bookingStart = parseStartTime(startTime);
     if (bookingStart.getTime() - now.getTime() < 20 * 60 * 1000) {
