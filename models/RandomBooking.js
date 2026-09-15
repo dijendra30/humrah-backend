@@ -46,6 +46,23 @@ const randomBookingSchema = new mongoose.Schema({
     required: true
   },
 
+  // The activity the creator actually wants to do, e.g. 'CAFE' or 'STREET_FOOD'.
+  //
+  // Deliberately additive and deliberately NOT an enum. `activityType` above is
+  // frozen: the published Android app deserialises it into a non-nullable Kotlin
+  // enum of exactly those five values, so a sixth value would reach that client
+  // as null and crash it. This field carries the real choice instead, and the
+  // published app simply ignores the unknown JSON key.
+  //
+  // No schema enum because the accepted vocabulary is validated in the create
+  // route (ACTIVITY_CATEGORIES), which lets the list change without a schema
+  // deploy and — more importantly — means an existing document can never fail
+  // validation on save(). handleCandidateResponse() saves live bookings mid-flow.
+  //
+  // Nullable with no backfill: every booking created before this field existed
+  // reads back as null, which both clients treat as "fall back to activityType".
+  activityCategory: { type: String, default: null },
+
   meetupEnergy: {
     type: [String],
     enum: ['QUIET', 'CHILL', 'DEEP_TALK', 'FUN', 'STUDY_BUDDY', 'CREATIVE_VIBES', 'SOCIAL_RECHARGE', 'LOW_ENERGY'],
