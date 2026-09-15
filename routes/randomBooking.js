@@ -49,6 +49,53 @@ const VALID_ENERGIES = new Set([
   'QUIET','CHILL','DEEP_TALK','FUN','STUDY_BUDDY','CREATIVE_VIBES','SOCIAL_RECHARGE','LOW_ENERGY'
 ]);
 
+// ── Surprise Activity categories ──────────────────────────────────────────────
+// The activity the creator actually wants to do. Validated HERE rather than as a
+// Mongoose enum so this list can change without a schema deploy, and so that an
+// existing booking can never fail validation when the matcher save()s it.
+//
+// Strictly separate from `activityType`, whose five values are frozen by the
+// published Android client's non-nullable Kotlin enum.
+const ACTIVITY_CATEGORIES = new Set([
+  'CAFE', 'FOOD', 'SHOPPING', 'WALK', 'EXPLORE', 'ART_CULTURE',
+  'NATURE', 'BEACH', 'STREET_FOOD', 'HANGOUT', 'STUDY_WORK', 'PHOTOGRAPHY',
+]);
+
+// ── Daily creation allowance ──────────────────────────────────────────────────
+// One Surprise Activity per IST calendar day.
+//
+// IST is fixed rather than derived from the client. The User schema carries no
+// timezone field of any kind, and this entire feature is already IST-only: the
+// booking window (/status and /create), parseStartTime(), the matcher's
+// _startHourIST and progressiveMatching's notification formatting all assume
+// Asia/Kolkata. Using anything else here would make the daily boundary disagree
+// with the booking window the same request is checked against.
+//
+// Because the boundary is computed from the SERVER clock, changing the phone's
+// clock or timezone cannot move it.
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+const DAY_MS        = 24 * 60 * 60 * 1000;
+
+/** Instant at which the IST calendar day containing `now` began, as real UTC. */
+function istDayStart(now) {
+  const shifted = new Date(now.getTime() + IST_OFFSET_MS);
+  const istMidnight = Date.UTC(
+    shifted.getUTCFullYear(), shifted.getUTCMonth(), shifted.getUTCDate(), 0, 0, 0, 0
+  );
+  return new Date(istMidnight - IST_OFFSET_MS);
+}
+
+/** Instant at which the NEXT IST calendar day begins — when the allowance resets. */
+function istNextDayStart(now) {
+  return new Date(istDayStart(now).getTime() + DAY_MS);
+}
+
+/** True when `lastCreatedAt` falls inside the IST calendar day containing `now`. */
+function hasCreatedToday(lastCreatedAt, now) {
+  if (!lastCreatedAt) return false;
+  return new Date(lastCreatedAt).getTime() >= istDayStart(now).getTime();
+}
+
 function parseStartTime(startTime) {
   if (startTime.includes('T')) return new Date(startTime);
   const [h, m] = startTime.split(':').map(Number);
@@ -81,14 +128,48 @@ router.get('/status', authenticate, async (req, res) => {
 router.post('/create', authenticate, async (req, res) => {
   try {
     const user = await User.findById(req.userId).select(
-      'random_trial_used verified photoVerificationStatus home_city questionnaire liveLocation'
+      'random_trial_used verified photoVerificationStatus home_city questionnaire liveLocation lastSurpriseActivityCreatedAt'
     );
     const isVerified = user.verified === true || user.photoVerificationStatus === 'approved';
     if (!isVerified) return res.status(403).json({ success: false, code: 'VERIFICATION_REQUIRED', message: 'Only verified users can create a Surprise Meetup.' });
-    if (user.random_trial_used) return res.status(403).json({ success: false, message: 'You have already used your free trial.' });
 
-    const { city, lat, lng, startTime, endTime, activityType, locationCategory, meetupEnergy, blurProfileUntilAccepted } = req.body;
+    // Daily allowance — fail fast.
+    //
+    // This is only a read-only PRE-check so the caller gets a clear answer before
+    // doing any work. It is NOT what enforces the limit: the authoritative,
+    // concurrency-safe claim happens atomically just before RandomBooking.create
+    // below, so two simultaneous requests cannot both get through here.
+    //
+    // Replaces the previous `random_trial_used` gate. That gate was inert:
+    // `random_trial_used` is not declared on the User schema, and userSchema uses
+    // Mongoose's default strict:true, so the path was never hydrated by select()
+    // and never persisted by save(). It always read undefined.
+    const nowForLimit = new Date();
+    if (hasCreatedToday(user.lastSurpriseActivityCreatedAt, nowForLimit)) {
+      return res.status(429).json({
+        success:        false,
+        code:           'DAILY_LIMIT_REACHED',
+        message:        'You can create one Surprise Activity per day. Try again tomorrow.',
+        nextAvailableAt: istNextDayStart(nowForLimit).toISOString(),
+      });
+    }
+
+    const { city, lat, lng, startTime, endTime, activityType, locationCategory, meetupEnergy, blurProfileUntilAccepted, activityCategory } = req.body;
     const isSurpriseMeetup = Array.isArray(meetupEnergy) && meetupEnergy.length > 0;
+
+    // `activityCategory` is optional. Requests that omit it — every request the
+    // published app sends — behave exactly as before and store null.
+    let normalisedCategory = null;
+    if (activityCategory !== undefined && activityCategory !== null && activityCategory !== '') {
+      if (typeof activityCategory !== 'string' || !ACTIVITY_CATEGORIES.has(activityCategory)) {
+        return res.status(400).json({
+          success: false,
+          code:    'INVALID_ACTIVITY_CATEGORY',
+          message: 'Invalid activityCategory.',
+        });
+      }
+      normalisedCategory = activityCategory;
+    }
 
     if (!city || !lat || !lng || !startTime) return res.status(400).json({ success: false, message: 'city, lat, lng, startTime required.' });
     if (!isSurpriseMeetup && !activityType) return res.status(400).json({ success: false, message: 'activityType required for standard bookings.' });
@@ -147,6 +228,9 @@ router.post('/create', authenticate, async (req, res) => {
       city, lat: Number(lat), lng: Number(lng),
       matchSearchLocation,
       activityType:     isSurpriseMeetup ? 'CASUAL' : activityType,
+      // Additive and independent of activityType, which keeps its legacy value so
+      // the published client always receives one of its five known enum constants.
+      activityCategory: normalisedCategory,
       locationCategory: locationCategory || 'Public Place',
       startTime:        bookingStart,
       endTime:          endTime ? new Date(endTime) : new Date(bookingStart.getTime() + 90 * 60000),
@@ -158,7 +242,58 @@ router.post('/create', authenticate, async (req, res) => {
       bookingData.blurProfileUntilAccepted = blurProfileUntilAccepted === true;
     }
 
-    const booking = await RandomBooking.create(bookingData);
+    // ── Claim today's allowance, atomically ──────────────────────────────────
+    // A single-document findOneAndUpdate is atomic in MongoDB, so exactly one of
+    // two concurrent requests can match the "hasn't created today" condition.
+    // The loser gets null back and is rejected.
+    //
+    // Nothing in this codebase uses multi-document transactions (startSession is
+    // never called anywhere), so this is claim -> create -> release-on-failure
+    // rather than a transaction. The claim is taken as late as possible: every
+    // other validation has already passed by this point.
+    const claimedAt = new Date();
+    const dayStart  = istDayStart(claimedAt);
+    const priorUser = await User.findOneAndUpdate(
+      {
+        _id: req.userId,
+        $or: [
+          { lastSurpriseActivityCreatedAt: null },
+          { lastSurpriseActivityCreatedAt: { $exists: false } },
+          { lastSurpriseActivityCreatedAt: { $lt: dayStart } },
+        ],
+      },
+      { $set: { lastSurpriseActivityCreatedAt: claimedAt } },
+      { new: false, projection: { lastSurpriseActivityCreatedAt: 1 } }
+    ).lean();
+
+    if (!priorUser) {
+      return res.status(429).json({
+        success:        false,
+        code:           'DAILY_LIMIT_REACHED',
+        message:        'You can create one Surprise Activity per day. Try again tomorrow.',
+        nextAvailableAt: istNextDayStart(claimedAt).toISOString(),
+      });
+    }
+    const priorClaim = priorUser.lastSurpriseActivityCreatedAt ?? null;
+
+    // Mirror the claim onto the in-memory document. Mongoose's save() below only
+    // $sets paths it considers modified, so this is not strictly required — but
+    // keeping the hydrated doc in step means the claim cannot be undone by a
+    // later edit to that save() block, and costs nothing.
+    user.lastSurpriseActivityCreatedAt = claimedAt;
+
+    let booking;
+    try {
+      booking = await RandomBooking.create(bookingData);
+    } catch (createErr) {
+      // Creation failed, so the day must NOT be consumed. Restore the previous
+      // value, guarding on our own claim so a later legitimate claim is untouched.
+      await User.updateOne(
+        { _id: req.userId, lastSurpriseActivityCreatedAt: claimedAt },
+        { $set: { lastSurpriseActivityCreatedAt: priorClaim } }
+      ).catch(releaseErr => console.error('❌ [RandomBooking] allowance release failed:', releaseErr));
+      throw createErr;
+    }
 
     // Update liveLocation and legacy fields on the user doc
     user.last_known_lat = Number(lat);
@@ -172,6 +307,10 @@ router.post('/create', authenticate, async (req, res) => {
       state:     user.liveLocation?.state || null,
       updatedAt: now,
     };
+    // Left untouched deliberately. This assignment is inert — `random_trial_used`
+    // is not on the User schema and strict mode drops it — but removing it is an
+    // unrelated change, and the daily allowance above is what actually gates
+    // creation now.
     user.random_trial_used = true;
     await user.save();
 
@@ -188,6 +327,7 @@ router.post('/create', authenticate, async (req, res) => {
       message: isSurpriseMeetup ? "We're finding your match." : 'Random Meet request created!',
       booking: {
         _id: booking._id, city: booking.city, activityType: booking.activityType,
+        activityCategory: booking.activityCategory ?? null,
         meetupEnergy: booking.meetupEnergy, blurProfileUntilAccepted: booking.blurProfileUntilAccepted,
         matchMode: booking.matchMode || 'STANDARD', startTime: booking.startTime,
         endTime: booking.endTime, status: booking.status,
@@ -203,13 +343,48 @@ router.post('/create', authenticate, async (req, res) => {
 // ── TRIAL STATUS ──────────────────────────────────────────────────────────────
 router.get('/trial-status', authenticate, async (req, res) => {
   try {
-    const user = await User.findById(req.userId).select('random_trial_used verified photoVerificationStatus');
-    const isVerified = user.photoVerificationStatus === 'approved';
+    const user = await User.findById(req.userId)
+      .select('random_trial_used verified photoVerificationStatus lastSurpriseActivityCreatedAt');
+    // Two verification rules exist in this file and they disagree. This endpoint
+    // has always used photoVerificationStatus alone, while POST /create accepts
+    // `verified === true` as well. That divergence predates Phase 1, so the
+    // legacy keys below keep the legacy rule to avoid changing what any older
+    // published build sees.
+    //
+    // The NEW keys must not inherit the bug: a user with verified === true but an
+    // unapproved photo would be told they cannot create, and then /create would
+    // accept them. canCreateToday therefore mirrors /create exactly.
+    const isVerified       = user.photoVerificationStatus === 'approved';          // legacy rule
+    const canCreatePerRoute = user.verified === true || isVerified;                // POST /create rule
+
+    // Surprise Activity is now one per IST calendar day, not one per lifetime.
+    const now         = new Date();
+    const usedToday   = hasCreatedToday(user.lastSurpriseActivityCreatedAt, now);
+    const canCreate   = isVerified && !usedToday;
+
     return res.json({
       success: true,
-      trialUsed:        user.random_trial_used || false,
+      // ── Existing keys, preserved. `trialUsed` keeps its old shape; it now
+      // answers "used today" rather than "used ever", which is the closest
+      // truthful mapping onto the new rule. `canCreateBooking` keeps its old
+      // meaning of "may this user create right now".
+      trialUsed:        usedToday,
       verified:         isVerified,
-      canCreateBooking: isVerified && !user.random_trial_used,
+      canCreateBooking: canCreate,
+
+      // ── Additive: what the new client needs to render daily availability.
+      // Uses POST /create's verification rule, so it can never contradict what
+      // an actual create call would do.
+      canCreateToday:            canCreatePerRoute && !usedToday,
+      // The daily allowance on its own, with verification factored out.
+      dailyAllowanceAvailable:   !usedToday,
+      dailyLimit:                1,
+      createdToday:              usedToday ? 1 : 0,
+      lastCreatedAt:             user.lastSurpriseActivityCreatedAt
+        ? new Date(user.lastSurpriseActivityCreatedAt).toISOString() : null,
+      nextAvailableAt:           usedToday ? istNextDayStart(now).toISOString() : null,
+      serverTime:                now.toISOString(),
+      dailyLimitTimezone:        'Asia/Kolkata',
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: 'Failed to check trial status.' });
@@ -369,6 +544,9 @@ router.get('/nearby', authenticate, async (req, res) => {
           _id:                      b._id,
           city:                     b.city,
           activityType:             b.activityType,
+          // Additive. Old clients ignore the key; new clients prefer it and fall
+          // back to activityType when it is null (every pre-Phase-1 booking).
+          activityCategory:         b.activityCategory ?? null,
           meetupEnergy:             b.meetupEnergy || [],
           locationCategory:         b.locationCategory,
           startTime:                b.startTime,
@@ -401,7 +579,7 @@ router.get('/chats', authenticate, async (req, res) => {
   try {
     const chats = await RandomBookingChat.find({ 'participants.userId': req.userId, isDeleted: false })
       .populate({ path: 'participants.userId', select: 'firstName lastName profilePhoto verified questionnaire' })
-      .populate({ path: 'bookingId', select: 'city activityType meetupEnergy locationCategory startTime endTime status blurProfileUntilAccepted' })
+      .populate({ path: 'bookingId', select: 'city activityType activityCategory meetupEnergy locationCategory startTime endTime status blurProfileUntilAccepted' })
       .sort({ lastMessageAt: -1 });
     return res.json({ success: true, chats });
   } catch (err) {
@@ -622,6 +800,7 @@ router.get('/my-activities', authenticate, async (req, res) => {
 
       return {
         id: a._id.toString(),
+        activityCategory: a.activityCategory ?? null,
         meetupEnergy: a.meetupEnergy || [],
         status: a.status,
         createdAt: a.createdAt,
@@ -645,8 +824,24 @@ router.get('/my-activities', authenticate, async (req, res) => {
 // ── USAGE ─────────────────────────────────────────────────────────────────────
 router.get('/usage', authenticate, async (req, res) => {
   try {
-    const user = await User.findById(req.userId).select('random_trial_used');
-    return res.json({ success: true, canCreateBooking: !user.random_trial_used, trialUsed: user.random_trial_used || false });
+    const user = await User.findById(req.userId).select('random_trial_used lastSurpriseActivityCreatedAt');
+    const now       = new Date();
+    const usedToday = hasCreatedToday(user.lastSurpriseActivityCreatedAt, now);
+    return res.json({
+      // Existing keys preserved, now answering the daily rule instead of the
+      // (inert) lifetime flag. Note this endpoint does not check verification,
+      // which matches its previous behaviour.
+      success:          true,
+      canCreateBooking: !usedToday,
+      trialUsed:        usedToday,
+      // Additive.
+      canCreateToday:     !usedToday,
+      dailyLimit:         1,
+      createdToday:       usedToday ? 1 : 0,
+      nextAvailableAt:    usedToday ? istNextDayStart(now).toISOString() : null,
+      serverTime:         now.toISOString(),
+      dailyLimitTimezone: 'Asia/Kolkata',
+    });
   } catch (err) {
     return res.status(500).json({ success: false, message: 'Failed to load usage.' });
   }
@@ -678,6 +873,7 @@ router.get('/:bookingId', authenticate, async (req, res) => {
 
     return res.json({ success: true, booking: {
       _id: booking._id, status: booking.status, city: booking.city,
+      activityCategory: booking.activityCategory ?? null,
       meetupEnergy: booking.meetupEnergy || [], blurProfileUntilAccepted: booking.blurProfileUntilAccepted,
       startTime: booking.startTime, endTime: booking.endTime, reservedUntil: booking.reservedUntil,
       chatId: booking.chatId,
