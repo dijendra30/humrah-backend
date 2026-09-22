@@ -43,6 +43,18 @@ const STAGE_CONFIG = [
 const MAX_QUEUE_PER_STAGE    = 6;
 const LIVE_LOCATION_STALE_MS = 60 * 60 * 1000;
 
+// What the creator chose to do, phrased to drop into a sentence. Mirrors the copy
+// map in the Android FCM service so the foreground and background notifications
+// read the same. Keys are the route-level ACTIVITY_CATEGORIES; anything missing —
+// including every booking created before activityCategory existed — falls back to
+// the generic word rather than saying something wrong.
+const CATEGORY_PLAN_LABEL = {
+  CAFE: 'coffee plan', FOOD: 'food plan', STREET_FOOD: 'street food plan',
+  SHOPPING: 'shopping plan', WALK: 'walk', EXPLORE: 'plan to explore',
+  ART_CULTURE: 'art & culture plan', NATURE: 'outdoors plan', BEACH: 'beach plan',
+  HANGOUT: 'hangout', STUDY_WORK: 'study session', PHOTOGRAPHY: 'photography plan',
+};
+
 const ENERGY_VIBE_MAP = {
   QUIET:           ['calm', 'peaceful', 'introvert', 'chill', 'quiet'],
   CHILL:           ['chill', 'relaxed', 'easygoing', 'mellow'],
@@ -423,18 +435,33 @@ async function notifyCandidate(booking, candidateEntry) {
     .lean();
   if (!user) return;
 
-  const isFast      = booking.matchMode === 'FAST';
-  const energyLabel = (booking.meetupEnergy || [])
-    .map(e => e.replace(/_/g, ' ').toLowerCase()).join(', ') || 'calm';
+  const isFast = booking.matchMode === 'FAST';
 
-  const title = isFast ? '⚡ Surprise Meetup — Happening Soon' : '✨ A compatible meetup is nearby';
-  const body  = `A verified person with a similar vibe is free for a ${energyLabel} public meetup${isFast ? ' — happening soon' : ' tonight'}.`;
+  // The current Android client builds its own copy for this type and ignores these
+  // two fields, so they exist for any client that does not — and to keep the
+  // server's idea of the message the same as the phone's.
+  //
+  // The old wording said "tonight", which was wrong for a morning meetup, and
+  // described the meetup by its energy rather than by what it actually is.
+  const plan  = CATEGORY_PLAN_LABEL[booking.activityCategory] || 'plan';
+  const where = booking.city ? ` in ${booking.city}` : '';
+  const title = `Someone nearby wants company for a ${plan}`;
+  const body  = `A verified person nearby is looking for company for a public ${plan}${where}.` +
+                (isFast ? " It's starting soon." : '');
 
   // Data payload — includes recipientUserId so Android can self-guard
   const data = {
     type:            'SURPRISE_MEETUP_REQUEST',
     recipientUserId: candidateIdStr,             // FIX 3: Android self-guard
     bookingId:       booking._id.toString(),
+    // ADDITIVE: what the creator actually wants to do, so the client can write
+    // copy about the plan instead of about "meetup energy". Null for every booking
+    // created before Phase 1; sendEachForMulticast requires strings, so it is
+    // normalised to '' and the client treats blank as "unknown" and falls back.
+    //
+    // Safe for the published client: it reads this payload key by key and simply
+    // never asks for this one. `type` is deliberately unchanged.
+    activityCategory: booking.activityCategory || '',
     city:            booking.city,
     energies:        (booking.meetupEnergy || []).join(','),
     startTime:       booking.startTime.toISOString(),
@@ -503,10 +530,25 @@ async function notifyCreatorMatched(booking, acceptorId) {
     bookingId: booking._id.toString(), chatId: booking.chatId?.toString() || '', acceptorId: acceptorId.toString(),
   });
   if (!creator?.fcmTokens?.length) return;
+
+  // Falls back to the generic word when activityCategory is null, which is every
+  // booking created before Phase 1.
+  const plan = CATEGORY_PLAN_LABEL[booking.activityCategory] || 'plan';
+
   await admin.messaging().sendEachForMulticast({
-    notification: { title: '✨ Someone accepted your meetup', body: `${acceptor?.firstName || 'Someone'} accepted. Open the chat to plan your meetup!` },
-    data:         { type: 'SURPRISE_MEETUP_MATCHED', bookingId: booking._id.toString(), chatId: booking.chatId?.toString() || '', acceptorId: acceptorId.toString() },
-    tokens:       creator.fcmTokens,
+    notification: {
+      title: `Someone joined your ${plan}`,
+      body:  `${acceptor?.firstName || 'Someone'} accepted. Open the chat to sort out where and when.`,
+    },
+    data: {
+      type: 'SURPRISE_MEETUP_MATCHED',
+      bookingId: booking._id.toString(),
+      chatId: booking.chatId?.toString() || '',
+      acceptorId: acceptorId.toString(),
+      // ADDITIVE — lets the client render the same wording in the foreground.
+      activityCategory: booking.activityCategory || '',
+    },
+    tokens: creator.fcmTokens,
   }).catch(() => {});
 }
 

@@ -40,6 +40,23 @@ cron.schedule('* * * * *', async () => {
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
+// EVERY MINUTE — Surprise Activity meetup safety lifecycle
+//
+// 30 min before → 10 min before → completion → feedback prompt.
+// One indexed query per tick, bounded by a startTime range; a tick with nothing due
+// costs a single query and returns. All state lives in the booking document, so this
+// survives a restart and is safe to run twice or on several instances at once.
+// ══════════════════════════════════════════════════════════════════════════════
+cron.schedule('* * * * *', async () => {
+  try {
+    const { tickMeetupSafetyReminders } = require('./services/meetupSafetyReminderService');
+    await tickMeetupSafetyReminders();
+  } catch (err) {
+    console.error('[CRON] Meetup safety tick error:', err.message);
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
 // EVERY 5 MINUTES — Official Events: auto-publish Scheduled, auto-expire old
 // ══════════════════════════════════════════════════════════════════════════════
 cron.schedule('*/5 * * * *', async () => {
@@ -64,7 +81,9 @@ cron.schedule('0 * * * *', async () => {
 
     // 2. Delete expired chats
     const deletedChats = await RandomBookingChat.cleanupExpired();
-    console.log(`✅ [CRON] Chats cleaned: ${deletedChats.deleted}/${deletedChats.total}`);
+    // Two stages now: chats close at expiresAt, their text is purged 24h later.
+    console.log(`✅ [CRON] Chats closed: ${deletedChats.expired}/${deletedChats.total} | ` +
+                `text purged: ${deletedChats.purged} chat(s), ${deletedChats.messagesRemoved} message(s)`);
 
     // 3. Clean up encryption keys
     const deletedKeys = await EncryptionKey.cleanupExpired();
@@ -99,6 +118,21 @@ cron.schedule('0 * * * *', async () => {
       console.log(`   Deleted orphan notifications: ${notifRes.deletedCount}`);
     } catch (err) {
       console.error('[CRON] Letters orphan cleanup error:', err.message);
+    }
+
+    // 6. R7.1 — expire overdue Meetup proposals.
+    //    Reuses this existing hourly cleanup rather than adding a new scheduler.
+    //    A no-op while MEETUP_ENABLED is false. Correctness does not depend on it:
+    //    the proposal path self-heals a Room's expired Meetups before checking the
+    //    one-active-Meetup rule, so this is a housekeeping sweep, not the guarantee.
+    try {
+      const { expireStaleMeetups } = require('./services/meetup/meetupExpiryService');
+      const meetupExpiry = await expireStaleMeetups();
+      if (!meetupExpiry.skipped) {
+        console.log(`✅ [CRON] Meetup proposals expired: ${meetupExpiry.expiredCount}`);
+      }
+    } catch (err) {
+      console.error('[CRON] Meetup expiry error:', err.message);
     }
 
     console.log('✨ [CRON] Hourly cleanup complete\n');
@@ -150,6 +184,7 @@ cron.schedule('0 0 * * *', async () => {
 
 console.log('🤖 Cron jobs initialised');
 console.log('   • Reservation expiry tick: every minute');
+console.log('   • Meetup safety tick:      every minute');
 console.log('   • Official Events tick:    every 5 minutes');
 console.log('   • General cleanup:         every hour');
 console.log('   • Stats report:            daily at midnight\n');

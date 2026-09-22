@@ -19,6 +19,14 @@ const logRoomEvent = async (eventType, metadata = {}) => {
 };
 
 const { resolveRoomTopicImage, getAvailableTopics, isValidTopicForUser } = require('../utils/roomTopicConfig');
+// The canonical NEAR_ME proximity rule. Both discovery paths read it from here so
+// they can never drift apart again.
+const {
+  buildNearMeVisibility,
+  isRoomVisibleTo,
+  distanceTierFor,
+  NEARBY_RADII_METERS,
+} = require('../services/roomProximityService');
 
 /**
  * Batch-resolves JOINED member counts for rooms whose denormalized `memberCount`
@@ -199,13 +207,38 @@ async function buildDiscoveryInventory({ userId, user, excludeIds, joinedRoomIds
     if (blockSet.has(String(m.userId))) blockedRoomIds.add(String(m.roomId));
   });
 
+  // 5. NEAR_ME VISIBILITY GATE.
+  //    THE BUG THIS FIXES: the candidate query above deliberately pulls every open
+  //    Room so the dashboard is never needlessly empty — but it has no proximity
+  //    constraint, so a user-created NEAR_ME Room entered every user's inventory
+  //    regardless of where they were. The expanding-radius geo lookup in
+  //    discoverRooms had already excluded exactly those Rooms; this step re-applies
+  //    that same rule here, using the shared canonical helper, so the two paths
+  //    cannot disagree again.
+  //
+  //    Applies ONLY to user-created NEAR_ME Rooms. SYSTEM Rooms (which the
+  //    generator also emits as NEAR_ME, and which have no createdBy) keep their
+  //    existing R4.5 discovery behaviour untouched.
+  //
+  //    ONE geo query for the whole dashboard, narrowed to the candidate Rooms'
+  //    creators — never one query per Room.
+  const { eligibleCreators, tierForRoom } = await buildNearMeVisibility(user, open);
+
   const profile = buildDiscoveryProfile(user);
   const now = Date.now();
+  const distanceTierByRoom = new Map();
 
   const scored = [];
   for (const room of open) {
     const rid = String(room._id);
     if (blockedRoomIds.has(rid)) continue;
+
+    // Excluded BEFORE ranking and before the response is assembled. The Room is
+    // never returned and then hidden by Android — it does not leave the server.
+    if (!isRoomVisibleTo(room, eligibleCreators)) continue;
+
+    const gatedTier = tierForRoom(room);
+    if (gatedTier) distanceTierByRoom.set(rid, gatedTier);
 
     const memberCount = countOf(room) || 0;
     // Capacity is enforced server-side; never trust the client to hide a full Room.
@@ -258,7 +291,12 @@ async function buildDiscoveryInventory({ userId, user, excludeIds, joinedRoomIds
       myMembershipStatus: myStatus,          // 'INVITED' or null — never 'JOINED' here
       discoveryTier: tier,
       matchReasons: reasons,                 // coarse labels only, no scores exposed
+      // Bucketed label only — never a distance, never a coordinate. The gated
+      // tier is the real computed bucket for a Room that passed the proximity
+      // check; the generic 'Near Me' remains only for SYSTEM NEAR_ME Rooms,
+      // which are not proximity-gated.
       distanceTier: seeded?.distanceTier
+        || distanceTierByRoom.get(String(room._id))
         || (room.discoveryMode === 'NEAR_ME' ? 'Near Me' : 'All India'),
       lastMessageAt: null,
       lastMessage: null,
@@ -277,8 +315,12 @@ exports.discoverRooms = async (req, res) => {
     const userId = req.userId;
 
     // R4.5: questionnaire is needed for relevance ranking (existing explicit fields only).
+    // last_known_lat/lng are projected because the trusted-location fallback below
+    // (and in roomProximityService) reads them. They were referenced but NOT
+    // selected before, so the legacy fallback was silently always undefined and a
+    // user with only a last-known location was told "Location is required".
     const user = await User.findById(userId)
-      .select('status suspensionInfo blockedUsers liveLocation questionnaire');
+      .select('status suspensionInfo blockedUsers liveLocation last_known_lat last_known_lng questionnaire');
     if (!user || user.status !== 'ACTIVE') {
       return res.status(403).json({ success: false, message: 'Account not eligible for discovery' });
     }
@@ -305,7 +347,9 @@ exports.discoverRooms = async (req, res) => {
         return res.status(400).json({ success: false, message: 'Location is required for nearby Rooms' });
       }
 
-      const radii = [5000, 8000, 10000, 15000];
+      // Same ladder as before, now read from the shared helper so this path and
+      // the inventory gate can never drift apart on the radii.
+      const radii = NEARBY_RADII_METERS;
       for (const radius of radii) {
         const nearbyUsers = await User.find({
           ...baseFilter,
@@ -334,7 +378,9 @@ exports.discoverRooms = async (req, res) => {
           discoveredRooms = rooms.map((room) => {
             const creator = nearbyUserMap.get(room.createdBy.toString());
             const dist = getDistance(userLat, userLng, creator.liveLocation?.lat, creator.liveLocation?.lng);
-            const distanceTier = dist <= 5 ? '< 5 km' : dist <= 8 ? '5-8 km' : dist <= 10 ? '8-10 km' : '10-15 km';
+            // Same buckets as before, now read from the shared helper so the
+            // seeded path and the inventory path cannot label differently.
+            const distanceTier = distanceTierFor(dist);
             return {
               roomId: room._id,
               title: room.title,

@@ -268,11 +268,27 @@ router.post('/register', registerLimiter, async (req, res) => {
       if (completedPromptVersion) user.pendingAiEnrichmentPromptVersion = completedPromptVersion;
       
       try {
-        const aiProfileService = require('../services/aiProfileService');
-        const aiData = await aiProfileService.extractProfile(optionalBioText);
-        
-        // Merge into questionnaire, but explicit data always wins
-        if (aiData) {
+          let aiData = null;
+          try {
+            const parsed = JSON.parse(optionalBioText.trim());
+            if (parsed.status === 'complete' && parsed.profile_data) {
+              aiData = parsed;
+              user.aiProfile = parsed;
+            }
+          } catch (e) {
+            // Not JSON, fallback to LLM extraction
+          }
+
+          if (!aiData) {
+            const aiProfileService = require('../services/aiProfileService');
+            aiData = await aiProfileService.extractProfile(optionalBioText);
+            if (aiData && aiData.status === 'complete') {
+              user.aiProfile = aiData;
+            }
+          }
+          
+          // Merge into questionnaire, but explicit data always wins
+          if (aiData) {
           const pd = aiData.profile_data || {};
           const q = user.questionnaire || {};
           

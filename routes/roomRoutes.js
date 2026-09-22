@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const roomController = require('../controllers/roomController');
+const meetupController = require('../controllers/meetupController');
 const { authenticate } = require('../middleware/auth');
 const {
   validateRoomId,
@@ -32,5 +33,12 @@ router.delete(
   '/:roomId/messages/:messageId/reaction',
   authenticate, validateRoomId, roomReactionLimiter, roomController.removeRoomMessageReaction
 );
+
+// R7.1 — Meetup proposal. Self-gated by MEETUP_ENABLED (default false), which the
+// proposal service checks before any database access, so mounting this route
+// changes nothing in production. Reuses validateRoomId; the per-user proposal
+// quota is enforced inside the service (rolling window, fails closed) rather than
+// by a middleware limiter, because it must only charge successful proposals.
+router.post('/:roomId/meetups', authenticate, validateRoomId, meetupController.createMeetupProposal);
 
 module.exports = router;

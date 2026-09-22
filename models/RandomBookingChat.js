@@ -87,6 +87,27 @@ const randomBookingChatSchema = new mongoose.Schema({
   lastMessageAt: {
     type: Date,
     default: Date.now
+  },
+
+  // ── Two-stage message retention ─────────────────────────────────────────────
+  // `expiresAt` above is when the chat stops being usable and disappears from the
+  // Messages screen. It is NOT when the words are deleted any more.
+  //
+  // Text is purged later, at `messagesPurgeAt`, so a report raised shortly after a
+  // chat closes still has something to look at. Fixed at booking.startTime + 48h so
+  // it does not move when a rating shortens `expiresAt`.
+  //
+  // Null on every chat created before this field existed; cleanupExpired falls back
+  // to expiresAt + 24h for those, which is the same instant, because their expiresAt
+  // was always startTime + 24h.
+  messagesPurgeAt: {
+    type: Date,
+    default: null
+  },
+
+  messagesPurgedAt: {
+    type: Date,
+    default: null
   }
 }, {
   timestamps: true
@@ -147,17 +168,66 @@ randomBookingChatSchema.methods.canDelete = function() {
   return this.isExpired() && !this.hasReport && this.status !== 'UNDER_REVIEW';
 };
 
+/**
+ * Stage 1 — close the chat.
+ *
+ * Hides it from the Messages screen and stops it being usable. Messages are
+ * deliberately left in place; they are removed later by [purgeMessageText].
+ *
+ * Split out of deleteChat() because closing and forgetting used to be the same
+ * instant, which left nothing to review if a report arrived just after a chat ended.
+ */
+randomBookingChatSchema.methods.expireChat = async function() {
+  if (this.isDeleted) return false;
+  // UNDER_REVIEW is a moderation state, not a lifecycle state. Overwriting it with
+  // EXPIRED would lose the fact that the chat is being looked at — flagForReview()
+  // deliberately pushes expiresAt out to 2099 to keep it alive, and this must not
+  // quietly undo that if the two ever race.
+  if (this.status !== 'UNDER_REVIEW') this.status = 'EXPIRED';
+  this.isDeleted = true;
+  this.deletedAt = new Date();
+  await this.save();
+  return true;
+};
+
+/**
+ * Stage 2 — remove the words.
+ *
+ * Deletes user-authored TEXT messages only. Deliberately kept:
+ *   • system messages (isSystemMessage) — the "You're matched" line
+ *   • CALL_LOG entries and their callLogData
+ *   • the chat record, its participants, the booking, and any rating
+ *
+ * That is the "text, not the data" split: what two people said to each other goes,
+ * the record that they met does not.
+ */
+randomBookingChatSchema.methods.purgeMessageText = async function() {
+  const Message = mongoose.model('Message');
+  const result = await Message.deleteMany({
+    chatId:          this._id,
+    messageType:     'TEXT',
+    isSystemMessage: false,
+  });
+
+  const EncryptionKey = mongoose.model('EncryptionKey');
+  await EncryptionKey.deleteOne({ keyId: this.encryptionKeyId });
+
+  this.messagesPurgedAt = new Date();
+  await this.save();
+  return result.deletedCount || 0;
+};
+
+/**
+ * Kept for compatibility. Nothing calls it any more — cleanupExpired now runs the two
+ * stages above — but it is a documented instance method, so it stays and does what it
+ * always did, minus the part that is now stage 2's job.
+ */
 randomBookingChatSchema.methods.deleteChat = async function() {
   if (!this.canDelete()) {
     throw new Error('Cannot delete chat: either not expired or under review');
   }
-  this.isDeleted = true;
-  this.deletedAt = new Date();
-  await this.save();
-  const Message = mongoose.model('Message');
-  await Message.deleteMany({ chatId: this._id });
-  const EncryptionKey = mongoose.model('EncryptionKey');
-  await EncryptionKey.deleteOne({ keyId: this.encryptionKeyId });
+  await this.expireChat();
+  await this.purgeMessageText();
   return true;
 };
 
@@ -188,7 +258,11 @@ randomBookingChatSchema.statics.createForBooking = async function(booking) {
       { userId: booking.acceptorId,  role: 'ACCEPTER' }
     ],
     encryptionKeyId: keyId,
-    expiresAt: chatExpiresAt
+    expiresAt: chatExpiresAt,
+    // Anchored to the meetup, not to expiresAt, so that a rating shortening the chat
+    // to two hours does not also pull the purge forward. Always 24h after the latest
+    // possible close.
+    messagesPurgeAt: new Date(booking.startTime.getTime() + 48 * 60 * 60 * 1000),
   });
 
   const Message = mongoose.model('Message');
@@ -213,26 +287,66 @@ randomBookingChatSchema.statics.findForUser = function(userId) {
   .sort({ lastMessageAt: -1 });
 };
 
+/**
+ * Two-stage sweep, run hourly by cronJobs.js.
+ *
+ *   Stage 1  expiresAt      → close the chat, keep the messages
+ *   Stage 2  messagesPurgeAt → delete the text
+ *
+ * Both stages are idempotent: stage 1 skips anything already closed, stage 2 skips
+ * anything already purged. Removal from the Messages screen does not depend on this
+ * running — GET /chats filters on expiresAt directly, so a chat disappears the moment
+ * it expires rather than whenever the next sweep happens.
+ */
 randomBookingChatSchema.statics.cleanupExpired = async function() {
   const now = new Date();
-  const expiredChats = await this.find({
-    status: { $in: ['COMPLETED', 'ACTIVE'] },
-    expiresAt: { $lt: now },
-    hasReport: false,
-    isDeleted: false
-  });
 
-  let deleted = 0;
-  for (const chat of expiredChats) {
+  // ── Stage 1: close ────────────────────────────────────────────────────────
+  // hasReport is no longer a reason to skip closing — a reported chat should still
+  // stop being usable. It is stage 2 that leaves reported chats alone.
+  const toExpire = await this.find({
+    status:    { $in: ['COMPLETED', 'ACTIVE'] },
+    expiresAt: { $lt: now },
+    isDeleted: false,
+  }).limit(500);
+
+  let expired = 0;
+  for (const chat of toExpire) {
     try {
-      await chat.deleteChat();
-      deleted++;
+      if (await chat.expireChat()) expired++;
     } catch (error) {
-      console.error(`Failed to delete chat ${chat._id}:`, error.message);
+      console.error(`Failed to expire chat ${chat._id}:`, error.message);
     }
   }
 
-  return { deleted, total: expiredChats.length };
+  // ── Stage 2: purge text ───────────────────────────────────────────────────
+  const legacyCutoff = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const toPurge = await this.find({
+    isDeleted:        true,
+    hasReport:        false,
+    status:           { $ne: 'UNDER_REVIEW' },
+    messagesPurgedAt: null,
+    $or: [
+      { messagesPurgeAt: { $lt: now } },
+      // Chats created before messagesPurgeAt existed. Their expiresAt was always
+      // startTime + 24h, so expiresAt + 24h is the same instant as startTime + 48h.
+      { messagesPurgeAt: null, expiresAt: { $lt: legacyCutoff } },
+    ],
+  }).limit(500);
+
+  let purged = 0;
+  let messagesRemoved = 0;
+  for (const chat of toPurge) {
+    try {
+      messagesRemoved += await chat.purgeMessageText();
+      purged++;
+    } catch (error) {
+      console.error(`Failed to purge chat ${chat._id}:`, error.message);
+    }
+  }
+
+  // `deleted` and `total` are kept so the existing cron log line still reads sensibly.
+  return { expired, purged, messagesRemoved, deleted: expired, total: toExpire.length };
 };
 
 randomBookingChatSchema.statics.findUnderReview = function() {

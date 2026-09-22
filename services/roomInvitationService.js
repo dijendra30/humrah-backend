@@ -20,9 +20,14 @@ const Notification = require('../models/Notification');
 const redisService = require('./redisService');
 const { sendDataFcm } = require('../utils/fcmHelper');
 
+const { suggestedCutoff, suggestedLifetimeSeconds } = require('./roomLifecycleConfig');
+
 const COOLDOWN_HOURS = parseInt(process.env.ROOM_INVITATION_COOLDOWN_HOURS || '12', 10);
 const COOLDOWN_SECONDS = COOLDOWN_HOURS * 3600;
-const DEDUP_SECONDS = 2 * 3600; // 2 hours — matches the SUGGESTED invitation lifecycle
+// Dedup must last exactly as long as the Room it refers to, so a user is told
+// about a given Room once and only once for its whole life. Read from the shared
+// lifecycle config (was a hard-coded 2h that had to be kept in sync by hand).
+const dedupSeconds = () => suggestedLifetimeSeconds();
 
 const LOCK_KEY = 'lock:room_invitation_worker';
 const dedupKeyFor = (roomId, userId) => `room_invitation_sent:${roomId}:${userId}`;
@@ -88,12 +93,13 @@ async function processRoomInvitations() {
   }
 
   try {
-    // 1. SYSTEM + SUGGESTED Rooms still inside the 2h invitation window.
-    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    // 1. SYSTEM + SUGGESTED Rooms still inside the invitation window. The window
+    //    is the Room's own lifetime, shared with the expiry job — a Room that is
+    //    still open must still be invitable, or it sits visible but unreachable.
     const suggestedRooms = await HumrahRoom.find({
       creationSource: 'SYSTEM',
       status: 'SUGGESTED',
-      createdAt: { $gte: twoHoursAgo },
+      createdAt: { $gte: suggestedCutoff() },
     });
     summary.roomsScanned = suggestedRooms.length;
 
@@ -202,7 +208,7 @@ async function processRoomInvitations() {
           await notification.save();
 
           // 11. Only now burn dedup + cooldown.
-          await redisService.set(dedupKeyFor(roomId, userId), '1', DEDUP_SECONDS);
+          await redisService.set(dedupKeyFor(roomId, userId), '1', dedupSeconds());
           await redisService.set(cooldownKeyFor(userId), '1', COOLDOWN_SECONDS);
           summary.notificationsSent++;
         } catch (memberErr) {
@@ -241,5 +247,7 @@ module.exports = {
   dedupKeyFor,
   cooldownKeyFor,
   COOLDOWN_SECONDS,
-  DEDUP_SECONDS,
+  // Kept as an export for callers/tests that read it, but it is now DERIVED from
+  // roomLifecycleConfig rather than a standalone constant.
+  dedupSeconds,
 };

@@ -106,6 +106,29 @@ function selectRoomTopic(users) {
 }
 
 /**
+ * Does the GROUP-AVERAGE cohesion gate carry any information for this size?
+ *
+ * BUGFIX. For a 2-person group there is exactly ONE pair, so calculateGroupCohesion
+ * returns the same number for cohesionScore and minPairwiseScore. Applying
+ * MIN_COHESION_SCORE (70) there silently overrode MIN_PAIRWISE_SCORE (60) and made
+ * the real minimum for creating a Room 70 — a threshold that is never stated
+ * anywhere in CONFIG.
+ *
+ * Observed in production: the best pair in the whole candidate population scored
+ * 68. Four pairs cleared the documented 60 bar, all four were then discarded by the
+ * undocumented 70 bar, buildCandidateGroups() returned zero groups, and the run
+ * logged groups_considered: 0 with an EMPTY rejection_reasons — because the
+ * discard happens before evaluateGroupViability(), which is what records reasons.
+ *
+ * Cohesion only says something the pairwise minimum does not once there are at
+ * least three members (i.e. more than one pair to average). Below that it is the
+ * same measurement counted twice.
+ */
+function cohesionGateApplies(groupSize) {
+  return groupSize >= 3;
+}
+
+/**
  * Validates a proposed group against all thresholds.
  */
 function evaluateGroupViability(users) {
@@ -122,7 +145,9 @@ function evaluateGroupViability(users) {
     return { viable: false, reason: `min_pairwise_too_low (${cohesion.minPairwiseScore})` };
   }
 
-  if (cohesion.cohesionScore < CONFIG.MIN_COHESION_SCORE) {
+  // Only meaningful for 3+ members — see cohesionGateApplies(). A pair has already
+  // been judged by MIN_PAIRWISE_SCORE immediately above.
+  if (cohesionGateApplies(users.length) && cohesion.cohesionScore < CONFIG.MIN_COHESION_SCORE) {
     return { viable: false, reason: `cohesion_too_low (${cohesion.cohesionScore})` };
   }
 
@@ -337,8 +362,11 @@ function buildCandidateGroups(population) {
       
       // Candidate is viable if the entire group remains strong and all new edges are >= MIN_PAIRWISE
       if (testCohesion.valid && testCohesion.minPairwiseScore >= CONFIG.MIN_PAIRWISE_SCORE) {
-        // We only require MIN_COHESION_SCORE when finalizing the group, but we can enforce it here too
-        if (testCohesion.cohesionScore >= CONFIG.MIN_COHESION_SCORE) {
+        // MIN_COHESION_SCORE is enforced here too, but ONLY once the group is big
+        // enough for cohesion to mean something. Enforcing it while testGroup is
+        // still a pair re-tested the pairwise score against a stricter bar and
+        // blocked every 2-person Room. See cohesionGateApplies().
+        if (!cohesionGateApplies(testGroup.length) || testCohesion.cohesionScore >= CONFIG.MIN_COHESION_SCORE) {
           currentGroup.push(c.user);
         }
       }
@@ -413,5 +441,6 @@ module.exports = {
   createSystemRoom,
   buildCandidateGroups,
   generateSystemRooms,
-  buildSystemRoomTitle
+  buildSystemRoomTitle,
+  cohesionGateApplies
 };

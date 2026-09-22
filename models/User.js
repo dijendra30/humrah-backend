@@ -579,7 +579,26 @@ const userSchema = new mongoose.Schema({
   launchPopupCompletedAt: { type: Date, default: null },
   unsupportedRegionAccepted: { type: Boolean, default: false },
   regionStatus: { type: String },
-  popupVersionSeen: { type: Number, default: 0 }
+  popupVersionSeen: { type: Number, default: 0 },
+
+  // =============================================
+  // SURPRISE ACTIVITY — DAILY CREATION ALLOWANCE
+  // =============================================
+  // When this user last successfully created a Surprise Activity (RandomBooking).
+  //
+  // Exists so the "one per IST calendar day" rule can be claimed ATOMICALLY: a
+  // single findOneAndUpdate on this document is the strongest concurrency
+  // primitive available here, since nothing in this codebase uses multi-document
+  // transactions (grep startSession -> 0 hits) and the replica-set requirement
+  // for them is not verifiable from the app.
+  //
+  // Counting RandomBooking documents instead would be read-then-write and would
+  // therefore let two simultaneous requests both pass.
+  //
+  // Additive and nullable: every existing user reads back null, which means
+  // "has not created today". Nothing is backfilled and no index is added — the
+  // only query against it is by _id.
+  lastSurpriseActivityCreatedAt: { type: Date, default: null }
 
 }, { timestamps: true });
 
@@ -602,6 +621,9 @@ userSchema.index({ blockedUsers: 1 });
 userSchema.index({ last_location_updated_at: 1 });
 userSchema.index({ 'bookingRefs.bookingId': 1 });
 userSchema.index({ 'bookingRefs.status': 1 });
+// Phase 1: Humrah Room candidate population scan
+// (status equality + userType filter, _id-ordered, bounded by .limit()).
+userSchema.index({ status: 1, userType: 1, _id: 1 });
 
 // Calculate Profile Completion before saving
 const { calculateProfileCompletion } = require('../utils/profileCompletion');

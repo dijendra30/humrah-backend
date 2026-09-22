@@ -31,6 +31,40 @@ const CANDIDATE_CONFIG = {
   USER_COOLDOWN_HOURS: num(process.env.ROOM_GENERATOR_USER_COOLDOWN_HOURS, 24),
   // A user already sitting in this many live Rooms is not offered another one.
   MAX_LIVE_ROOMS_PER_USER: num(process.env.ROOM_GENERATOR_MAX_LIVE_ROOMS_PER_USER, 3),
+  // Only seed Rooms with users who can actually be TOLD about them.
+  //
+  // A SYSTEM Room reaches its members exactly one way: an FCM invitation to a
+  // device flagged supportsHumrahRooms. A candidate without one is invited to a
+  // Room they will most likely never hear about, and the Room expires unjoined
+  // holding a seat that a reachable user could have used.
+  //
+  // Measured before this gate existed: of 4 seats across two generated Rooms, 2
+  // went to users with no registered device at all; the next Room had 2 of 2
+  // unreachable and was dead on creation.
+  //
+  // Off by default would preserve the old behaviour, but the old behaviour is the
+  // bug — so this defaults ON. Set ROOM_GENERATOR_REQUIRE_REACHABLE=false to
+  // restore the previous, unfiltered selection.
+  REQUIRE_REACHABLE: String(process.env.ROOM_GENERATOR_REQUIRE_REACHABLE ?? 'true')
+    .trim().toLowerCase() !== 'false',
+};
+
+/**
+ * Matches a user holding at least one Room-capable device.
+ *
+ * $elemMatch so BOTH conditions hold on the SAME device — a user with one stale
+ * capable-but-tokenless entry and one tokened-but-incapable entry is correctly
+ * excluded. Applied inside the Mongo query, so fcmDevices is filtered on the
+ * server and never enters CANDIDATE_PROJECTION: no token ever reaches this
+ * service, and the projection's privacy guarantee is preserved exactly.
+ */
+const REACHABLE_FILTER = {
+  fcmDevices: {
+    $elemMatch: {
+      supportsHumrahRooms: true,
+      token: { $type: 'string', $ne: '' },
+    },
+  },
 };
 
 const cooldownKey = (userId) => `cooldown:room_generation:user:${userId}`;
@@ -59,6 +93,7 @@ async function loadRoomCandidates(options = {}) {
   const maxCandidates = options.maxCandidates || CANDIDATE_CONFIG.MAX_CANDIDATES;
   const stats = {
     candidatesFound: 0,
+    excludedUnreachable: 0,
     excludedCooldown: 0,
     excludedPendingInvite: 0,
     excludedTooManyRooms: 0,
@@ -66,18 +101,33 @@ async function loadRoomCandidates(options = {}) {
   };
 
   // ── 1. Bounded Mongo query, projected ─────────────────────────────────────
-  const raw = await User.find({
+  const baseFilter = {
     status: 'ACTIVE',
     'suspensionInfo.isSuspended': { $ne: true },
     userType: { $ne: 'COMPANION' },
     'questionnaire.humrahRoomInterests.0': { $exists: true },
-  })
+  };
+  const requireReachable = options.requireReachable ?? CANDIDATE_CONFIG.REQUIRE_REACHABLE;
+  const filter = requireReachable ? { ...baseFilter, ...REACHABLE_FILTER } : baseFilter;
+
+  const raw = await User.find(filter)
     .select(CANDIDATE_PROJECTION)
     .sort({ _id: 1 })
     .limit(maxCandidates)
     .lean();
 
   stats.candidatesFound = raw.length;
+
+  // How many otherwise-eligible users the reachability gate removed. Reported so
+  // a shrinking Room count is attributable rather than mysterious.
+  if (requireReachable) {
+    try {
+      const total = await User.countDocuments(baseFilter);
+      stats.excludedUnreachable = Math.max(0, total - raw.length);
+    } catch (err) {
+      console.warn('[RoomCandidates] unreachable count failed, continuing:', err.message);
+    }
+  }
   if (raw.length === 0) return { candidates: [], stats };
 
   const ids = raw.map(u => u._id);

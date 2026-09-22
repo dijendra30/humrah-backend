@@ -144,33 +144,70 @@ reviewSchema.statics.getPublicReviews = async function(userId, options = {}) {
   };
 };
 
+/**
+ * The single rating aggregate for a user, written to User.ratingStats.
+ *
+ * It now reads TWO sources: companion booking reviews (this collection) and Surprise
+ * Activity meetup ratings (MeetupRating). They cannot live in one collection — see the
+ * header of models/MeetupRating.js — but they must produce ONE number, and they must be
+ * produced HERE.
+ *
+ * Why here specifically: hideByAdmin(), unhideByAdmin() and routes/reviews.js all
+ * recompute User.ratingStats wholesale from this function. If meetup ratings were
+ * folded in anywhere else, the next admin hide would silently wipe them.
+ *
+ * Backward compatibility: for any user with no meetup ratings — which is every user
+ * today — the returned object is byte-identical to what this function returned before,
+ * except for the added completedBookings key described below.
+ */
 reviewSchema.statics.calculateRatingStats = async function(userId) {
-  const reviews = await this.find({
-    revieweeId: userId,
-    isHiddenByReviewee: false,
-    isHiddenByAdmin: false
-  }).select('rating').lean();
+  const MeetupRating  = mongoose.model('MeetupRating');
+  const RandomBooking = mongoose.model('RandomBooking');
 
-  if (reviews.length === 0) {
+  const [bookingReviews, meetupRatings, completedBookings] = await Promise.all([
+    this.find({
+      revieweeId: userId,
+      isHiddenByReviewee: false,
+      isHiddenByAdmin: false
+    }).select('rating').lean(),
+
+    MeetupRating.find({
+      revieweeId: userId,
+      isHiddenByAdmin: false
+    }).select('rating').lean(),
+
+    // completedBookings was declared on the User schema but written by nothing, so it
+    // has always read 0. Deriving it with a count rather than incrementing a counter
+    // keeps it idempotent: recomputing can never double-count, however often it runs.
+    RandomBooking.countDocuments({
+      status: 'COMPLETED',
+      $or: [{ initiatorId: userId }, { acceptorId: userId }],
+    }),
+  ]);
+
+  const ratings = [...bookingReviews, ...meetupRatings];
+
+  if (ratings.length === 0) {
     return {
       averageRating: 0,
       totalRatings: 0,
+      completedBookings,
       starDistribution: { five: 0, four: 0, three: 0, two: 0, one: 0 }
     };
   }
 
   const starDistribution = {
-    five:  reviews.filter(r => r.rating === 5).length,
-    four:  reviews.filter(r => r.rating === 4).length,
-    three: reviews.filter(r => r.rating === 3).length,
-    two:   reviews.filter(r => r.rating === 2).length,
-    one:   reviews.filter(r => r.rating === 1).length
+    five:  ratings.filter(r => r.rating === 5).length,
+    four:  ratings.filter(r => r.rating === 4).length,
+    three: ratings.filter(r => r.rating === 3).length,
+    two:   ratings.filter(r => r.rating === 2).length,
+    one:   ratings.filter(r => r.rating === 1).length
   };
 
-  const totalRating = reviews.reduce((sum, r) => sum + r.rating, 0);
-  const averageRating = Math.round((totalRating / reviews.length) * 10) / 10;
+  const totalRating = ratings.reduce((sum, r) => sum + r.rating, 0);
+  const averageRating = Math.round((totalRating / ratings.length) * 10) / 10;
 
-  return { averageRating, totalRatings: reviews.length, starDistribution };
+  return { averageRating, totalRatings: ratings.length, completedBookings, starDistribution };
 };
 
 reviewSchema.statics.canSubmitReview = async function(bookingId, userId) {

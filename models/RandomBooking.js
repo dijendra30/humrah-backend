@@ -46,6 +46,23 @@ const randomBookingSchema = new mongoose.Schema({
     required: true
   },
 
+  // The activity the creator actually wants to do, e.g. 'CAFE' or 'STREET_FOOD'.
+  //
+  // Deliberately additive and deliberately NOT an enum. `activityType` above is
+  // frozen: the published Android app deserialises it into a non-nullable Kotlin
+  // enum of exactly those five values, so a sixth value would reach that client
+  // as null and crash it. This field carries the real choice instead, and the
+  // published app simply ignores the unknown JSON key.
+  //
+  // No schema enum because the accepted vocabulary is validated in the create
+  // route (ACTIVITY_CATEGORIES), which lets the list change without a schema
+  // deploy and — more importantly — means an existing document can never fail
+  // validation on save(). handleCandidateResponse() saves live bookings mid-flow.
+  //
+  // Nullable with no backfill: every booking created before this field existed
+  // reads back as null, which both clients treat as "fall back to activityType".
+  activityCategory: { type: String, default: null },
+
   meetupEnergy: {
     type: [String],
     enum: ['QUIET', 'CHILL', 'DEEP_TALK', 'FUN', 'STUDY_BUDDY', 'CREATIVE_VIBES', 'SOCIAL_RECHARGE', 'LOW_ENERGY'],
@@ -87,7 +104,26 @@ const randomBookingSchema = new mongoose.Schema({
   expiredAt:          { type: Date, default: null },
   expiresAt:          { type: Date, required: true },
 
-  chatId: { type: mongoose.Schema.Types.ObjectId, ref: 'RandomBookingChat', default: null }
+  chatId: { type: mongoose.Schema.Types.ObjectId, ref: 'RandomBookingChat', default: null },
+
+  // ── Meetup safety reminders: which participants have already been notified ──
+  //
+  // Three arrays of user ids rather than three timestamps, because the requirement
+  // is once-per-participant, not once-per-booking: if one participant's send fails
+  // the other must still be able to receive theirs on the next tick.
+  //
+  // This is the scheduler's only state. A reminder is claimed with an atomic
+  // findOneAndUpdate guarded on `$ne: userId` before anything is sent, so a repeated
+  // cron run — or two server instances ticking at once — cannot double-send.
+  //
+  // Additive and defaulted: every booking that existed before this field reads back
+  // as three empty arrays, which is exactly "nothing sent yet". No backfill.
+  // The published client never receives this field — it is projected by no endpoint.
+  safetyReminders: {
+    thirtyMinute: { type: [mongoose.Schema.Types.ObjectId], default: [] },
+    tenMinute:    { type: [mongoose.Schema.Types.ObjectId], default: [] },
+    feedback:     { type: [mongoose.Schema.Types.ObjectId], default: [] },
+  }
 }, { timestamps: true });
 
 // ── Indexes ────────────────────────────────────────────────────────────────────

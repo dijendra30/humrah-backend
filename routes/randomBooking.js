@@ -49,6 +49,58 @@ const VALID_ENERGIES = new Set([
   'QUIET','CHILL','DEEP_TALK','FUN','STUDY_BUDDY','CREATIVE_VIBES','SOCIAL_RECHARGE','LOW_ENERGY'
 ]);
 
+// ── Surprise Activity categories ──────────────────────────────────────────────
+// The activity the creator actually wants to do. Validated HERE rather than as a
+// Mongoose enum so this list can change without a schema deploy, and so that an
+// existing booking can never fail validation when the matcher save()s it.
+//
+// Strictly separate from `activityType`, whose five values are frozen by the
+// published Android client's non-nullable Kotlin enum.
+const ACTIVITY_CATEGORIES = new Set([
+  'CAFE', 'FOOD', 'SHOPPING', 'WALK', 'EXPLORE', 'ART_CULTURE',
+  'NATURE', 'BEACH', 'STREET_FOOD', 'HANGOUT', 'STUDY_WORK', 'PHOTOGRAPHY',
+]);
+
+// ── Daily creation allowance ──────────────────────────────────────────────────
+// One Surprise Activity per IST calendar day.
+//
+// IST is fixed rather than derived from the client. The User schema carries no
+// timezone field of any kind, and this entire feature is already IST-only: the
+// booking window (/status and /create), parseStartTime(), the matcher's
+// _startHourIST and progressiveMatching's notification formatting all assume
+// Asia/Kolkata. Using anything else here would make the daily boundary disagree
+// with the booking window the same request is checked against.
+//
+// Because the boundary is computed from the SERVER clock, changing the phone's
+// clock or timezone cannot move it.
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+const DAY_MS        = 24 * 60 * 60 * 1000;
+
+// How long a Surprise Activity chat stays open once a participant has rated the
+// meetup. Rating is the closing act, so the conversation gets a short window to wrap
+// up rather than the rest of its 24-hour life. Never extends an expiry, only shortens.
+const CHAT_GRACE_AFTER_RATING_MS = 2 * 60 * 60 * 1000;
+
+/** Instant at which the IST calendar day containing `now` began, as real UTC. */
+function istDayStart(now) {
+  const shifted = new Date(now.getTime() + IST_OFFSET_MS);
+  const istMidnight = Date.UTC(
+    shifted.getUTCFullYear(), shifted.getUTCMonth(), shifted.getUTCDate(), 0, 0, 0, 0
+  );
+  return new Date(istMidnight - IST_OFFSET_MS);
+}
+
+/** Instant at which the NEXT IST calendar day begins — when the allowance resets. */
+function istNextDayStart(now) {
+  return new Date(istDayStart(now).getTime() + DAY_MS);
+}
+
+/** True when `lastCreatedAt` falls inside the IST calendar day containing `now`. */
+function hasCreatedToday(lastCreatedAt, now) {
+  if (!lastCreatedAt) return false;
+  return new Date(lastCreatedAt).getTime() >= istDayStart(now).getTime();
+}
+
 function parseStartTime(startTime) {
   if (startTime.includes('T')) return new Date(startTime);
   const [h, m] = startTime.split(':').map(Number);
@@ -63,17 +115,14 @@ function parseStartTime(startTime) {
 // ══════════════════════════════════════════════════════════════════════════════
 
 // ── BOOKING WINDOW STATUS ─────────────────────────────────────────────────────
+// The 06:00-19:40 IST booking window has been removed as a product decision, so
+// this always reports open. The endpoint itself is kept, and keeps its exact
+// response shape, because the published Humrah app calls it on entry to the
+// Surprise Activity flow and would treat a 404 as a failure.
+//
+// Creation is still limited to one per user per calendar day; that rule lives in
+// POST /create and is entirely independent of this endpoint.
 router.get('/status', authenticate, async (req, res) => {
-  const now = new Date();
-  const nowIST = new Date(now.getTime() + 5.5 * 3600 * 1000);
-  const nowHour = nowIST.getUTCHours();
-  const nowMinute = nowIST.getUTCMinutes();
-  
-  const isClosed = nowHour < 6 || nowHour > 19 || (nowHour === 19 && nowMinute >= 40);
-  
-  if (isClosed) {
-    return res.status(400).json({ success: false, code: 'BOOKING_CLOSED', message: 'Bookings are closed' });
-  }
   return res.json({ success: true, message: 'Bookings are open' });
 });
 
@@ -81,14 +130,48 @@ router.get('/status', authenticate, async (req, res) => {
 router.post('/create', authenticate, async (req, res) => {
   try {
     const user = await User.findById(req.userId).select(
-      'random_trial_used verified photoVerificationStatus home_city questionnaire liveLocation'
+      'random_trial_used verified photoVerificationStatus home_city questionnaire liveLocation lastSurpriseActivityCreatedAt'
     );
     const isVerified = user.verified === true || user.photoVerificationStatus === 'approved';
     if (!isVerified) return res.status(403).json({ success: false, code: 'VERIFICATION_REQUIRED', message: 'Only verified users can create a Surprise Meetup.' });
-    if (user.random_trial_used) return res.status(403).json({ success: false, message: 'You have already used your free trial.' });
 
-    const { city, lat, lng, startTime, endTime, activityType, locationCategory, meetupEnergy, blurProfileUntilAccepted } = req.body;
+    // Daily allowance — fail fast.
+    //
+    // This is only a read-only PRE-check so the caller gets a clear answer before
+    // doing any work. It is NOT what enforces the limit: the authoritative,
+    // concurrency-safe claim happens atomically just before RandomBooking.create
+    // below, so two simultaneous requests cannot both get through here.
+    //
+    // Replaces the previous `random_trial_used` gate. That gate was inert:
+    // `random_trial_used` is not declared on the User schema, and userSchema uses
+    // Mongoose's default strict:true, so the path was never hydrated by select()
+    // and never persisted by save(). It always read undefined.
+    const nowForLimit = new Date();
+    if (hasCreatedToday(user.lastSurpriseActivityCreatedAt, nowForLimit)) {
+      return res.status(429).json({
+        success:        false,
+        code:           'DAILY_LIMIT_REACHED',
+        message:        'You can create one Surprise Activity per day. Try again tomorrow.',
+        nextAvailableAt: istNextDayStart(nowForLimit).toISOString(),
+      });
+    }
+
+    const { city, lat, lng, startTime, endTime, activityType, locationCategory, meetupEnergy, blurProfileUntilAccepted, activityCategory } = req.body;
     const isSurpriseMeetup = Array.isArray(meetupEnergy) && meetupEnergy.length > 0;
+
+    // `activityCategory` is optional. Requests that omit it — every request the
+    // published app sends — behave exactly as before and store null.
+    let normalisedCategory = null;
+    if (activityCategory !== undefined && activityCategory !== null && activityCategory !== '') {
+      if (typeof activityCategory !== 'string' || !ACTIVITY_CATEGORIES.has(activityCategory)) {
+        return res.status(400).json({
+          success: false,
+          code:    'INVALID_ACTIVITY_CATEGORY',
+          message: 'Invalid activityCategory.',
+        });
+      }
+      normalisedCategory = activityCategory;
+    }
 
     if (!city || !lat || !lng || !startTime) return res.status(400).json({ success: false, message: 'city, lat, lng, startTime required.' });
     if (!isSurpriseMeetup && !activityType) return res.status(400).json({ success: false, message: 'activityType required for standard bookings.' });
@@ -99,21 +182,11 @@ router.post('/create', authenticate, async (req, res) => {
       if (bad.length) return res.status(400).json({ success: false, message: `Invalid meetupEnergy values: ${bad.join(', ')}` });
     }
 
+    // The 06:00-19:40 IST booking window that used to gate creation here has been
+    // removed as a product decision: a Surprise Activity can now be created at any
+    // hour. Deliberately untouched below: the >= 20 minute lead time, the
+    // today-or-tomorrow bound, and the one-per-calendar-day allowance.
     const now = new Date();
-    const nowIST = new Date(now.getTime() + 5.5 * 3600 * 1000);
-    const nowHour = nowIST.getUTCHours();
-    const nowMinute = nowIST.getUTCMinutes();
-    
-    // Booking is closed from 19:40 to 05:59.
-    const isClosed = nowHour < 6 || nowHour > 19 || (nowHour === 19 && nowMinute >= 40);
-    
-    if (isClosed) {
-      return res.status(400).json({ 
-        success: false, 
-        code: 'BOOKING_CLOSED', 
-        message: 'Bookings are open every day from 6:00 AM to 7:40 PM.' 
-      });
-    }
 
     const bookingStart = parseStartTime(startTime);
     if (bookingStart.getTime() - now.getTime() < 20 * 60 * 1000) {
@@ -147,6 +220,9 @@ router.post('/create', authenticate, async (req, res) => {
       city, lat: Number(lat), lng: Number(lng),
       matchSearchLocation,
       activityType:     isSurpriseMeetup ? 'CASUAL' : activityType,
+      // Additive and independent of activityType, which keeps its legacy value so
+      // the published client always receives one of its five known enum constants.
+      activityCategory: normalisedCategory,
       locationCategory: locationCategory || 'Public Place',
       startTime:        bookingStart,
       endTime:          endTime ? new Date(endTime) : new Date(bookingStart.getTime() + 90 * 60000),
@@ -158,7 +234,58 @@ router.post('/create', authenticate, async (req, res) => {
       bookingData.blurProfileUntilAccepted = blurProfileUntilAccepted === true;
     }
 
-    const booking = await RandomBooking.create(bookingData);
+    // ── Claim today's allowance, atomically ──────────────────────────────────
+    // A single-document findOneAndUpdate is atomic in MongoDB, so exactly one of
+    // two concurrent requests can match the "hasn't created today" condition.
+    // The loser gets null back and is rejected.
+    //
+    // Nothing in this codebase uses multi-document transactions (startSession is
+    // never called anywhere), so this is claim -> create -> release-on-failure
+    // rather than a transaction. The claim is taken as late as possible: every
+    // other validation has already passed by this point.
+    const claimedAt = new Date();
+    const dayStart  = istDayStart(claimedAt);
+    const priorUser = await User.findOneAndUpdate(
+      {
+        _id: req.userId,
+        $or: [
+          { lastSurpriseActivityCreatedAt: null },
+          { lastSurpriseActivityCreatedAt: { $exists: false } },
+          { lastSurpriseActivityCreatedAt: { $lt: dayStart } },
+        ],
+      },
+      { $set: { lastSurpriseActivityCreatedAt: claimedAt } },
+      { new: false, projection: { lastSurpriseActivityCreatedAt: 1 } }
+    ).lean();
+
+    if (!priorUser) {
+      return res.status(429).json({
+        success:        false,
+        code:           'DAILY_LIMIT_REACHED',
+        message:        'You can create one Surprise Activity per day. Try again tomorrow.',
+        nextAvailableAt: istNextDayStart(claimedAt).toISOString(),
+      });
+    }
+    const priorClaim = priorUser.lastSurpriseActivityCreatedAt ?? null;
+
+    // Mirror the claim onto the in-memory document. Mongoose's save() below only
+    // $sets paths it considers modified, so this is not strictly required — but
+    // keeping the hydrated doc in step means the claim cannot be undone by a
+    // later edit to that save() block, and costs nothing.
+    user.lastSurpriseActivityCreatedAt = claimedAt;
+
+    let booking;
+    try {
+      booking = await RandomBooking.create(bookingData);
+    } catch (createErr) {
+      // Creation failed, so the day must NOT be consumed. Restore the previous
+      // value, guarding on our own claim so a later legitimate claim is untouched.
+      await User.updateOne(
+        { _id: req.userId, lastSurpriseActivityCreatedAt: claimedAt },
+        { $set: { lastSurpriseActivityCreatedAt: priorClaim } }
+      ).catch(releaseErr => console.error('❌ [RandomBooking] allowance release failed:', releaseErr));
+      throw createErr;
+    }
 
     // Update liveLocation and legacy fields on the user doc
     user.last_known_lat = Number(lat);
@@ -172,6 +299,10 @@ router.post('/create', authenticate, async (req, res) => {
       state:     user.liveLocation?.state || null,
       updatedAt: now,
     };
+    // Left untouched deliberately. This assignment is inert — `random_trial_used`
+    // is not on the User schema and strict mode drops it — but removing it is an
+    // unrelated change, and the daily allowance above is what actually gates
+    // creation now.
     user.random_trial_used = true;
     await user.save();
 
@@ -188,6 +319,7 @@ router.post('/create', authenticate, async (req, res) => {
       message: isSurpriseMeetup ? "We're finding your match." : 'Random Meet request created!',
       booking: {
         _id: booking._id, city: booking.city, activityType: booking.activityType,
+        activityCategory: booking.activityCategory ?? null,
         meetupEnergy: booking.meetupEnergy, blurProfileUntilAccepted: booking.blurProfileUntilAccepted,
         matchMode: booking.matchMode || 'STANDARD', startTime: booking.startTime,
         endTime: booking.endTime, status: booking.status,
@@ -203,13 +335,48 @@ router.post('/create', authenticate, async (req, res) => {
 // ── TRIAL STATUS ──────────────────────────────────────────────────────────────
 router.get('/trial-status', authenticate, async (req, res) => {
   try {
-    const user = await User.findById(req.userId).select('random_trial_used verified photoVerificationStatus');
-    const isVerified = user.photoVerificationStatus === 'approved';
+    const user = await User.findById(req.userId)
+      .select('random_trial_used verified photoVerificationStatus lastSurpriseActivityCreatedAt');
+    // Two verification rules exist in this file and they disagree. This endpoint
+    // has always used photoVerificationStatus alone, while POST /create accepts
+    // `verified === true` as well. That divergence predates Phase 1, so the
+    // legacy keys below keep the legacy rule to avoid changing what any older
+    // published build sees.
+    //
+    // The NEW keys must not inherit the bug: a user with verified === true but an
+    // unapproved photo would be told they cannot create, and then /create would
+    // accept them. canCreateToday therefore mirrors /create exactly.
+    const isVerified       = user.photoVerificationStatus === 'approved';          // legacy rule
+    const canCreatePerRoute = user.verified === true || isVerified;                // POST /create rule
+
+    // Surprise Activity is now one per IST calendar day, not one per lifetime.
+    const now         = new Date();
+    const usedToday   = hasCreatedToday(user.lastSurpriseActivityCreatedAt, now);
+    const canCreate   = isVerified && !usedToday;
+
     return res.json({
       success: true,
-      trialUsed:        user.random_trial_used || false,
+      // ── Existing keys, preserved. `trialUsed` keeps its old shape; it now
+      // answers "used today" rather than "used ever", which is the closest
+      // truthful mapping onto the new rule. `canCreateBooking` keeps its old
+      // meaning of "may this user create right now".
+      trialUsed:        usedToday,
       verified:         isVerified,
-      canCreateBooking: isVerified && !user.random_trial_used,
+      canCreateBooking: canCreate,
+
+      // ── Additive: what the new client needs to render daily availability.
+      // Uses POST /create's verification rule, so it can never contradict what
+      // an actual create call would do.
+      canCreateToday:            canCreatePerRoute && !usedToday,
+      // The daily allowance on its own, with verification factored out.
+      dailyAllowanceAvailable:   !usedToday,
+      dailyLimit:                1,
+      createdToday:              usedToday ? 1 : 0,
+      lastCreatedAt:             user.lastSurpriseActivityCreatedAt
+        ? new Date(user.lastSurpriseActivityCreatedAt).toISOString() : null,
+      nextAvailableAt:           usedToday ? istNextDayStart(now).toISOString() : null,
+      serverTime:                now.toISOString(),
+      dailyLimitTimezone:        'Asia/Kolkata',
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: 'Failed to check trial status.' });
@@ -369,6 +536,9 @@ router.get('/nearby', authenticate, async (req, res) => {
           _id:                      b._id,
           city:                     b.city,
           activityType:             b.activityType,
+          // Additive. Old clients ignore the key; new clients prefer it and fall
+          // back to activityType when it is null (every pre-Phase-1 booking).
+          activityCategory:         b.activityCategory ?? null,
           meetupEnergy:             b.meetupEnergy || [],
           locationCategory:         b.locationCategory,
           startTime:                b.startTime,
@@ -399,9 +569,15 @@ router.get('/nearby', authenticate, async (req, res) => {
 // ── CHATS LIST ────────────────────────────────────────────────────────────────
 router.get('/chats', authenticate, async (req, res) => {
   try {
-    const chats = await RandomBookingChat.find({ 'participants.userId': req.userId, isDeleted: false })
+    // expiresAt is filtered here, not left to the hourly sweep: a closed chat has to
+    // leave the Messages screen the moment it closes, not up to an hour later.
+    const chats = await RandomBookingChat.find({
+      'participants.userId': req.userId,
+      isDeleted: false,
+      expiresAt: { $gt: new Date() },
+    })
       .populate({ path: 'participants.userId', select: 'firstName lastName profilePhoto verified questionnaire' })
-      .populate({ path: 'bookingId', select: 'city activityType meetupEnergy locationCategory startTime endTime status blurProfileUntilAccepted' })
+      .populate({ path: 'bookingId', select: 'city activityType activityCategory meetupEnergy locationCategory startTime endTime status blurProfileUntilAccepted' })
       .sort({ lastMessageAt: -1 });
     return res.json({ success: true, chats });
   } catch (err) {
@@ -423,6 +599,14 @@ router.get('/chats/:chatId/messages', authenticate, async (req, res) => {
       return pid === uid;
     });
     if (!isParticipant) return res.status(403).json({ success: false, message: 'Access denied.' });
+
+    // Messages now outlive the chat by 24 hours so a late report still has something
+    // to review. That must not mean a participant can keep reading a closed chat, so
+    // reading is cut off at the same instant as sending — this mirrors the 410 the
+    // send-message route below has always returned.
+    if (chat.isExpired() || chat.isDeleted) {
+      return res.status(410).json({ success: false, code: 'CHAT_CLOSED', message: 'This chat has closed.' });
+    }
 
     const messages = await Message.find({ chatId: req.params.chatId, isDeleted: false })
       .populate('senderId', 'firstName lastName profilePhoto')
@@ -622,6 +806,7 @@ router.get('/my-activities', authenticate, async (req, res) => {
 
       return {
         id: a._id.toString(),
+        activityCategory: a.activityCategory ?? null,
         meetupEnergy: a.meetupEnergy || [],
         status: a.status,
         createdAt: a.createdAt,
@@ -645,8 +830,24 @@ router.get('/my-activities', authenticate, async (req, res) => {
 // ── USAGE ─────────────────────────────────────────────────────────────────────
 router.get('/usage', authenticate, async (req, res) => {
   try {
-    const user = await User.findById(req.userId).select('random_trial_used');
-    return res.json({ success: true, canCreateBooking: !user.random_trial_used, trialUsed: user.random_trial_used || false });
+    const user = await User.findById(req.userId).select('random_trial_used lastSurpriseActivityCreatedAt');
+    const now       = new Date();
+    const usedToday = hasCreatedToday(user.lastSurpriseActivityCreatedAt, now);
+    return res.json({
+      // Existing keys preserved, now answering the daily rule instead of the
+      // (inert) lifetime flag. Note this endpoint does not check verification,
+      // which matches its previous behaviour.
+      success:          true,
+      canCreateBooking: !usedToday,
+      trialUsed:        usedToday,
+      // Additive.
+      canCreateToday:     !usedToday,
+      dailyLimit:         1,
+      createdToday:       usedToday ? 1 : 0,
+      nextAvailableAt:    usedToday ? istNextDayStart(now).toISOString() : null,
+      serverTime:         now.toISOString(),
+      dailyLimitTimezone: 'Asia/Kolkata',
+    });
   } catch (err) {
     return res.status(500).json({ success: false, message: 'Failed to load usage.' });
   }
@@ -678,6 +879,7 @@ router.get('/:bookingId', authenticate, async (req, res) => {
 
     return res.json({ success: true, booking: {
       _id: booking._id, status: booking.status, city: booking.city,
+      activityCategory: booking.activityCategory ?? null,
       meetupEnergy: booking.meetupEnergy || [], blurProfileUntilAccepted: booking.blurProfileUntilAccepted,
       startTime: booking.startTime, endTime: booking.endTime, reservedUntil: booking.reservedUntil,
       chatId: booking.chatId,
@@ -843,6 +1045,164 @@ router.post('/:bookingId/accept', authenticate, async (req, res) => {
     return res.json({ success: true, message: 'Booking accepted! Chat is open.', chatId: chat._id.toString(), booking: { _id: booking._id, status: booking.status, startTime: booking.startTime, endTime: booking.endTime } });
   } catch (err) {
     return res.status(500).json({ success: false, message: 'Failed to accept booking.' });
+  }
+});
+
+// ── MEETUP RATING ─────────────────────────────────────────────────────────────
+// Additive. The published app never calls these, so nothing about its behaviour
+// changes. Lives on this router rather than /api/reviews because the subject is a
+// Surprise Activity, and because /api/reviews is bolted to the paid companion
+// Booking flow (see models/MeetupRating.js for why Review cannot hold these).
+
+/** Whether the caller may rate this meetup, and whether they already have. */
+router.get('/:bookingId/rating', authenticate, async (req, res) => {
+  try {
+    const MeetupRating = require('../models/MeetupRating');
+    const booking = await RandomBooking.findById(req.params.bookingId)
+      .select('initiatorId acceptorId status endTime').lean();
+    if (!booking) return res.status(404).json({ success: false, message: 'Activity not found.' });
+
+    const callerId    = req.userId.toString();
+    const isInitiator = booking.initiatorId?.toString() === callerId;
+    const isAcceptor  = booking.acceptorId?.toString()  === callerId;
+    if (!isInitiator && !isAcceptor) {
+      return res.status(403).json({ success: false, message: 'You were not part of this meetup.' });
+    }
+
+    const otherId  = isInitiator ? booking.acceptorId : booking.initiatorId;
+    const existing = await MeetupRating.findOne({ bookingId: booking._id, reviewerId: req.userId })
+      .select('rating reviewText submittedAt').lean();
+
+    const other = otherId
+      ? await User.findById(otherId).select('firstName profilePhoto').lean()
+      : null;
+
+    return res.json({
+      success:       true,
+      canRate:       booking.status === 'COMPLETED' && !existing && !!otherId,
+      alreadyRated:  !!existing,
+      rating:        existing?.rating ?? null,
+      reviewText:    existing?.reviewText ?? null,
+      otherUserId:   otherId ? otherId.toString() : null,
+      otherUserName: other?.firstName || null,
+      otherUserPhoto: other?.profilePhoto || null,
+    });
+  } catch (err) {
+    console.error('[/rating GET] error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to load rating.' });
+  }
+});
+
+/** Submit this caller's rating of the other participant. */
+router.post('/:bookingId/rating', authenticate, async (req, res) => {
+  try {
+    const MeetupRating = require('../models/MeetupRating');
+    const Review       = require('../models/Review');
+
+    const rating = Number(req.body?.rating);
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+      return res.status(400).json({ success: false, code: 'INVALID_RATING', message: 'Rating must be 1 to 5.' });
+    }
+    const raw = typeof req.body?.reviewText === 'string' ? req.body.reviewText.trim() : '';
+    const reviewText = raw ? raw.slice(0, 300) : null;
+
+    const booking = await RandomBooking.findById(req.params.bookingId)
+      .select('initiatorId acceptorId status').lean();
+    if (!booking) return res.status(404).json({ success: false, message: 'Activity not found.' });
+
+    // Only the two people who actually met, and only about each other.
+    const callerId    = req.userId.toString();
+    const isInitiator = booking.initiatorId?.toString() === callerId;
+    const isAcceptor  = booking.acceptorId?.toString()  === callerId;
+    if (!isInitiator && !isAcceptor) {
+      return res.status(403).json({ success: false, message: 'You were not part of this meetup.' });
+    }
+    if (!booking.acceptorId) {
+      return res.status(400).json({ success: false, message: 'This activity was never accepted.' });
+    }
+    // The reviewee is derived from the booking, never taken from the request body, so a
+    // caller cannot aim a rating at a stranger.
+    const revieweeId = isInitiator ? booking.acceptorId : booking.initiatorId;
+
+    if (booking.status !== 'COMPLETED') {
+      return res.status(400).json({
+        success: false,
+        code:    'NOT_COMPLETED',
+        message: 'You can share feedback once the meetup is over.',
+      });
+    }
+
+    let created;
+    try {
+      created = await MeetupRating.create({
+        bookingId:  booking._id,
+        reviewerId: req.userId,
+        revieweeId,
+        rating,
+        reviewText,
+        submittedAt: new Date(),
+      });
+    } catch (e) {
+      // The compound unique index is the duplicate guard — a double tap or a retried
+      // request races here rather than in a read-then-write check.
+      if (e && e.code === 11000) {
+        return res.status(409).json({
+          success: false,
+          code:    'ALREADY_RATED',
+          message: 'You have already shared feedback for this meetup.',
+        });
+      }
+      throw e;
+    }
+
+    // Recompute the aggregate server-side from the stored ratings. Never trust a
+    // client-supplied average. calculateRatingStats reads BOTH rating sources, so an
+    // admin hiding a companion Review later cannot wipe this contribution.
+    //
+    // Written directly rather than via user.updateRatingStats(), which routes/reviews.js
+    // calls but which is not defined on the User model — a pre-existing break in that
+    // flow, deliberately not touched here.
+    try {
+      const stats = await Review.calculateRatingStats(revieweeId);
+      await User.findByIdAndUpdate(revieweeId, { $set: { ratingStats: stats } });
+    } catch (statsErr) {
+      // The rating is stored; a failed aggregate must not fail the user's submission.
+      console.error('[/rating POST] stats update failed:', statsErr.message);
+    }
+
+    // ── Rating closes the chat down to a short grace window ───────────────────
+    // Feedback is the closing act of a meetup, so the conversation gets a couple of
+    // hours to wrap up rather than the remaining day.
+    //
+    // The `$gt: closeAt` guard makes this monotonically non-increasing, which gives
+    // two properties for free: it can only ever shorten the chat, never extend it past
+    // its 24h ceiling; and the FIRST rating fixes the window, so the countdown both
+    // participants see is stable and never jumps forward when the second one rates.
+    let chatClosesAt = null;
+    try {
+      const closeAt = new Date(Date.now() + CHAT_GRACE_AFTER_RATING_MS);
+      await RandomBookingChat.updateOne(
+        { bookingId: booking._id, expiresAt: { $gt: closeAt } },
+        { $set: { expiresAt: closeAt } }
+      );
+      const chat = await RandomBookingChat.findOne({ bookingId: booking._id })
+        .select('expiresAt').lean();
+      chatClosesAt = chat?.expiresAt ?? null;
+    } catch (chatErr) {
+      // The rating is stored either way; the chat simply keeps its original expiry.
+      console.error('[/rating POST] chat window update failed:', chatErr.message);
+    }
+
+    return res.status(201).json({
+      success: true,
+      message: 'Thanks for the feedback.',
+      ratingId: created._id,
+      // Lets the client show the countdown immediately instead of refetching.
+      chatExpiresAt: chatClosesAt,
+    });
+  } catch (err) {
+    console.error('[/rating POST] error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to save your feedback.' });
   }
 });
 
