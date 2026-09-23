@@ -406,6 +406,16 @@ const userSchema = new mongoose.Schema({
     averageRating:    { type: Number, default: 0, min: 0, max: 5 },
     totalRatings:     { type: Number, default: 0 },
     completedBookings:{ type: Number, default: 0 },
+    // The written feedback people have left for this user, newest first.
+    //
+    // An array rather than a single field because more than one person can rate
+    // the same user - a single string would be silently overwritten by whoever
+    // rated last. Capped so a user document cannot grow without bound.
+    //
+    // The source of truth is still meetupratings.reviewText / reviews.reviewText;
+    // this is a denormalised copy that Review.calculateRatingStats rebuilds on
+    // every rating, so it cannot drift out of step with the numbers beside it.
+    reviewTexts:      { type: [String], default: [] },
     starDistribution: {
       five:  { type: Number, default: 0 },
       four:  { type: Number, default: 0 },

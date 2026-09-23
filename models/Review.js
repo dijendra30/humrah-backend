@@ -183,12 +183,12 @@ reviewSchema.statics.calculateRatingStats = async function(userId) {
       revieweeId: userId,
       isHiddenByReviewee: false,
       isHiddenByAdmin: false
-    }).select('rating').lean(),
+    }).select('rating reviewText submittedAt').lean(),
 
     MeetupRating.find({
       revieweeId: userId,
       isHiddenByAdmin: false
-    }).select('rating').lean(),
+    }).select('rating reviewText submittedAt').lean(),
 
     // completedBookings was declared on the User schema but written by nothing, so it
     // has always read 0. Deriving it with a count rather than incrementing a counter
@@ -201,11 +201,23 @@ reviewSchema.statics.calculateRatingStats = async function(userId) {
 
   const ratings = [...bookingReviews, ...meetupRatings];
 
+  // Written feedback, newest first. Blank comments are skipped - most people rate
+  // without typing anything, and empty strings would just pad the array.
+  // MAX_REVIEW_TEXTS bounds the user document; the full history stays in the
+  // rating collections, which remain the source of truth.
+  const MAX_REVIEW_TEXTS = 20;
+  const reviewTexts = ratings
+    .filter(r => typeof r.reviewText === 'string' && r.reviewText.trim())
+    .sort((a, b) => new Date(b.submittedAt || 0) - new Date(a.submittedAt || 0))
+    .slice(0, MAX_REVIEW_TEXTS)
+    .map(r => r.reviewText.trim());
+
   if (ratings.length === 0) {
     return {
       averageRating: 0,
       totalRatings: 0,
       completedBookings,
+      reviewTexts: [],
       starDistribution: { five: 0, four: 0, three: 0, two: 0, one: 0 }
     };
   }
@@ -221,7 +233,13 @@ reviewSchema.statics.calculateRatingStats = async function(userId) {
   const totalRating = ratings.reduce((sum, r) => sum + r.rating, 0);
   const averageRating = Math.round((totalRating / ratings.length) * 10) / 10;
 
-  return { averageRating, totalRatings: ratings.length, completedBookings, starDistribution };
+  return {
+    averageRating,
+    totalRatings: ratings.length,
+    completedBookings,
+    reviewTexts,
+    starDistribution,
+  };
 };
 
 reviewSchema.statics.canSubmitReview = async function(bookingId, userId) {
