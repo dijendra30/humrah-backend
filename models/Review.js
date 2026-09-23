@@ -1,6 +1,20 @@
 // models/Review.js - Rating and Review Model
 const mongoose = require('mongoose');
 
+// Required here, not looked up lazily inside calculateRatingStats.
+//
+// That function now reads both rating sources, and it is called from
+// GET /api/reviews/stats/:userId — an endpoint the published app already hits.
+// mongoose.model('MeetupRating') only resolves once something has require()d the
+// file that registers the schema, and the only require of it sits inside the
+// /random-booking/:id/rating handlers. So on a freshly booted server, a stats
+// request arriving before anyone had rated a meetup threw MissingSchemaError.
+//
+// Requiring both at module load makes registration a boot-time guarantee instead
+// of a race. Neither file requires this one back, so there is no cycle.
+require('./MeetupRating');
+require('./RandomBooking');
+
 const reviewSchema = new mongoose.Schema({
   // Link to booking - ensures one review per booking
   bookingId: {
