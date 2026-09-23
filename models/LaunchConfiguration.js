@@ -4,7 +4,7 @@ const launchConfigurationSchema = new mongoose.Schema({
   mode: {
     type: String,
     enum: ['WHITELIST', 'BLACKLIST', 'ALL_INDIA'],
-    default: 'WHITELIST'
+    default: 'ALL_INDIA'
   },
   popupVersion: {
     type: Number,

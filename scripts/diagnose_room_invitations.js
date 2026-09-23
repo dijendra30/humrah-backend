@@ -113,7 +113,7 @@ const isBlockedPair = (a, b) => {
       const invited = await RoomMember.countDocuments({ roomId: r._id, status: 'INVITED' });
       const verdict = r.status === 'ACTIVE' || r.status === 'FULL'
         ? 'JOINED — pipeline worked'
-        : (r.status === 'CLOSED' ? 'EXPIRED — nobody joined in time' : '');
+        : (r.status === 'CLOSED' ? `EXPIRED — nobody joined in ${lifetimeHours}h` : '');
       line(`    ${String(r._id)}`,
         `${String(r.status).padEnd(9)} "${r.topic}"  age ${ageMin}m  joined=${joined} invited=${invited}  ${verdict}`);
     }
