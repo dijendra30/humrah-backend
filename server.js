@@ -628,6 +628,9 @@ const { initSessionSocket }       = require('./sockets/sessionSocket');
 initSessionSocket(io);
 const { initHumrahRoomSocket }    = require('./sockets/humrahRoomSocket');
 initHumrahRoomSocket(io);
+// Sports & Fitness (Phase 1A) — its own /sports namespace. Touches no other namespace.
+const { initSportsSocket }        = require('./sockets/sportsSocket');
+initSportsSocket(io);
 
 const authRoutes             = require('./routes/auth');
 const userRoutes             = require('./routes/users');
@@ -734,6 +737,7 @@ app.use('/api',                   authenticate, enforceLegalAcceptance, require(
 app.use('/api/official-events',   authenticate, enforceLegalAcceptance, require('./routes/officialEvents')); // ✅ Official Events Management System
 app.use('/api/event-requests',    authenticate, enforceLegalAcceptance, require('./routes/eventRequests')); // ✅ Event Requests System
 app.use('/api/rooms',             authenticate, enforceLegalAcceptance, require('./routes/roomRoutes')); // ✅ Humrah Rooms Phase 1B
+app.use('/api/sports-plans',      authenticate, enforceLegalAcceptance, require('./routes/sportsPlanRoutes')); // Sports & Fitness Phase 1A
 
 // ✅ NEW: Live location for matchmaking — POST /api/users/matchmaking-location
 //         Separate from safety live-location. Updates liveLocation on User doc.
