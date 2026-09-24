@@ -31,6 +31,10 @@ const SPORT_TYPES = Object.freeze([
   'table_tennis', 'running', 'cycling', 'gym', 'yoga',
 ]);
 const SKILL_LEVELS = Object.freeze(['beginner', 'intermediate', 'advanced', 'any']);
+// Phase 1B: the app no longer asks for a skill level. A request that omits it gets
+// 'any'; one that sends a value is still held to the allow-list, so existing
+// clients and existing documents behave exactly as before.
+const DEFAULT_SKILL_LEVEL = 'any';
 
 const SPORT_SET = new Set(SPORT_TYPES);
 const SKILL_SET = new Set(SKILL_LEVELS);
@@ -332,7 +336,9 @@ async function createPlan(user, body = {}) {
     return fail(400, 'INVALID_SPORT_TYPE', 'Custom sports are not supported yet.');
   }
 
-  const skillLevel = token(body.skillLevel);
+  const skillLevel = body.skillLevel == null || body.skillLevel === ''
+    ? DEFAULT_SKILL_LEVEL
+    : token(body.skillLevel);
   if (!SKILL_SET.has(skillLevel)) {
     return fail(400, 'INVALID_SKILL_LEVEL', 'Choose a supported skill level.', { allowed: SKILL_LEVELS });
   }
@@ -671,7 +677,7 @@ module.exports = {
   cancelPlan,
   // Exposed for tests and for the Phase 1A report.
   constants: Object.freeze({
-    SPORT_TYPES, SKILL_LEVELS,
+    SPORT_TYPES, SKILL_LEVELS, DEFAULT_SKILL_LEVEL,
     PLAYER_LIMIT_MIN, PLAYER_LIMIT_MAX, NOTE_MAX,
     MAX_LEAD_MS, MAX_DURATION_MS, CHAT_GRACE_MS,
     DEFAULT_RADIUS_KM, MAX_RADIUS_KM, DEFAULT_RESULTS, MAX_RESULTS,
