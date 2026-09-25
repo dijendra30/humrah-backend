@@ -44,12 +44,24 @@ const SKILL_SET = new Set(SKILL_LEVELS);
 const HOUR = 60 * 60 * 1000;
 const DAY  = 24 * HOUR;
 
-// TEMPORARY (Phase 1A). No product limit has been set yet — Phase 0 decision #1.
-// Gaming allows 2–6 and Movie 2–5; both are too small for 5-a-side football or
-// 5-on-5 basketball, the largest common pickup formats among the listed sports.
-// 10 covers those without inventing a large number. Total INCLUDES the creator.
+// Players per plan, INCLUDING the creator. At least 2 for every sport; the most is
+// one game of that sport. Checked on create only, so plans that already exist keep
+// the limit they were created with.
 const PLAYER_LIMIT_MIN = 2;
-const PLAYER_LIMIT_MAX = 10;
+const PLAYER_LIMIT_MAX_BY_SPORT = Object.freeze({
+  badminton:    4,    // doubles
+  football:     10,   // 5-a-side
+  cricket:      12,   // box cricket, 6 a side
+  basketball:   10,   // 5-on-5
+  tennis:       4,    // doubles
+  table_tennis: 4,    // doubles
+  running:      6,    // a small group run
+  cycling:      4,    // a small group ride
+  gym:          4,    // gym buddies
+  yoga:         6,    // a small group session
+});
+// The largest of the above.
+const PLAYER_LIMIT_MAX = Math.max(...Object.values(PLAYER_LIMIT_MAX_BY_SPORT));
 
 // Same as GamingSession.optionalMessage, the closest existing plan note.
 const NOTE_MAX = 120;
@@ -367,9 +379,11 @@ async function createPlan(user, body = {}) {
   }
 
   const playerLimit = toNumber(body.playerLimit);
-  if (!Number.isInteger(playerLimit) || playerLimit < PLAYER_LIMIT_MIN || playerLimit > PLAYER_LIMIT_MAX) {
+  const playerMax = PLAYER_LIMIT_MAX_BY_SPORT[sportType] || PLAYER_LIMIT_MAX;
+  if (!Number.isInteger(playerLimit) || playerLimit < PLAYER_LIMIT_MIN || playerLimit > playerMax) {
     return fail(400, 'INVALID_PLAYER_LIMIT',
-      `Player limit must be a whole number from ${PLAYER_LIMIT_MIN} to ${PLAYER_LIMIT_MAX}, including you.`);
+      `For ${sportType.replace(/_/g, ' ')}, choose ${PLAYER_LIMIT_MIN} to ${playerMax} players, including you.`,
+      { min: PLAYER_LIMIT_MIN, max: playerMax });
   }
 
   let note = null;
@@ -682,7 +696,7 @@ module.exports = {
   // Exposed for tests and for the Phase 1A report.
   constants: Object.freeze({
     SPORT_TYPES, SKILL_LEVELS, DEFAULT_SKILL_LEVEL,
-    PLAYER_LIMIT_MIN, PLAYER_LIMIT_MAX, NOTE_MAX,
+    PLAYER_LIMIT_MIN, PLAYER_LIMIT_MAX, PLAYER_LIMIT_MAX_BY_SPORT, NOTE_MAX,
     MAX_LEAD_MS, MAX_DURATION_MS, CHAT_GRACE_MS,
     DEFAULT_RADIUS_KM, MAX_RADIUS_KM, DEFAULT_RESULTS, MAX_RESULTS,
   }),
