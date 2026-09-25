@@ -20,6 +20,7 @@
 const mongoose   = require('mongoose');
 const SportsPlan = require('../models/SportsPlan');
 const User       = require('../models/User');
+const { resolveSportImageUrl } = require('../utils/sportsImageConfig');
 
 const { ObjectId } = mongoose.Types;
 
@@ -205,6 +206,9 @@ function formatPlan(plan, viewerId, { creator = null, participants = null, dista
   const out = {
     id:              String(plan._id),
     sportType:       plan.sportType,
+    // The sport's artwork, from utils/sportsImageConfig.js. Looked up here on every
+    // response — never stored on the plan, never taken from a request. null = none.
+    sportImageUrl:   resolveSportImageUrl(plan.sportType),
     customSportName: plan.customSportName || null,
     skillLevel:      plan.skillLevel,
     note:            plan.note || null,
