@@ -25,16 +25,16 @@
 
 // Keys must match SPORT_TYPES in services/sportsPlanService.js.
 const SPORT_IMAGES = Object.freeze({
-  badminton:    null,
-  football:     null,
-  cricket:      null,
-  basketball:   null,
-  tennis:       null,
-  table_tennis: null,
-  running:      null,
-  cycling:      null,
-  gym:          null,
-  yoga:         null,
+  badminton:    "https://pub-6b15ba7242804a5ba9ca9ed1115c2810.r2.dev/sport-topic/badminton.webp",
+  football:     "https://pub-6b15ba7242804a5ba9ca9ed1115c2810.r2.dev/sport-topic/Football.webp",
+  cricket:      "https://pub-6b15ba7242804a5ba9ca9ed1115c2810.r2.dev/sport-topic/circket.webp",
+  basketball:   "https://pub-6b15ba7242804a5ba9ca9ed1115c2810.r2.dev/sport-topic/basketball.webp",
+  tennis:       "https://pub-6b15ba7242804a5ba9ca9ed1115c2810.r2.dev/sport-topic/tennis.webp",
+  table_tennis: "https://pub-6b15ba7242804a5ba9ca9ed1115c2810.r2.dev/sport-topic/table_tennis.webp",
+  running:      "https://pub-6b15ba7242804a5ba9ca9ed1115c2810.r2.dev/sport-topic/running.webp",
+  cycling:      "https://pub-6b15ba7242804a5ba9ca9ed1115c2810.r2.dev/sport-topic/cycling.webp",
+  gym:          "https://pub-6b15ba7242804a5ba9ca9ed1115c2810.r2.dev/sport-topic/gym.webp",
+  yoga:         "https://pub-6b15ba7242804a5ba9ca9ed1115c2810.r2.dev/sport-topic/yoga.webp",
 });
 
 const MAX_URL_LENGTH = 2048;
