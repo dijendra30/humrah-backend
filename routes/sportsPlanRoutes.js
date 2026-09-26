@@ -14,6 +14,12 @@
 //   POST /api/sports-plans/:id/leave    leave     → socket plan_left
 //   POST /api/sports-plans/:id/cancel   cancel    → socket plan_cancelled
 //
+// Phase 2A — Sports Sessions (services/sportsSessionService.js):
+//   GET  /api/sports-plans/sessions             the caller's sessions (Messages → Sessions)
+//   GET  /api/sports-plans/sessions/:sessionId  one session, members only
+//   join / leave / cancel also emit session_participant_joined /
+//   session_participant_left / session_cancelled to the plan's members.
+//
 // Responses follow the { success, code, message } shape used by the Surprise
 // Activity and Movie Hangout routes.
 // -----------------------------------------------------------------------------
@@ -23,11 +29,15 @@ const express = require('express');
 const router  = express.Router();
 
 const svc = require('../services/sportsPlanService');
+const sessionSvc = require('../services/sportsSessionService');
 const {
   emitPlanJoined,
   emitPlanLeft,
   emitPlanCancelled,
   evictUserFromPlanRoom,
+  emitSessionParticipantJoined,
+  emitSessionParticipantLeft,
+  emitSessionCancelled,
 } = require('../sockets/sportsSocket');
 
 // Belt-and-braces. Authentication is applied where this router is mounted; this
@@ -67,6 +77,15 @@ router.get('/nearby', handle(async (req, res) => {
   send(res, await svc.getNearbyPlans(req.user, req.query));
 }));
 
+// ── SESSIONS (Phase 2A) — declared before /:id, like /nearby ───────────────────
+router.get('/sessions', handle(async (req, res) => {
+  send(res, await sessionSvc.listMySessions(req.user));
+}));
+
+router.get('/sessions/:sessionId', handle(async (req, res) => {
+  send(res, await sessionSvc.getSession(req.user, req.params.sessionId));
+}));
+
 // ── GET ────────────────────────────────────────────────────────────────────────
 router.get('/:id', handle(async (req, res) => {
   send(res, await svc.getPlan(req.user, req.params.id));
@@ -75,7 +94,11 @@ router.get('/:id', handle(async (req, res) => {
 // ── JOIN ───────────────────────────────────────────────────────────────────────
 router.post('/:id/join', handle(async (req, res) => {
   const result = await svc.joinPlan(req.user, req.params.id);
-  if (result.success) emitPlanJoined(req.app.get('io'), result.plan, req.user);
+  if (result.success) {
+    const io = req.app.get('io');
+    emitPlanJoined(io, result.plan, req.user);
+    emitSessionParticipantJoined(io, result.session, result.plan, req.user);
+  }
   send(res, result);
 }));
 
@@ -85,6 +108,7 @@ router.post('/:id/leave', handle(async (req, res) => {
   if (result.success) {
     const io = req.app.get('io');
     emitPlanLeft(io, result.plan, req.user);
+    emitSessionParticipantLeft(io, result.session, result.plan, req.user);
     // A former participant stops receiving the plan's events straight away.
     evictUserFromPlanRoom(io, result.plan.id, req.user._id);
   }
@@ -94,7 +118,11 @@ router.post('/:id/leave', handle(async (req, res) => {
 // ── CANCEL ─────────────────────────────────────────────────────────────────────
 router.post('/:id/cancel', handle(async (req, res) => {
   const result = await svc.cancelPlan(req.user, req.params.id);
-  if (result.success) emitPlanCancelled(req.app.get('io'), result.plan);
+  if (result.success) {
+    const io = req.app.get('io');
+    emitPlanCancelled(io, result.plan);
+    emitSessionCancelled(io, result.session, result.plan);
+  }
   send(res, result);
 }));
 
