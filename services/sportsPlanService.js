@@ -21,6 +21,8 @@ const mongoose   = require('mongoose');
 const SportsPlan = require('../models/SportsPlan');
 const User       = require('../models/User');
 const { resolveSportImageUrl } = require('../utils/sportsImageConfig');
+// Phase 2A: every plan change is followed by its session (services/sportsSessionService.js).
+const sessions   = require('./sportsSessionService');
 
 const { ObjectId } = mongoose.Types;
 
@@ -259,13 +261,34 @@ function formatPlan(plan, viewerId, { creator = null, participants = null, dista
   return out;
 }
 
-async function formatWithPeople(plan, viewerId) {
+/**
+ * @param viewer the caller's user document (or, from older call sites, their id).
+ *   With the document, a member is not shown anyone they have blocked or who has
+ *   blocked them in the participant list (Phase 2A); the player count is unchanged.
+ */
+async function formatWithPeople(plan, viewer) {
+  const viewerId = viewer && viewer._id ? viewer._id : viewer;
   const viewerIsMember = includesId(plan.playersJoined, viewerId);
   const ids = viewerIsMember ? plan.playersJoined : [plan.creatorId];
-  const people = await loadUsers(ids);
+  let people = await loadUsers(ids);
   const creator = people.find(p => String(p._id) === String(plan.creatorId)) || null;
+  if (viewerIsMember && viewer && viewer._id) {
+    const hidden = new Set((await blockedCounterparts(viewer)).map(String));
+    if (hidden.size) people = people.filter(p => !hidden.has(String(p._id)));
+  }
   return formatPlan(plan, viewerId, { creator, participants: viewerIsMember ? people : null });
 }
+
+/** Adds the session id to a plan shown to one of its members (Phase 2A). */
+function withSession(formatted, session) {
+  if (session && formatted && formatted.viewer && formatted.viewer.isParticipant) {
+    formatted.sessionId = String(session._id || session);
+  }
+  return formatted;
+}
+
+/** The session fields a route needs for its socket events. */
+const sessionRef = session => (session ? { id: String(session._id), status: session.status } : null);
 
 // ── Validation ─────────────────────────────────────────────────────────────────
 function validateVenue(input) {
@@ -438,10 +461,13 @@ async function createPlan(user, body = {}) {
   });
 
   const out = plan.toObject();
+  // Phase 2A: the plan's session, with the host as its first member.
+  const session = await sessions.onPlanCreated(out);
   return {
     success: true,
     status:  201,
-    plan:    formatPlan(out, user._id, { creator: user, participants: [user] }),
+    plan:    withSession(formatPlan(out, user._id, { creator: user, participants: [user] }), session),
+    session: sessionRef(session),
   };
 }
 
@@ -456,9 +482,13 @@ async function getPlan(user, planId) {
   // revealed.
   if (await isBlockedPair(user, plan.creatorId)) return notFound();
 
-  const formatted = await formatWithPeople(plan, user._id);
+  const formatted = await formatWithPeople(plan, user);
   // A plan whose creator's account no longer exists is treated as gone.
   if (!formatted.creator) return notFound();
+  if (formatted.viewer.isParticipant) {
+    // Members get the session id; a plan from before Phase 2A gets its session here.
+    withSession(formatted, await sessions.sessionIdForMember(plan));
+  }
 
   return { success: true, status: 200, plan: formatted };
 }
@@ -588,11 +618,13 @@ async function joinPlan(user, planId) {
   ).lean();
 
   if (updated) {
+    const session = await sessions.onPlayerJoined(updated, uid);
     return {
       success: true,
       status:  200,
       joined:  true,
-      plan:    await formatWithPeople(updated, uid),
+      plan:    withSession(await formatWithPeople(updated, user), session),
+      session: sessionRef(session),
     };
   }
 
@@ -640,7 +672,8 @@ async function leavePlan(user, planId) {
   ).lean();
 
   if (updated) {
-    return { success: true, status: 200, left: true, plan: await formatWithPeople(updated, uid) };
+    const session = await sessions.onPlayerLeft(updated, uid);
+    return { success: true, status: 200, left: true, plan: await formatWithPeople(updated, user), session: sessionRef(session) };
   }
 
   const plan = await SportsPlan.findById(pid).lean();
@@ -672,7 +705,14 @@ async function cancelPlan(user, planId) {
   ).lean();
 
   if (updated) {
-    return { success: true, status: 200, cancelled: true, plan: await formatWithPeople(updated, uid) };
+    const session = await sessions.onPlanCancelled(updated);
+    return {
+      success:   true,
+      status:    200,
+      cancelled: true,
+      plan:      withSession(await formatWithPeople(updated, user), session),
+      session:   sessionRef(session),
+    };
   }
 
   const plan = await SportsPlan.findById(pid).lean();
@@ -693,6 +733,8 @@ module.exports = {
   joinPlan,
   leavePlan,
   cancelPlan,
+  // For services/sportsSessionService.js, which shows plans the same way.
+  _internal: { formatPlan, formatWithPeople, isBlockedPair, blockedCounterparts },
   // Exposed for tests and for the Phase 1A report.
   constants: Object.freeze({
     SPORT_TYPES, SKILL_LEVELS, DEFAULT_SKILL_LEVEL,
