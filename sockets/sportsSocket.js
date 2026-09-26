@@ -206,6 +206,51 @@ function emitPlanUpdated(io, plan) {
   io.of(NAMESPACE).to(planRoom(plan.id)).emit('plan_updated', snapshot(plan));
 }
 
+// ── Session events (Phase 2A) ──────────────────────────────────────────────────
+//
+// A session's members are exactly its plan's members, so session events go to the
+// same members-only plan room — the same database check guards both. Like the
+// plan events they carry counts and the actor's first name, never the member
+// list; a client that needs more re-reads GET /sessions/:sessionId. After a
+// reconnect a client should re-read rather than trust what it may have missed.
+
+function sessionSnapshot(session, plan) {
+  return {
+    sessionId:   session.id,
+    planId:      plan.id,
+    status:      session.status,
+    memberCount: plan.playerCount,
+    playerLimit: plan.playerLimit,
+    at:          new Date().toISOString(),
+  };
+}
+
+function emitSessionParticipantJoined(io, session, plan, actor) {
+  if (!io || !session || !plan) return;
+  io.of(NAMESPACE).to(planRoom(plan.id)).emit('session_participant_joined', {
+    ...sessionSnapshot(session, plan),
+    userId:    String(actor._id),
+    firstName: actor.firstName || 'Someone',
+  });
+}
+
+function emitSessionParticipantLeft(io, session, plan, actor) {
+  if (!io || !session || !plan) return;
+  io.of(NAMESPACE).to(planRoom(plan.id)).emit('session_participant_left', {
+    ...sessionSnapshot(session, plan),
+    userId:    String(actor._id),
+    firstName: actor.firstName || 'Someone',
+  });
+}
+
+function emitSessionCancelled(io, session, plan) {
+  if (!io || !session || !plan) return;
+  io.of(NAMESPACE).to(planRoom(plan.id)).emit('session_cancelled', {
+    ...sessionSnapshot(session, plan),
+    status: 'cancelled',
+  });
+}
+
 /**
  * Takes every socket this user has open out of the plan room. Called after a user
  * leaves, so a former participant stops receiving that plan's events immediately
@@ -224,4 +269,7 @@ module.exports = {
   emitPlanCancelled,
   emitPlanUpdated,
   evictUserFromPlanRoom,
+  emitSessionParticipantJoined,
+  emitSessionParticipantLeft,
+  emitSessionCancelled,
 };
