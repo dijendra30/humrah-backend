@@ -132,6 +132,8 @@ sportsPlanSchema.index({ cardStatus: 1, startTime: 1 });
 sportsPlanSchema.index({ chatStatus: 1, chatExpiresAt: 1 });
 // "Does this creator already have an active plan?" on create.
 sportsPlanSchema.index({ creatorId: 1, createdAt: -1 });
+// Phase 2A: "my sessions" — the plans a user is in, soonest first.
+sportsPlanSchema.index({ playersJoined: 1, startTime: 1 });
 // NO TTL INDEX. Documents are kept; visibility is controlled by the status fields.
 
 module.exports = mongoose.model('SportsPlan', sportsPlanSchema);
