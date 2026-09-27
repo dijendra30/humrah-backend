@@ -34,6 +34,20 @@
 // eviction and on disconnect. Chat events are sent per socket, skipping anyone
 // in a block pair with the person they are about (a snapshot taken when that
 // socket joined the room).
+//
+// Chat enhancement — still server → members only, still after REST saved it:
+//   sports_message_updated       { sessionId, messageId, text, editedAt }
+//   sports_message_deleted       { sessionId, messageId, deletionType, deletedAt }
+//                                — never the old text, never who deleted it
+//   sports_poll_updated          { sessionId, poll } — counts, and each reader's
+//                                own answer; never who voted what
+//   session_participant_removed  the host removed someone (room)
+//   sports_member_removed        to the removed person's OWN sockets, just
+//                                before they are taken out of the room
+//   sports_message_hidden        "delete for me", to the person's own sockets only
+// A new reply's quote is adjusted per reader: a quote of someone the reader is
+// in a block pair with is sent as unavailable, and one the reader hid for
+// themselves as hidden — the same as a history read would show them.
 // -----------------------------------------------------------------------------
 'use strict';
 
@@ -46,6 +60,7 @@ const mongoose = require('mongoose');
 const User          = require('../models/User');
 const SportsPlan    = require('../models/SportsPlan');
 const SportsSession = require('../models/SportsSession');
+const SportsHiddenMessage = require('../models/SportsHiddenMessage');
 
 // Required lazily: these services emit through this module.
 const planService = () => require('../services/sportsPlanService');
@@ -134,14 +149,15 @@ async function authenticateSocket(socket, next) {
 /**
  * Sends [event] to every socket in the plan room except those whose user is in a
  * block pair with [aboutUserId] (and, with skipUser, that user's own sockets).
+ * [payload] may be a function of the socket, for what differs per reader.
  */
-async function sendToRoom(planId, event, payload, aboutUserId, { skipUser = null } = {}) {
+async function sendToRoom(planId, event, payload, aboutUserId, { skipUser = null, sockets = null } = {}) {
   if (!ioRef) return;
-  const sockets = await ioRef.of(NAMESPACE).in(planRoom(String(planId))).fetchSockets();
-  for (const s of sockets) {
+  const targets = sockets || await ioRef.of(NAMESPACE).in(planRoom(String(planId))).fetchSockets();
+  for (const s of targets) {
     if (skipUser && String(s.data.userId) === String(skipUser)) continue;
     if (aboutUserId && s.data.blocked && s.data.blocked.has(String(aboutUserId))) continue;
-    s.emit(event, payload);
+    s.emit(event, typeof payload === 'function' ? payload(s) : payload);
   }
 }
 
@@ -397,12 +413,85 @@ function evictUserFromPlanRoom(io, planId, userId) {
  * A message REST has already saved, to the plan's members (including the sender's
  * other devices; clients de-duplicate by id). Sending also ends the sender's
  * typing indicator. [aboutUserId]: the sender, or who a system message is about.
+ * A reply's quote is adjusted per reader (see the header).
  */
 function emitSportsMessage(planId, message, aboutUserId) {
   if (!ioRef || !planId || !message) return;
   if (message.type === 'TEXT' && aboutUserId) stopUserTyping(planId, aboutUserId);
-  sendToRoom(planId, 'sports_message_created', { planId: String(planId), message }, aboutUserId)
-    .catch(err => console.error('[SPORTS_SOCKET] message broadcast failed:', err.message));
+  const base = { planId: String(planId), message };
+  const quote = message.replyTo && message.replyTo.text != null ? message.replyTo : null;
+  (async () => {
+    if (!quote) return sendToRoom(planId, 'sports_message_created', base, aboutUserId);
+    const sockets = await ioRef.of(NAMESPACE).in(planRoom(String(planId))).fetchSockets();
+    const readers = [...new Set(sockets.map(s => String(s.data.userId)))];
+    const hid = new Set((await SportsHiddenMessage.find({ messageId: quote.messageId, userId: { $in: readers } })
+      .select('userId').lean()).map(r => String(r.userId)));
+    const withQuote = extra => ({ ...base, message: { ...message, replyTo: { ...quote, text: null, ...extra } } });
+    return sendToRoom(planId, 'sports_message_created', s => {
+      if (s.data.blocked && s.data.blocked.has(String(quote.senderId))) {
+        return withQuote({ senderId: null, senderFirstName: null, unavailable: true });
+      }
+      if (hid.has(String(s.data.userId))) return withQuote({ hiddenForYou: true });
+      return base;
+    }, aboutUserId, { sockets });
+  })().catch(err => console.error('[SPORTS_SOCKET] message broadcast failed:', err.message));
+}
+
+/** An edit: the new text and when. The author's own other devices get it too. */
+function emitSportsMessageUpdated(planId, payload, authorId) {
+  if (!ioRef || !planId || !payload) return;
+  sendToRoom(planId, 'sports_message_updated', { planId: String(planId), ...payload }, authorId)
+    .catch(err => console.error('[SPORTS_SOCKET] edit broadcast failed:', err.message));
+}
+
+/** A delete for everyone: which message and how — never its text or who did it. */
+function emitSportsMessageDeleted(planId, payload) {
+  if (!ioRef || !planId || !payload) return;
+  sendToRoom(planId, 'sports_message_deleted', { planId: String(planId), ...payload }, null)
+    .catch(err => console.error('[SPORTS_SOCKET] delete broadcast failed:', err.message));
+}
+
+/**
+ * The attendance check's counts. [pollFor](userId) formats it for one reader, so
+ * each gets their own answer and nobody learns anyone else's.
+ */
+function emitSportsPoll(planId, sessionId, pollFor) {
+  if (!ioRef || !planId || typeof pollFor !== 'function') return;
+  sendToRoom(planId, 'sports_poll_updated', s => ({
+    planId:    String(planId),
+    sessionId: String(sessionId),
+    poll:      pollFor(String(s.data.userId)),
+  }), null).catch(err => console.error('[SPORTS_SOCKET] poll broadcast failed:', err.message));
+}
+
+/** To one user's own sockets on this namespace only (e.g. "delete for me"). */
+function emitToUser(userId, event, payload) {
+  if (!ioRef || !userId) return;
+  ioRef.of(NAMESPACE).to(userRoom(String(userId))).emit(event, payload);
+}
+
+/**
+ * The host removed [userId]: their own open screens are told first (so the chat
+ * can say so and close the composer), then every socket they have leaves the
+ * room — before the "was removed" message is posted, which they never receive.
+ */
+function removeUserFromChat(planId, sessionId, userId) {
+  if (!ioRef || !planId || !userId) return;
+  emitToUser(userId, 'sports_member_removed', {
+    planId:    String(planId),
+    sessionId: String(sessionId),
+    userId:    String(userId),
+  });
+  evictUserFromPlanRoom(ioRef, planId, userId);
+}
+
+/** To the members who remain: someone was removed (a cue to re-read, like a leave). */
+function emitSessionParticipantRemoved(io, session, plan, userId) {
+  if (!io || !session || !plan) return;
+  io.of(NAMESPACE).to(planRoom(plan.id)).emit('session_participant_removed', {
+    ...sessionSnapshot(session, plan),
+    userId: String(userId),
+  });
 }
 
 /** A message's reaction counts; clients work out their own "reacted" from userIds. */
@@ -425,6 +514,12 @@ module.exports = {
   emitSessionCancelled,
   emitSportsMessage,
   emitSportsReaction,
+  emitSportsMessageUpdated,
+  emitSportsMessageDeleted,
+  emitSportsPoll,
+  emitToUser,
+  removeUserFromChat,
+  emitSessionParticipantRemoved,
   // For tests.
   _internal: { typingBySocket, TYPING_TTL_MS },
 };
