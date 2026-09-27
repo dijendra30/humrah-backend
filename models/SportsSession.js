@@ -28,17 +28,22 @@
 //   lastMessage       a small preview of the newest message of any kind, for
 //                     Messages → Sessions without reading the messages collection.
 //                     No names or photos: ids only, resolved when read.
+//                     Chat enhancement: messageId (so an edit or a delete of the
+//                     newest message can update it) and deletionType (the preview
+//                     of a deleted message says so, and never keeps its text).
 // -----------------------------------------------------------------------------
 'use strict';
 
 const mongoose = require('mongoose');
 
 const lastMessageSchema = new mongoose.Schema({
+  messageId:     { type: mongoose.Schema.Types.ObjectId, ref: 'SportsMessage', default: null },
   messageType:   { type: String, enum: ['TEXT', 'SYSTEM'], required: true },
   text:          { type: String, default: null },        // TEXT only, ≤ 140 chars
   senderId:      { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   systemEvent:   { type: String, default: null },
   subjectUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  deletionType:  { type: String, default: null },        // 'USER' | 'HOST' once deleted
   createdAt:     { type: Date, required: true },
 }, { _id: false });
 
