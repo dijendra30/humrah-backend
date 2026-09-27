@@ -57,6 +57,23 @@ cron.schedule('* * * * *', async () => {
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
+// EVERY MINUTE — Sports attendance check
+//
+// An hour before a Sports game the group chat asks "Are you still coming?"; at the
+// start time the poll closes and the result is posted. One indexed query per step
+// per tick; all state is in Mongo and every step is a conditional update, so it
+// survives a restart and is safe to run twice or on several instances at once.
+// ══════════════════════════════════════════════════════════════════════════════
+cron.schedule('* * * * *', async () => {
+  try {
+    const { tickSportsAttendance } = require('./services/sportsAttendanceService');
+    await tickSportsAttendance();
+  } catch (err) {
+    console.error('[CRON] Sports attendance tick error:', err.message);
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
 // EVERY 5 MINUTES — Official Events: auto-publish Scheduled, auto-expire old
 // ══════════════════════════════════════════════════════════════════════════════
 cron.schedule('*/5 * * * *', async () => {
