@@ -20,6 +20,14 @@
 //   join / leave / cancel also emit session_participant_joined /
 //   session_participant_left / session_cancelled to the plan's members.
 //
+// Phase 3 — Sports group chat (services/sportsChatService.js), members only:
+//   GET    /api/sports-plans/sessions/:sessionId/messages?before=&limit=   history, newest first
+//   POST   /api/sports-plans/sessions/:sessionId/messages                  send → sports_message_created
+//   POST   /api/sports-plans/sessions/:sessionId/read                      mark read (not activity)
+//   POST   /api/sports-plans/sessions/:sessionId/messages/:messageId/reaction   { emoji }
+//   DELETE /api/sports-plans/sessions/:sessionId/messages/:messageId/reaction
+//   The sender is always req.user; nothing in a body names a user.
+//
 // Responses follow the { success, code, message } shape used by the Surprise
 // Activity and Movie Hangout routes.
 // -----------------------------------------------------------------------------
@@ -30,6 +38,8 @@ const router  = express.Router();
 
 const svc = require('../services/sportsPlanService');
 const sessionSvc = require('../services/sportsSessionService');
+const chatSvc = require('../services/sportsChatService');
+const redisService = require('../services/redisService');
 const {
   emitPlanJoined,
   emitPlanLeft,
@@ -84,6 +94,46 @@ router.get('/sessions', handle(async (req, res) => {
 
 router.get('/sessions/:sessionId', handle(async (req, res) => {
   send(res, await sessionSvc.getSession(req.user, req.params.sessionId));
+}));
+
+// ── CHAT (Phase 3) ─────────────────────────────────────────────────────────────
+
+/**
+ * A per-user fixed window, the way Humrah Rooms limits its actions. Fails open if
+ * the counter store errors, so an outage never blocks the chat.
+ */
+function perUserLimit(action, max, windowSeconds, message) {
+  return async (req, res, next) => {
+    try {
+      const count = await redisService.incrementWithWindow(`ratelimit:sports:${action}:${req.user._id}`, windowSeconds);
+      if (count > max) return res.status(429).json({ success: false, code: 'RATE_LIMITED', message });
+    } catch (err) {
+      console.error(`[sports-plans] ${action} rate limit failed open:`, err.message);
+    }
+    return next();
+  };
+}
+const messageLimiter  = perUserLimit('message', 30, 60, 'You are sending messages too fast. Please slow down.');
+const reactionLimiter = perUserLimit('reaction', 60, 60, 'Too many reactions at once. Please slow down.');
+
+router.get('/sessions/:sessionId/messages', handle(async (req, res) => {
+  send(res, await chatSvc.listMessages(req.user, req.params.sessionId, req.query));
+}));
+
+router.post('/sessions/:sessionId/messages', messageLimiter, handle(async (req, res) => {
+  send(res, await chatSvc.sendMessage(req.user, req.params.sessionId, req.body || {}));
+}));
+
+router.post('/sessions/:sessionId/read', handle(async (req, res) => {
+  send(res, await chatSvc.markRead(req.user, req.params.sessionId));
+}));
+
+router.post('/sessions/:sessionId/messages/:messageId/reaction', reactionLimiter, handle(async (req, res) => {
+  send(res, await chatSvc.setReaction(req.user, req.params.sessionId, req.params.messageId, req.body && req.body.emoji));
+}));
+
+router.delete('/sessions/:sessionId/messages/:messageId/reaction', reactionLimiter, handle(async (req, res) => {
+  send(res, await chatSvc.setReaction(req.user, req.params.sessionId, req.params.messageId, null, { remove: true }));
 }));
 
 // ── GET ────────────────────────────────────────────────────────────────────────
