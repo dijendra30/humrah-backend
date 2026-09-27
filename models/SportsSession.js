@@ -16,18 +16,40 @@
 //
 // No TTL and never deleted: a session is the plan's history, and Phase 3 will
 // keep its messages.
+//
+// Phase 3 — group chat (services/sportsChatService.js):
+//   status 'expired'  the chat has had no qualifying activity for 7 days (counted
+//                     from its last activity, and never before the game has ended).
+//                     Derived on every read and send; this field records it once
+//                     seen, with expiredAt = the moment it expired, not when noticed.
+//   lastMessageAt     the last QUALIFYING activity: a member's message or a join.
+//                     Only ever moved forward ($max). Reading, typing, reactions,
+//                     leaves and cancellation never touch it.
+//   lastMessage       a small preview of the newest message of any kind, for
+//                     Messages → Sessions without reading the messages collection.
+//                     No names or photos: ids only, resolved when read.
 // -----------------------------------------------------------------------------
 'use strict';
 
 const mongoose = require('mongoose');
 
+const lastMessageSchema = new mongoose.Schema({
+  messageType:   { type: String, enum: ['TEXT', 'SYSTEM'], required: true },
+  text:          { type: String, default: null },        // TEXT only, ≤ 140 chars
+  senderId:      { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  systemEvent:   { type: String, default: null },
+  subjectUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  createdAt:     { type: Date, required: true },
+}, { _id: false });
+
 const sportsSessionSchema = new mongoose.Schema({
   sportsPlanId: { type: mongoose.Schema.Types.ObjectId, ref: 'SportsPlan', required: true },
   creatorId:    { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  status:       { type: String, enum: ['active', 'cancelled'], default: 'active' },
+  status:       { type: String, enum: ['active', 'cancelled', 'expired'], default: 'active' },
   cancelledAt:  { type: Date, default: null },
-  // Phase 3 (group chat) sets this from a persisted message. Null until then.
+  expiredAt:    { type: Date, default: null },
   lastMessageAt: { type: Date, default: null },
+  lastMessage:   { type: lastMessageSchema, default: null },
 }, { timestamps: true });
 
 // One session per plan. Also what makes creation idempotent: a retried or racing

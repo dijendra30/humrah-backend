@@ -27,8 +27,12 @@ const sportsSessionMemberSchema = new mongoose.Schema({
   joinedAt:     { type: Date, default: Date.now },
   leftAt:       { type: Date, default: null },
   // Phase 3: set when the member reads the session's chat (server-authoritative,
-  // like RoomMember.lastReadAt). Null = never read.
+  // like RoomMember.lastReadAt). Null = never read. Only ever moves forward.
   lastReadAt:   { type: Date, default: null },
+  // Phase 3: how many times this person has become JOINED. Part of the key that
+  // makes "X joined the session" appear once per join — a retried join adds
+  // nothing, a genuine re-join after leaving adds a new one.
+  joinCount:    { type: Number, default: 0 },
 }, { timestamps: true });
 
 // One row per person per session; upserts on this pair keep joins idempotent.
