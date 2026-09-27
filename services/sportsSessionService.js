@@ -2,7 +2,7 @@
 // -----------------------------------------------------------------------------
 // Sports & Fitness — Phase 2A. Sports Sessions: every Sports plan becomes one
 // session whose members are the plan's players. Messages → Sessions lists them;
-// Phase 3's group chat will belong to them.
+// Phase 3's group chat belongs to them (services/sportsChatService.js).
 //
 // SOURCE OF TRUTH. The plan stays authoritative for who is in it
 // (SportsPlan.playersJoined, changed only by Phase 1A's single-document atomic
@@ -21,6 +21,13 @@
 // A failure in step 2 is logged as [SPORTS_SESSION_SYNC_FAILED] and does not fail
 // the user's join or leave, which already happened; step 3 heals it.
 //
+// PHASE 3. The hooks also write the chat's system messages — "<name> joined the
+// session", "<name> left the session", "Sports session cancelled by the host" —
+// once per REAL change: a join is announced only when this call is the one that
+// made the member JOINED, so a retried request adds nothing. A join also sends
+// the join notification. Messages → Sessions now lists chats, which outlive the
+// plan (see the chat service's expiry rule), with unread counts and a preview.
+//
 // PHASE 4 (notifications) hooks in at onPlanCreated / onPlayerJoined /
 // onPlayerLeft / onPlanCancelled: each is called exactly once per real change.
 // -----------------------------------------------------------------------------
@@ -33,14 +40,20 @@ const SportsSessionMember = require('../models/SportsSessionMember');
 
 const { ObjectId } = mongoose.Types;
 
-// Required lazily: the plan service calls into this one for every change.
+// Required lazily: these modules call into this one for every change.
 const planService = () => require('./sportsPlanService');
+const chat        = () => require('./sportsChatService');
 
-// A session stays in Messages → Sessions while its chat window is open
-// (the plan's chatExpiresAt, end + 3 h) and for 30 minutes after it closes or
-// the plan is cancelled — the rule Movie and Gaming sessions already follow.
-const LIST_GRACE_MS = 30 * 60 * 1000;
-const MAX_SESSIONS  = 50;
+const DAY_MS = 24 * 60 * 60 * 1000;
+// A closed chat (expired or cancelled) stays in Messages → Sessions this long,
+// marked as such, then drops off the list. Its history is kept either way.
+const LIST_AFTER_CLOSE_MS = 7 * DAY_MS;
+// Plans whose chat can be open, or recently closed, without any activity: the
+// game's end + 7 days of chat + 7 days on the list, plus the longest plan (12 h).
+const RECENT_PLAN_MS = 15 * DAY_MS;
+const MAX_RECENT_PLANS = 100;
+const MAX_MEMBER_ROWS  = 200;
+const MAX_SESSIONS     = 50;
 
 const fail = (status, code, message, extra = {}) => ({ success: false, status, code, message, ...extra });
 const notFound = () => fail(404, 'SESSION_NOT_FOUND', 'This session does not exist or is no longer available.');
@@ -56,6 +69,8 @@ const isDuplicateKey = err => !!err && (
 /**
  * upcoming → live → ended, from the plan's own times; or cancelled. Never stored,
  * so nothing has to flip it on the hour — the same way Phase 1A derives 'expired'.
+ * This is the GAME; the chat's own state (active / expired / cancelled) is
+ * separate — a game can be over while its chat is very much alive.
  */
 function sessionPhase(plan, session, now = Date.now()) {
   if ((session && session.status === 'cancelled') || plan.cardStatus === 'cancelled') return 'cancelled';
@@ -94,20 +109,30 @@ async function ensureSession(plan) {
   }
 }
 
-/** Makes [userId] a JOINED member — first join or rejoin. Idempotent. */
+/**
+ * Makes [userId] a JOINED member — first join or rejoin. Idempotent.
+ *
+ * @returns the member when THIS call made them JOINED (with joinCount counting
+ *   that join), or null when they already were — which is how a retried join is
+ *   told apart from a real one without a transaction: the conditional update
+ *   matches only a member who is not JOINED, and an upsert that collides with an
+ *   existing JOINED row fails on the unique (sessionId, userId) index.
+ */
 async function markJoined(session, plan, userId, now = new Date()) {
   const role = same(userId, plan.creatorId) ? 'HOST' : 'PARTICIPANT';
   try {
-    await SportsSessionMember.updateOne(
-      { sessionId: session._id, userId },
+    return await SportsSessionMember.findOneAndUpdate(
+      { sessionId: session._id, userId, status: { $ne: 'JOINED' } },
       {
-        $set:         { status: 'JOINED', role, leftAt: null },
-        $setOnInsert: { sportsPlanId: plan._id, joinedAt: now },
+        $set:         { status: 'JOINED', role, leftAt: null, joinedAt: now },
+        $setOnInsert: { sportsPlanId: plan._id },
+        $inc:         { joinCount: 1 },
       },
-      { upsert: true },
-    );
+      { upsert: true, new: true },
+    ).lean();
   } catch (err) {
-    if (!isDuplicateKey(err)) throw err;   // a concurrent upsert inserted the row
+    if (isDuplicateKey(err)) return null;   // they are already JOINED
+    throw err;
   }
 }
 
@@ -159,18 +184,30 @@ async function reconcile(plan, session, now = new Date()) {
     }
   }
   if (plan.cardStatus === 'cancelled' && session.status !== 'cancelled') {
-    await SportsSession.updateOne(
-      { _id: session._id, status: 'active' },
-      { $set: { status: 'cancelled', cancelledAt: plan.cancelledAt || now } },
-    );
-    session.status = 'cancelled';
-    session.cancelledAt = plan.cancelledAt || now;
+    await markCancelled(session, plan, plan.cancelledAt || now);
     repairs += 1;
   }
   if (repairs > 0) {
     console.warn(`[SPORTS_SESSION_RECONCILED] session=${session._id} plan=${plan._id} repairs=${repairs}`);
   }
   return repairs;
+}
+
+/**
+ * active (or expired) → cancelled, once, and the chat says so. The announcement's
+ * fixed key makes it appear once however many paths get here (the cancel hook,
+ * a repair on read).
+ */
+async function markCancelled(session, plan, cancelledAt) {
+  const res = await SportsSession.updateOne(
+    { _id: session._id, status: { $ne: 'cancelled' } },
+    { $set: { status: 'cancelled', cancelledAt } },
+  );
+  session.status = 'cancelled';
+  session.cancelledAt = session.cancelledAt || cancelledAt;
+  if (res.modifiedCount === 1) {
+    await chat().announce(session, plan, 'SESSION_CANCELLED', plan.creatorId, 'SESSION_CANCELLED');
+  }
 }
 
 /**
@@ -190,7 +227,10 @@ async function followPlan(label, plan, fn) {
 // The four moments a session changes. Each is called once, after the plan's own
 // atomic update succeeded. Phase 4 notifications belong here.
 
-/** A plan was created: its session, with the host as the first member. */
+/**
+ * A plan was created: its session, with the host as the first member. No chat
+ * message — the app shows "Waiting for others to join…" from the session itself.
+ */
 function onPlanCreated(plan) {
   return followPlan('create', plan, async () => {
     const session = await ensureSession(plan);
@@ -199,33 +239,42 @@ function onPlanCreated(plan) {
   });
 }
 
+/** A player joined: member row, "<name> joined the session", and the notification. */
 function onPlayerJoined(plan, userId) {
   return followPlan('join', plan, async () => {
     const session = await ensureSession(plan);
-    await markJoined(session, plan, userId);
+    const joined = await markJoined(session, plan, userId);
+    if (joined) {
+      await chat().announce(session, plan, 'MEMBER_JOINED', userId, `MEMBER_JOINED:${userId}:${joined.joinCount}`);
+      // Fire-and-forget: a push can never slow down or fail the join.
+      chat().notifyMemberJoined(plan, session, userId).catch(() => {});
+    }
     return session;
   });
 }
 
+/** A player left: the member row becomes LEFT and the chat says so (once). */
 function onPlayerLeft(plan, userId) {
   return followPlan('leave', plan, async () => {
     const session = await ensureSession(plan);
-    await SportsSessionMember.updateOne(
+    const left = await SportsSessionMember.findOneAndUpdate(
       { sessionId: session._id, userId, status: 'JOINED' },
       { $set: { status: 'LEFT', leftAt: new Date() } },
-    );
+      { new: true },
+    ).lean();
+    if (left) {
+      await chat().announce(session, plan, 'MEMBER_LEFT', userId, `MEMBER_LEFT:${userId}:${left.joinCount || 0}`);
+    }
     return session;
   });
 }
 
+/** The host cancelled: the session (and its chat) becomes read-only. Messages are kept. */
 function onPlanCancelled(plan) {
   return followPlan('cancel', plan, async () => {
     const session = await ensureSession(plan);
     const cancelledAt = plan.cancelledAt || new Date();
-    await SportsSession.updateOne(
-      { _id: session._id, status: 'active' },
-      { $set: { status: 'cancelled', cancelledAt } },
-    );
+    await markCancelled(session, plan, cancelledAt);
     return { ...session, status: 'cancelled', cancelledAt: session.cancelledAt || cancelledAt };
   });
 }
@@ -240,8 +289,11 @@ function sessionIdForMember(plan) {
 
 // ── Reading ───────────────────────────────────────────────────────────────────
 
-/** The one shape a session leaves this service in. [plan] is already formatted. */
-function formatSession(session, plan, member, formattedPlan, now = Date.now()) {
+/**
+ * The one shape a session leaves this service in. [plan] is already formatted.
+ * [extras]: lastMessage (preview), unreadCount — list responses only need these.
+ */
+function formatSession(session, plan, member, formattedPlan, now = Date.now(), extras = {}) {
   return {
     id:            String(session._id),
     sportsPlanId:  String(plan._id),
@@ -254,36 +306,69 @@ function formatSession(session, plan, member, formattedPlan, now = Date.now()) {
     lastMessageAt: session.lastMessageAt ? new Date(session.lastMessageAt).toISOString() : null,
     createdAt:     session.createdAt ? new Date(session.createdAt).toISOString() : null,
     cancelledAt:   session.cancelledAt ? new Date(session.cancelledAt).toISOString() : null,
+    // Phase 3 — the chat.
+    ...chat().chatInfo(session, plan, member, now),
+    lastMessage:   extras.lastMessage || null,
+    unreadCount:   extras.unreadCount || 0,
     plan:          formattedPlan,
   };
 }
 
-const PHASE_ORDER = { live: 0, upcoming: 1, ended: 2, cancelled: 3 };
+/** When a closed chat stops being listed; null for an open one. */
+function listedUntil(session, plan, state) {
+  if (state === 'cancelled') {
+    const at = session.cancelledAt || plan.cancelledAt || session.updatedAt;
+    return new Date(new Date(at).getTime() + LIST_AFTER_CLOSE_MS);
+  }
+  if (state === 'expired') {
+    const at = session.expiredAt || chat().expiresAtOf(session, plan);
+    return new Date(new Date(at).getTime() + LIST_AFTER_CLOSE_MS);
+  }
+  return null;
+}
 
 /**
- * The caller's Sports sessions for Messages → Sessions: every plan they are in
- * (host or player), found from the plan itself so a missed session write can
- * never hide one, within the list window. A plan whose host is in a block with
+ * The caller's Sports chats for Messages → Sessions.
+ *
+ * Found two ways, because a chat can now outlive its plan by months:
+ *   1. every plan the caller is in whose game was in the last 15 days or is still
+ *      to come — from the plan itself, so a missed session write never hides one;
+ *   2. older plans whose chat has had activity in the last 14 days — from the
+ *      caller's member rows, then checked against the plan (the authority).
+ * Open chats first, most recent activity first; then closed ones (expired or
+ * cancelled) for 7 days after they closed. A plan whose host is in a block with
  * the caller is left out, as Phase 1A leaves it out of every other read.
  *
- * Four queries whatever the count: plans, blocks, sessions, the caller's rows.
+ * A fixed number of queries whatever the count (plans, member rows, sessions,
+ * blocks, the caller's rows, one unread aggregation, one user read for previews),
+ * plus rare one-off repairs.
  */
 async function listMySessions(user) {
   const uid   = user._id;
   const now   = Date.now();
-  const since = new Date(now - LIST_GRACE_MS);
   const svc   = planService();
+  const c     = chat();
+  const since = new Date(now - c._internal.INACTIVITY_MS - LIST_AFTER_CLOSE_MS);
 
-  let plans = await SportsPlan.find({
+  const recent = await SportsPlan.find({
     playersJoined: uid,
-    $or: [
-      { cardStatus: { $ne: 'cancelled' }, chatExpiresAt: { $gt: since } },
-      { cardStatus: 'cancelled', cancelledAt: { $gt: since } },
-    ],
-  }).sort({ startTime: 1 }).limit(MAX_SESSIONS).lean();
+    startTime:     { $gt: new Date(now - RECENT_PLAN_MS) },
+  }).sort({ startTime: -1 }).limit(MAX_RECENT_PLANS).lean();
 
-  const blocked = new Set((await svc._internal.blockedCounterparts(user)).map(String));
-  plans = plans.filter(p => !blocked.has(String(p.creatorId)));
+  const myRows = await SportsSessionMember.find({ userId: uid, status: 'JOINED' })
+    .sort({ updatedAt: -1 }).limit(MAX_MEMBER_ROWS).select('sessionId').lean();
+  const talking = myRows.length
+    ? await SportsSession.find({ _id: { $in: myRows.map(r => r.sessionId) }, lastMessageAt: { $gt: since } })
+      .select('sportsPlanId').lean()
+    : [];
+  const seen = new Set(recent.map(p => String(p._id)));
+  const olderIds = talking.map(s => s.sportsPlanId).filter(id => !seen.has(String(id)));
+  // The plan decides membership: a stale member row cannot list someone else's chat.
+  const older = olderIds.length ? await SportsPlan.find({ _id: { $in: olderIds }, playersJoined: uid }).lean() : [];
+
+  const hidden = (await svc._internal.blockedCounterparts(user)).map(String);
+  const hiddenSet = new Set(hidden);
+  const plans = [...recent, ...older].filter(p => !hiddenSet.has(String(p.creatorId)));
   if (plans.length === 0) return { success: true, status: 200, sessions: [], count: 0 };
 
   // Sessions for these plans; any that are missing (created before Phase 2A, or
@@ -323,8 +408,9 @@ async function listMySessions(user) {
   const fixes = [];
   for (const p of plans) {
     const s = sessionByPlan.get(String(p._id));
-    const m = s && mineBySession.get(String(s._id));
-    if (s && (!m || m.status !== 'JOINED')) {
+    if (!s) continue;
+    const m = mineBySession.get(String(s._id));
+    if (!m || m.status !== 'JOINED') {
       fixes.push({
         updateOne: {
           filter: { sessionId: s._id, userId: uid },
@@ -337,12 +423,11 @@ async function listMySessions(user) {
       });
     }
     // Sessions of cancelled plans that missed the cancel write.
-    if (s && p.cardStatus === 'cancelled' && s.status !== 'cancelled') {
-      await SportsSession.updateOne({ _id: s._id, status: 'active' },
-        { $set: { status: 'cancelled', cancelledAt: p.cancelledAt || new Date() } });
-      s.status = 'cancelled';
-      s.cancelledAt = p.cancelledAt || new Date();
+    if (p.cardStatus === 'cancelled' && s.status !== 'cancelled') {
+      await markCancelled(s, p, p.cancelledAt || new Date());
     }
+    // A chat seen expired for the first time is recorded as such.
+    if (s.status === 'active') await c.persistExpiryIfDue(s, p, now);
   }
   if (fixes.length) {
     try {
@@ -353,18 +438,34 @@ async function listMySessions(user) {
     console.warn(`[SPORTS_SESSION_RECONCILED] repaired ${fixes.length} member row(s) for user=${uid}`);
   }
 
-  const out = plans
-    .map(p => {
-      const s = sessionByPlan.get(String(p._id));
-      if (!s) return null;
-      const m = mineBySession.get(String(s._id)) || { role: same(uid, p.creatorId) ? 'HOST' : 'PARTICIPANT' };
-      // The list needs no participant profiles: counts and the plan's own fields only.
-      return formatSession(s, p, m, svc._internal.formatPlan(p, uid), now);
-    })
-    .filter(Boolean)
-    .sort((a, b) => (PHASE_ORDER[a.phase] - PHASE_ORDER[b.phase]) ||
-      (new Date(a.plan.startTime) - new Date(b.plan.startTime)));
+  // What is listed: open chats, and closed ones for a week after they closed.
+  const entries = [];
+  for (const p of plans) {
+    const s = sessionByPlan.get(String(p._id));
+    if (!s) continue;
+    const state = c.chatStateOf(s, p, now);
+    const until = listedUntil(s, p, state);
+    if (until && now >= until.getTime()) continue;
+    const m = mineBySession.get(String(s._id)) || { role: same(uid, p.creatorId) ? 'HOST' : 'PARTICIPANT' };
+    const lastAt = s.lastMessage ? new Date(s.lastMessage.createdAt).getTime() : new Date(s.createdAt || 0).getTime();
+    entries.push({ plan: p, session: s, member: m, open: state === 'active', lastAt });
+  }
+  entries.sort((a, b) => (Number(b.open) - Number(a.open)) || (b.lastAt - a.lastAt));
+  const shown = entries.slice(0, MAX_SESSIONS);
 
+  const unread = await c.unreadCounts(uid, shown, hidden);
+  const previewUsers = await c.usersFor(shown.map(e => e.session.lastMessage).filter(Boolean), [user]);
+
+  const out = shown.map(e => formatSession(
+    e.session, e.plan, e.member,
+    // The list needs no participant profiles: counts and the plan's own fields only.
+    svc._internal.formatPlan(e.plan, uid),
+    now,
+    {
+      lastMessage: c.formatPreview(e.session, previewUsers, hiddenSet),
+      unreadCount: unread.get(String(e.session._id)) || 0,
+    },
+  ));
   return { success: true, status: 200, sessions: out, count: out.length };
 }
 
@@ -388,13 +489,23 @@ async function getSession(user, sessionId) {
       { sportsPlanId: String(plan._id) });
   }
 
-  // Heal anything a sync write missed before answering.
+  // Heal anything a sync write missed before answering, and record an expiry.
+  const now = Date.now();
   await followPlan('reconcile', plan, () => reconcile(plan, session));
+  await followPlan('expiry', plan, () => chat().persistExpiryIfDue(session, plan, now));
 
   const formattedPlan = await svc._internal.formatWithPeople(plan, user);
   if (!formattedPlan.creator) return notFound();
   const member = await SportsSessionMember.findOne({ sessionId: session._id, userId: user._id }).lean();
-  return { success: true, status: 200, session: formatSession(session, plan, member, formattedPlan) };
+  const hidden = new Set((await svc._internal.blockedCounterparts(user)).map(String));
+  const users = session.lastMessage ? await chat().usersFor([session.lastMessage], [user]) : new Map();
+  return {
+    success: true,
+    status:  200,
+    session: formatSession(session, plan, member, formattedPlan, now, {
+      lastMessage: chat().formatPreview(session, users, hidden),
+    }),
+  };
 }
 
 module.exports = {
@@ -405,6 +516,6 @@ module.exports = {
   sessionIdForMember,
   listMySessions,
   getSession,
-  // For tests and the Phase 2A report.
-  _internal: { ensureSession, reconcile, sessionPhase, LIST_GRACE_MS, MAX_SESSIONS },
+  // For the chat service, tests and the reports.
+  _internal: { ensureSession, reconcile, markJoined, sessionPhase, LIST_AFTER_CLOSE_MS, RECENT_PLAN_MS, MAX_SESSIONS },
 };

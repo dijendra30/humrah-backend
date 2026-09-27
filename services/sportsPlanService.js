@@ -733,8 +733,9 @@ module.exports = {
   joinPlan,
   leavePlan,
   cancelPlan,
-  // For services/sportsSessionService.js, which shows plans the same way.
-  _internal: { formatPlan, formatWithPeople, isBlockedPair, blockedCounterparts },
+  // For services/sportsSessionService.js and sportsChatService.js, which show
+  // plans and people the same way.
+  _internal: { formatPlan, formatWithPeople, isBlockedPair, blockedCounterparts, publicUser, loadUsers },
   // Exposed for tests and for the Phase 1A report.
   constants: Object.freeze({
     SPORT_TYPES, SKILL_LEVELS, DEFAULT_SKILL_LEVEL,
