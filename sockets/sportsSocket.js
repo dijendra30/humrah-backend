@@ -22,6 +22,18 @@
 //
 // REST is the only way to change a plan. These events only tell people who are
 // already looking at a plan that it changed.
+//
+// Phase 3 — group chat, in the SAME members-only room:
+//   server → members   sports_message_created   one message (REST saved it first)
+//                      sports_reaction_updated  a message's reaction counts
+//                      sports_typing_started / sports_typing_stopped
+//   client → server    sports_typing_start / sports_typing_stop  { planId }
+// Messages are sent with REST, never over the socket. Typing is socket-only and
+// never stored: allowed only for a socket that joined the room, only while the
+// chat is open, rate-limited, and cleared after 5 s, on send, on leave, on
+// eviction and on disconnect. Chat events are sent per socket, skipping anyone
+// in a block pair with the person they are about (a snapshot taken when that
+// socket joined the room).
 // -----------------------------------------------------------------------------
 'use strict';
 
@@ -31,8 +43,21 @@ const mongoose = require('mongoose');
 // Required directly rather than looked up with mongoose.model(name): a lookup only
 // works once something else has registered the schema, and this file is loaded by
 // server.js before the sports routes are mounted.
-const User       = require('../models/User');
-const SportsPlan = require('../models/SportsPlan');
+const User          = require('../models/User');
+const SportsPlan    = require('../models/SportsPlan');
+const SportsSession = require('../models/SportsSession');
+
+// Required lazily: these services emit through this module.
+const planService = () => require('../services/sportsPlanService');
+const chatService = () => require('../services/sportsChatService');
+
+// Set by initSportsSocket, so services can emit chat events after a REST write.
+let ioRef = null;
+
+const TYPING_TTL_MS            = 5000;
+const TYPING_BURSTS_PER_MINUTE = 20;
+// `${socketId}|${planId}` → { timer, planId, sessionId, userId, firstName }
+const typingBySocket = new Map();
 
 const NAMESPACE = '/sports';
 const planRoom  = planId => `sports:${planId}`;
@@ -104,11 +129,69 @@ async function authenticateSocket(socket, next) {
   }
 }
 
+// ── Phase 3 helpers ────────────────────────────────────────────────────────────
+
+/**
+ * Sends [event] to every socket in the plan room except those whose user is in a
+ * block pair with [aboutUserId] (and, with skipUser, that user's own sockets).
+ */
+async function sendToRoom(planId, event, payload, aboutUserId, { skipUser = null } = {}) {
+  if (!ioRef) return;
+  const sockets = await ioRef.of(NAMESPACE).in(planRoom(String(planId))).fetchSockets();
+  for (const s of sockets) {
+    if (skipUser && String(s.data.userId) === String(skipUser)) continue;
+    if (aboutUserId && s.data.blocked && s.data.blocked.has(String(aboutUserId))) continue;
+    s.emit(event, payload);
+  }
+}
+
+const typingPayload = t => ({ sessionId: t.sessionId, planId: t.planId, userId: t.userId, firstName: t.firstName });
+
+function stopTyping(key) {
+  const t = typingBySocket.get(key);
+  if (!t) return;
+  clearTimeout(t.timer);
+  typingBySocket.delete(key);
+  sendToRoom(t.planId, 'sports_typing_stopped', typingPayload(t), t.userId, { skipUser: t.userId })
+    .catch(err => console.error('[SPORTS_SOCKET] typing stop broadcast failed:', err.message));
+}
+
+/** Stops [userId] typing in [planId] on every socket they have. */
+function stopUserTyping(planId, userId) {
+  for (const [key, t] of typingBySocket) {
+    if (t.planId === String(planId) && t.userId === String(userId)) stopTyping(key);
+  }
+}
+
+/** The session id when this plan's chat takes messages right now, else null. */
+async function openChatFor(planId) {
+  const [plan, session] = await Promise.all([
+    SportsPlan.findById(planId).select('cardStatus startTime endTime playersJoined').lean(),
+    SportsSession.findOne({ sportsPlanId: planId }).select('status lastMessageAt').lean(),
+  ]);
+  if (!plan || !session) return null;
+  const open = chatService().chatStateOf(session, plan) === 'active' && (plan.playersJoined || []).length >= 2;
+  return open ? String(session._id) : null;
+}
+
+/** At most TYPING_BURSTS_PER_MINUTE "started" broadcasts per socket. */
+function allowTypingBurst(socket) {
+  const now = Date.now();
+  const w = socket.data.typingWindow;
+  if (!w || now - w.start >= 60_000) {
+    socket.data.typingWindow = { start: now, count: 1 };
+    return true;
+  }
+  w.count += 1;
+  return w.count <= TYPING_BURSTS_PER_MINUTE;
+}
+
 function initSportsSocket(io) {
   // Registering the connection handler twice would double every event — the same
   // guard the Humrah Rooms socket uses.
   if (io.__sportsSocketInit) return io.of(NAMESPACE);
   io.__sportsSocketInit = true;
+  ioRef = io;
 
   const ns = io.of(NAMESPACE);
   ns.use(authenticateSocket);
@@ -134,6 +217,13 @@ function initSportsSocket(io) {
           console.warn(`[SPORTS_SOCKET] join_plan_room DENIED userId=${userId} planId=${planId}`);
           return reply({ ok: false, error: 'not_a_member' });
         }
+        // Phase 3: who this socket must not hear from (both directions), and the
+        // name its typing shows under. Refreshed on every join.
+        const me = await User.findById(userId).select('firstName blockedUsers').lean();
+        socket.data.firstName = (me && me.firstName) || 'Someone';
+        socket.data.blocked = new Set(
+          me ? (await planService()._internal.blockedCounterparts(me)).map(String) : [],
+        );
         socket.join(planRoom(planId));
         return reply({ ok: true, room: planRoom(planId) });
       } catch (err) {
@@ -146,8 +236,47 @@ function initSportsSocket(io) {
       const reply = typeof ack === 'function' ? ack : () => {};
       const planId = payload && typeof payload.planId === 'string' ? payload.planId : null;
       if (!isValidId(planId)) return reply({ ok: false, error: 'invalid_plan_id' });
+      stopTyping(`${socket.id}|${planId}`);
       socket.leave(planRoom(planId));
       return reply({ ok: true });
+    });
+
+    // ── Typing (Phase 3) ──────────────────────────────────────────────────────
+    // "started" is broadcast once per burst; repeats only extend the 5 s timer.
+    socket.on('sports_typing_start', async (payload) => {
+      const planId = payload && typeof payload.planId === 'string' ? payload.planId : null;
+      if (!isValidId(planId) || !socket.rooms.has(planRoom(planId))) return;
+      const key = `${socket.id}|${planId}`;
+      const current = typingBySocket.get(key);
+      if (current) {
+        clearTimeout(current.timer);
+        current.timer = setTimeout(() => stopTyping(key), TYPING_TTL_MS);
+        return;
+      }
+      if (!allowTypingBurst(socket)) return;
+      try {
+        const sessionId = await openChatFor(planId);
+        if (!sessionId || typingBySocket.has(key) || !socket.connected) return;
+        const t = { planId, sessionId, userId, firstName: socket.data.firstName || 'Someone' };
+        t.timer = setTimeout(() => stopTyping(key), TYPING_TTL_MS);
+        typingBySocket.set(key, t);
+        await sendToRoom(planId, 'sports_typing_started', typingPayload(t), userId, { skipUser: userId });
+      } catch (err) {
+        console.error('[SPORTS_SOCKET] typing start error:', err.message);
+      }
+    });
+
+    socket.on('sports_typing_stop', (payload) => {
+      const planId = payload && typeof payload.planId === 'string' ? payload.planId : null;
+      if (!isValidId(planId)) return;
+      stopTyping(`${socket.id}|${planId}`);
+    });
+
+    // A dropped socket must never stay "typing".
+    socket.on('disconnect', () => {
+      for (const key of [...typingBySocket.keys()]) {
+        if (key.startsWith(`${socket.id}|`)) stopTyping(key);
+      }
     });
   });
 
@@ -258,7 +387,29 @@ function emitSessionCancelled(io, session, plan) {
  */
 function evictUserFromPlanRoom(io, planId, userId) {
   if (!io || !planId || !userId) return;
+  stopUserTyping(planId, userId);
   io.of(NAMESPACE).in(userRoom(String(userId))).socketsLeave(planRoom(String(planId)));
+}
+
+// ── Chat events (Phase 3) — called by services/sportsChatService.js ───────────
+
+/**
+ * A message REST has already saved, to the plan's members (including the sender's
+ * other devices; clients de-duplicate by id). Sending also ends the sender's
+ * typing indicator. [aboutUserId]: the sender, or who a system message is about.
+ */
+function emitSportsMessage(planId, message, aboutUserId) {
+  if (!ioRef || !planId || !message) return;
+  if (message.type === 'TEXT' && aboutUserId) stopUserTyping(planId, aboutUserId);
+  sendToRoom(planId, 'sports_message_created', { planId: String(planId), message }, aboutUserId)
+    .catch(err => console.error('[SPORTS_SOCKET] message broadcast failed:', err.message));
+}
+
+/** A message's reaction counts; clients work out their own "reacted" from userIds. */
+function emitSportsReaction(planId, payload) {
+  if (!ioRef || !planId || !payload) return;
+  sendToRoom(planId, 'sports_reaction_updated', { planId: String(planId), ...payload }, null)
+    .catch(err => console.error('[SPORTS_SOCKET] reaction broadcast failed:', err.message));
 }
 
 module.exports = {
@@ -272,4 +423,8 @@ module.exports = {
   emitSessionParticipantJoined,
   emitSessionParticipantLeft,
   emitSessionCancelled,
+  emitSportsMessage,
+  emitSportsReaction,
+  // For tests.
+  _internal: { typingBySocket, TYPING_TTL_MS },
 };
