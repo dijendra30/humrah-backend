@@ -30,6 +30,12 @@
 //
 // PHASE 4 (notifications) hooks in at onPlanCreated / onPlayerJoined /
 // onPlayerLeft / onPlanCancelled: each is called exactly once per real change.
+//
+// CHAT ENHANCEMENT. onPlayerRemoved: the host removed someone (the plan write in
+// sportsPlanService.removePlayer decides it). Their member row becomes REMOVED,
+// their sockets are told and taken out of the room, and the chat says "<name>
+// was removed from the session by the host" — once. removeMember() is the
+// session-level entry point: host only, open chats only.
 // -----------------------------------------------------------------------------
 'use strict';
 
@@ -43,6 +49,9 @@ const { ObjectId } = mongoose.Types;
 // Required lazily: these modules call into this one for every change.
 const planService = () => require('./sportsPlanService');
 const chat        = () => require('./sportsChatService');
+
+const sportsSocket = () => require('../sockets/sportsSocket');
+const SportsHiddenMessage = require('../models/SportsHiddenMessage');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 // A closed chat (expired or cancelled) stays in Messages → Sessions this long,
@@ -269,6 +278,30 @@ function onPlayerLeft(plan, userId) {
   });
 }
 
+/**
+ * The host removed a player (after the plan's own guarded update succeeded).
+ * Their row becomes REMOVED; their open screens are told and every socket they
+ * have leaves the room BEFORE the announcement, so they never receive it; the
+ * others see "<name> was removed from the session by the host". Once only: the
+ * guarded row update is the decision. Not chat activity.
+ */
+function onPlayerRemoved(plan, userId) {
+  return followPlan('remove', plan, async () => {
+    const session = await ensureSession(plan);
+    const removed = await SportsSessionMember.findOneAndUpdate(
+      { sessionId: session._id, userId, status: { $ne: 'REMOVED' } },
+      { $set: { status: 'REMOVED', leftAt: new Date() } },
+      { new: true },
+    ).lean();
+    sportsSocket().removeUserFromChat(String(plan._id), String(session._id), String(userId));
+    if (removed) {
+      await chat().announce(session, plan, 'MEMBER_REMOVED', userId, `MEMBER_REMOVED:${userId}:${removed.joinCount || 0}`);
+      console.log(`[SPORTS_CHAT_MODERATION] member_removed session=${session._id} plan=${plan._id} user=${userId}`);
+    }
+    return session;
+  });
+}
+
 /** The host cancelled: the session (and its chat) becomes read-only. Messages are kept. */
 function onPlanCancelled(plan) {
   return followPlan('cancel', plan, async () => {
@@ -277,6 +310,23 @@ function onPlanCancelled(plan) {
     await markCancelled(session, plan, cancelledAt);
     return { ...session, status: 'cancelled', cancelledAt: session.cancelledAt || cancelledAt };
   });
+}
+
+/**
+ * POST /sessions/:sessionId/members/:userId/remove — the host removes a player.
+ * Host only (plan.creatorId), open chats only, never the host themself; the plan
+ * write in sportsPlanService.removePlayer is the one decision.
+ */
+async function removeMember(user, sessionId, targetId) {
+  const access = await chat().loadForMember(user, sessionId);
+  if (access.error) return access.error;
+  const { session, plan } = access;
+  if (!same(plan.creatorId, user._id)) {
+    return fail(403, 'NOT_SESSION_HOST', 'Only the host can remove people from this session.');
+  }
+  const closed = await chat().readOnlyRefusal(session, plan, Date.now());
+  if (closed) return closed;
+  return planService().removePlayer(user, plan._id, targetId);
 }
 
 /**
@@ -454,7 +504,14 @@ async function listMySessions(user) {
   const shown = entries.slice(0, MAX_SESSIONS);
 
   const unread = await c.unreadCounts(uid, shown, hidden);
-  const previewUsers = await c.usersFor(shown.map(e => e.session.lastMessage).filter(Boolean), [user]);
+  const previews = shown.map(e => e.session.lastMessage).filter(Boolean);
+  const previewUsers = await c.usersFor(previews, [user]);
+  // Newest messages this person hid for themselves ("delete for me"): one read.
+  const previewIds = previews.map(p => p.messageId).filter(Boolean);
+  const hiddenForMe = new Set(previewIds.length
+    ? (await SportsHiddenMessage.find({ userId: uid, messageId: { $in: previewIds } }).select('messageId').lean())
+      .map(h => String(h.messageId))
+    : []);
 
   const out = shown.map(e => formatSession(
     e.session, e.plan, e.member,
@@ -462,7 +519,7 @@ async function listMySessions(user) {
     svc._internal.formatPlan(e.plan, uid),
     now,
     {
-      lastMessage: c.formatPreview(e.session, previewUsers, hiddenSet),
+      lastMessage: c.formatPreview(e.session, previewUsers, hiddenSet, hiddenForMe),
       unreadCount: unread.get(String(e.session._id)) || 0,
     },
   ));
@@ -486,7 +543,7 @@ async function getSession(user, sessionId) {
   if (await svc._internal.isBlockedPair(user, plan.creatorId)) return notFound();
   if (!includesId(plan.playersJoined, user._id)) {
     return fail(403, 'NOT_A_SESSION_MEMBER', 'Only people in this plan can open its session.',
-      { sportsPlanId: String(plan._id) });
+      { sportsPlanId: String(plan._id), removed: includesId(plan.kickedPlayers, user._id) });
   }
 
   // Heal anything a sync write missed before answering, and record an expiry.
@@ -499,11 +556,13 @@ async function getSession(user, sessionId) {
   const member = await SportsSessionMember.findOne({ sessionId: session._id, userId: user._id }).lean();
   const hidden = new Set((await svc._internal.blockedCounterparts(user)).map(String));
   const users = session.lastMessage ? await chat().usersFor([session.lastMessage], [user]) : new Map();
+  const lastId = session.lastMessage && session.lastMessage.messageId;
+  const hiddenForMe = new Set(lastId && await SportsHiddenMessage.exists({ userId: user._id, messageId: lastId }) ? [String(lastId)] : []);
   return {
     success: true,
     status:  200,
     session: formatSession(session, plan, member, formattedPlan, now, {
-      lastMessage: chat().formatPreview(session, users, hidden),
+      lastMessage: chat().formatPreview(session, users, hidden, hiddenForMe),
     }),
   };
 }
@@ -512,10 +571,12 @@ module.exports = {
   onPlanCreated,
   onPlayerJoined,
   onPlayerLeft,
+  onPlayerRemoved,
   onPlanCancelled,
   sessionIdForMember,
   listMySessions,
   getSession,
+  removeMember,
   // For the chat service, tests and the reports.
   _internal: { ensureSession, reconcile, markJoined, sessionPhase, LIST_AFTER_CLOSE_MS, RECENT_PLAN_MS, MAX_SESSIONS },
 };

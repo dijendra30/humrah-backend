@@ -688,6 +688,66 @@ async function leavePlan(user, planId) {
   return fail(410, 'PLAN_CLOSED', 'This plan has already ended or been cancelled.');
 }
 
+// ── REMOVE (host) ──────────────────────────────────────────────────────────────
+/**
+ * The host takes [targetId] out of the plan. ONE guarded update decides it: the
+ * caller must be the plan's creator (the host — read from the plan, never from
+ * the request), the target must be in the plan and must not be the host, and the
+ * plan must not be cancelled. They leave playersJoined and join kickedPlayers, so
+ * the existing join query refuses them from now on. Allowed while the plan's chat
+ * is open, after the game too (the caller checks the chat).
+ *
+ * A concurrent join or leave by the same person is ordered by MongoDB on this one
+ * document: whichever lands second sees the first's result.
+ */
+async function removePlayer(user, planId, targetId) {
+  if (!isValidId(String(planId))) return notFound();
+  if (!isValidId(String(targetId))) {
+    return fail(409, 'NOT_IN_SESSION', 'They are no longer in this session.');
+  }
+  if (String(targetId) === String(user._id)) {
+    return fail(400, 'CANNOT_REMOVE_SELF', "You can't remove yourself. Cancel the plan instead.");
+  }
+  const pid = new ObjectId(String(planId));
+  const tid = new ObjectId(String(targetId));
+
+  const updated = await SportsPlan.findOneAndUpdate(
+    {
+      _id:           pid,
+      creatorId:     user._id,            // only the host; the host is never the target (checked above)
+      playersJoined: tid,
+      cardStatus:    'open',
+    },
+    { $pull: { playersJoined: tid }, $addToSet: { kickedPlayers: tid } },
+    { new: true }
+  ).lean();
+
+  if (updated) {
+    const session = await sessions.onPlayerRemoved(updated, tid);
+    return {
+      success: true,
+      status:  200,
+      removed: true,
+      userId:  String(tid),
+      plan:    withSession(await formatWithPeople(updated, user), session),
+      session: sessionRef(session),
+    };
+  }
+
+  const plan = await SportsPlan.findById(pid).lean();
+  if (!plan) return notFound();
+  if (String(plan.creatorId) !== String(user._id)) {
+    return fail(403, 'NOT_SESSION_HOST', 'Only the host can remove people from this session.');
+  }
+  if (plan.cardStatus === 'cancelled') {
+    return fail(403, 'CHAT_CLOSED', 'This sports session was cancelled, so its chat is read-only.');
+  }
+  if (!includesId(plan.playersJoined, tid)) {
+    return fail(409, 'NOT_IN_SESSION', 'They are no longer in this session.');
+  }
+  return fail(409, 'REMOVE_CONFLICT', 'Could not remove them right now. Please try again.');
+}
+
 // ── CANCEL ─────────────────────────────────────────────────────────────────────
 async function cancelPlan(user, planId) {
   if (!isValidId(planId)) return notFound();
@@ -733,6 +793,7 @@ module.exports = {
   joinPlan,
   leavePlan,
   cancelPlan,
+  removePlayer,
   // For services/sportsSessionService.js and sportsChatService.js, which show
   // plans and people the same way.
   _internal: { formatPlan, formatWithPeople, isBlockedPair, blockedCounterparts, publicUser, loadUsers },
