@@ -28,6 +28,15 @@
 //   DELETE /api/sports-plans/sessions/:sessionId/messages/:messageId/reaction
 //   The sender is always req.user; nothing in a body names a user.
 //
+// Chat enhancement (same services; author and host come from the database):
+//   PATCH  /sessions/:sessionId/messages/:messageId              edit { text } (author, 15 min)
+//   DELETE /sessions/:sessionId/messages/:messageId              delete for everyone (author or host)
+//   POST   /sessions/:sessionId/messages/:messageId/hide         delete for me
+//   POST   /sessions/:sessionId/messages/:messageId/link-check   { url } → SAFE | UNSAFE | UNKNOWN
+//   POST   /sessions/:sessionId/members/:userId/remove           host removes a player
+//   POST   /sessions/:sessionId/attendance                       { answer: 'YES' | 'NO' }
+//   POST /sessions/:sessionId/messages also takes replyToMessageId; GET …/messages takes &until=.
+//
 // Responses follow the { success, code, message } shape used by the Surprise
 // Activity and Movie Hangout routes.
 // -----------------------------------------------------------------------------
@@ -39,6 +48,7 @@ const router  = express.Router();
 const svc = require('../services/sportsPlanService');
 const sessionSvc = require('../services/sportsSessionService');
 const chatSvc = require('../services/sportsChatService');
+const attendanceSvc = require('../services/sportsAttendanceService');
 const redisService = require('../services/redisService');
 const {
   emitPlanJoined,
@@ -48,6 +58,7 @@ const {
   emitSessionParticipantJoined,
   emitSessionParticipantLeft,
   emitSessionCancelled,
+  emitSessionParticipantRemoved,
 } = require('../sockets/sportsSocket');
 
 // Belt-and-braces. Authentication is applied where this router is mounted; this
@@ -115,6 +126,12 @@ function perUserLimit(action, max, windowSeconds, message) {
 }
 const messageLimiter  = perUserLimit('message', 30, 60, 'You are sending messages too fast. Please slow down.');
 const reactionLimiter = perUserLimit('reaction', 60, 60, 'Too many reactions at once. Please slow down.');
+const editLimiter     = perUserLimit('edit', 20, 60, 'You are editing too fast. Please slow down.');
+const deleteLimiter   = perUserLimit('delete', 30, 60, 'You are deleting too fast. Please slow down.');
+const hideLimiter     = perUserLimit('hide', 60, 60, 'Too many at once. Please slow down.');
+const removeLimiter   = perUserLimit('remove', 10, 60, 'Too many removals at once. Please wait a moment.');
+const voteLimiter     = perUserLimit('vote', 20, 60, 'Too many answers at once. Please wait a moment.');
+const linkLimiter     = perUserLimit('linkcheck', 30, 60, 'Too many links checked at once. Please wait a moment.');
 
 router.get('/sessions/:sessionId/messages', handle(async (req, res) => {
   send(res, await chatSvc.listMessages(req.user, req.params.sessionId, req.query));
@@ -134,6 +151,38 @@ router.post('/sessions/:sessionId/messages/:messageId/reaction', reactionLimiter
 
 router.delete('/sessions/:sessionId/messages/:messageId/reaction', reactionLimiter, handle(async (req, res) => {
   send(res, await chatSvc.setReaction(req.user, req.params.sessionId, req.params.messageId, null, { remove: true }));
+}));
+
+// ── CHAT ENHANCEMENT ───────────────────────────────────────────────────────────
+
+router.patch('/sessions/:sessionId/messages/:messageId', editLimiter, handle(async (req, res) => {
+  send(res, await chatSvc.editMessage(req.user, req.params.sessionId, req.params.messageId, req.body || {}));
+}));
+
+router.delete('/sessions/:sessionId/messages/:messageId', deleteLimiter, handle(async (req, res) => {
+  send(res, await chatSvc.deleteForEveryone(req.user, req.params.sessionId, req.params.messageId));
+}));
+
+router.post('/sessions/:sessionId/messages/:messageId/hide', hideLimiter, handle(async (req, res) => {
+  send(res, await chatSvc.hideMessage(req.user, req.params.sessionId, req.params.messageId));
+}));
+
+router.post('/sessions/:sessionId/messages/:messageId/link-check', linkLimiter, handle(async (req, res) => {
+  send(res, await chatSvc.checkMessageLink(req.user, req.params.sessionId, req.params.messageId, req.body || {}));
+}));
+
+router.post('/sessions/:sessionId/members/:userId/remove', removeLimiter, handle(async (req, res) => {
+  const result = await sessionSvc.removeMember(req.user, req.params.sessionId, req.params.userId);
+  if (result.success) {
+    const io = req.app.get('io');
+    emitPlanLeft(io, result.plan, { _id: result.userId, firstName: null });
+    emitSessionParticipantRemoved(io, result.session, result.plan, result.userId);
+  }
+  send(res, result);
+}));
+
+router.post('/sessions/:sessionId/attendance', voteLimiter, handle(async (req, res) => {
+  send(res, await attendanceSvc.castVote(req.user, req.params.sessionId, req.body || {}));
 }));
 
 // ── GET ────────────────────────────────────────────────────────────────────────
