@@ -64,12 +64,22 @@ cron.schedule('* * * * *', async () => {
 // per tick; all state is in Mongo and every step is a conditional update, so it
 // survives a restart and is safe to run twice or on several instances at once.
 // ══════════════════════════════════════════════════════════════════════════════
+//
+// Phase 4: the same tick also flushes Sports chat message pushes that waited out
+// their 3-minute window (one grouped push each, or none if already read). Its
+// own try, so neither step can stop the other.
 cron.schedule('* * * * *', async () => {
   try {
     const { tickSportsAttendance } = require('./services/sportsAttendanceService');
     await tickSportsAttendance();
   } catch (err) {
     console.error('[CRON] Sports attendance tick error:', err.message);
+  }
+  try {
+    const { flushMessagePushes } = require('./services/sportsChatService');
+    await flushMessagePushes();
+  } catch (err) {
+    console.error('[CRON] Sports message push flush error:', err.message);
   }
 });
 
