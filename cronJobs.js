@@ -81,6 +81,15 @@ cron.schedule('* * * * *', async () => {
   } catch (err) {
     console.error('[CRON] Sports message push flush error:', err.message);
   }
+  // Sports discovery (Phase 5C): "{Sport} plan near you" to a few nearby people who
+  // qualify, once per plan. A complete no-op unless SPORTS_DISCOVERY_ENABLED=true
+  // (and SPORTS_DISCOVERY_STARTED_AT is set); its own try, like the two above.
+  try {
+    const { tickSportsDiscovery } = require('./services/sportsDiscoveryService');
+    await tickSportsDiscovery();
+  } catch (err) {
+    console.error('[CRON] Sports discovery tick error:', err && err.name);
+  }
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
