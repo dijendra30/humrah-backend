@@ -200,6 +200,36 @@ async function loadUsers(ids) {
  * exact for participants, who need them to navigate there. The participant list is
  * returned to participants only.
  */
+/**
+ * Phase 4 — where the meetup is in its life, from the plan's own times and the
+ * server clock. Never stored: plans are immutable, so every boundary is fixed the
+ * moment the plan is created.
+ *
+ *   CANCELLED      plan (or its session) cancelled — overrides everything
+ *   JOINING        now <  start − 60 min
+ *   STARTING_SOON  start − 60 min ≤ now < start   (when the attendance check opens)
+ *   LIVE           start ≤ now < end
+ *   ENDED          now ≥ end
+ *
+ * lifecycleChangesAt is the next boundary (null once CANCELLED or ENDED). Apps
+ * use it only to refresh what they show; every action is still decided here.
+ */
+const STARTING_SOON_MS = 60 * 60 * 1000;
+
+function lifecycleOf(plan, session = null, now = Date.now()) {
+  if (plan.cardStatus === 'cancelled' || (session && session.status === 'cancelled')) {
+    return { lifecycle: 'CANCELLED', lifecycleChangesAt: null };
+  }
+  const start = new Date(plan.startTime).getTime();
+  const end   = new Date(plan.endTime).getTime();
+  const soon  = start - STARTING_SOON_MS;
+  const at = t => new Date(t).toISOString();
+  if (now < soon)  return { lifecycle: 'JOINING',       lifecycleChangesAt: at(soon) };
+  if (now < start) return { lifecycle: 'STARTING_SOON', lifecycleChangesAt: at(start) };
+  if (now < end)   return { lifecycle: 'LIVE',          lifecycleChangesAt: at(end) };
+  return { lifecycle: 'ENDED', lifecycleChangesAt: null };
+}
+
 function formatPlan(plan, viewerId, { creator = null, participants = null, distanceM = null } = {}) {
   const now      = Date.now();
   const viewer   = String(viewerId);
@@ -243,6 +273,8 @@ function formatPlan(plan, viewerId, { creator = null, participants = null, dista
     isFull,
     cardStatus,
     chatStatus:  plan.chatStatus,
+    // Phase 4 (additive): lifecycle + lifecycleChangesAt. cardStatus is unchanged.
+    ...lifecycleOf(plan, null, now),
     // From the viewer's point of view: can THIS user join right now?
     isJoinable:  cardStatus === 'open' && !isFull && !isParticipant && !isKicked,
     creator:     publicUser(creator),
@@ -796,7 +828,7 @@ module.exports = {
   removePlayer,
   // For services/sportsSessionService.js and sportsChatService.js, which show
   // plans and people the same way.
-  _internal: { formatPlan, formatWithPeople, isBlockedPair, blockedCounterparts, publicUser, loadUsers },
+  _internal: { formatPlan, formatWithPeople, isBlockedPair, blockedCounterparts, publicUser, loadUsers, lifecycleOf, STARTING_SOON_MS },
   // Exposed for tests and for the Phase 1A report.
   constants: Object.freeze({
     SPORT_TYPES, SKILL_LEVELS, DEFAULT_SKILL_LEVEL,

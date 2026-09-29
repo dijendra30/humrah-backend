@@ -51,6 +51,21 @@
 // None of these is chat activity: only a member's message (a reply included)
 // and a join move lastMessageAt. Editing or deleting an old message can never
 // keep a chat alive.
+//
+// PHASE 4 — pushes (SPORTS_PHASE_4_AUDIT.md §11, §14, §18, §21, §22):
+//   SPORTS_MESSAGE    a new message, to the plan's other players. The first one
+//                     after a quiet spell is pushed at once ("Arjun: Let's meet at
+//                     gate 2"); further ones within 3 minutes are only counted on
+//                     the member row (push.*), and the every-minute Sports tick
+//                     flushes them as one push ("4 new messages in your Basketball
+//                     chat") — or nothing, if they read the chat meanwhile. All
+//                     state is in MongoDB and every step is one conditional update,
+//                     so restarts, missed ticks, two servers and races are safe.
+//                     Nobody whose chat is on screen is pushed: the app says so
+//                     over the socket (sports_chat_visible) — being in the plan
+//                     room is NOT enough, since the plan page joins it too.
+//                     Kill switch: SPORTS_MESSAGE_PUSH_ENABLED (default on).
+//   SPORTS_SESSION_CANCELLED   once, when the host's cancel really happened.
 // -----------------------------------------------------------------------------
 'use strict';
 
@@ -87,6 +102,16 @@ const JOIN_NOTIFY_COOLDOWN_SECONDS = 30 * 60;
 const EDIT_WINDOW_MS  = 15 * 60 * 1000;
 // Jumping to a reply's original loads at most this many messages to reach it.
 const RANGE_MAX       = 200;
+// Phase 4 — message pushes. One push per member per window; what arrives during
+// it is flushed as one grouped push by the every-minute tick.
+const MESSAGE_PUSH_WINDOW_MS = 3 * 60 * 1000;
+// A push that failed to send is retried by the tick while it is this fresh…
+const MESSAGE_PUSH_RETRY_MS  = 10 * 60 * 1000;
+// …and anything left waiting longer than this (the server was down, or the kill
+// switch was off) is dropped instead of arriving late.
+const MESSAGE_PUSH_STALE_MS  = 60 * 60 * 1000;
+const MESSAGE_PUSH_BODY_MAX  = 120;
+const MAX_FLUSH_PER_TICK     = 200;
 
 const fail = (status, code, message, extra = {}) => ({ success: false, status, code, message, ...extra });
 const notFound = () => fail(404, 'SESSION_NOT_FOUND', 'This session does not exist or is no longer available.');
@@ -672,6 +697,8 @@ async function sendMessage(user, sessionId, body = {}) {
   // (a blocked author's words, or an original that reader hid, are not shown).
   const broadcast = replyToMessageId ? formatMessage(doc, await hydrate([doc], { plan })) : message;
   sportsSocket().emitSportsMessage(String(plan._id), broadcast, user._id);
+  // Phase 4: fire-and-forget — a push can never slow down or fail the send.
+  notifyNewMessage(plan, claimed, doc, user._id).catch(() => {});
   return { success: true, status: 201, message };
 }
 
@@ -1175,6 +1202,315 @@ async function notifyMembers(plan, session, recipientIds, build, label) {
   return summary;
 }
 
+// ── Phase 4: new-message pushes ───────────────────────────────────────────────
+
+// The ROOM_ENGAGEMENT_ENABLED convention (services/roomEngagementActionService.js):
+// unset or blank = the default; otherwise on only when it says "true". Default
+// ON here. Read on every use.
+const envBool = (v, d) => {
+  if (v === undefined || v === null || String(v).trim() === '') return d;
+  return String(v).trim().toLowerCase() === 'true';
+};
+const messagePushEnabled = () => envBool(process.env.SPORTS_MESSAGE_PUSH_ENABLED, true);
+
+const deviceTokens = u => [...new Set([
+  ...((u && u.fcmDevices) || []).map(d => d && d.token),
+  ...((u && u.fcmTokens) || []),
+].filter(t => typeof t === 'string' && t.trim()))];
+
+const firstNameOnly = name => String(name || '').trim().split(/\s+/)[0] || 'Someone';
+
+/** "Arjun: Let's meet at gate 2", on one line, at most 120 characters. */
+function singleMessageBody(senderName, text) {
+  const line = `${firstNameOnly(senderName)}: ${String(text || '').replace(/\s+/g, ' ').trim()}`;
+  return line.length <= MESSAGE_PUSH_BODY_MAX ? line : `${line.slice(0, MESSAGE_PUSH_BODY_MAX - 1).trimEnd()}…`;
+}
+
+/** "4 new messages in your Basketball chat". */
+const groupedMessageBody = (count, plan) =>
+  `${count} new messages in your ${sportName(plan)} chat`.slice(0, MESSAGE_PUSH_BODY_MAX);
+
+/**
+ * Why [u] gets no message push, or null. The rules every Sports push uses
+ * (inactive, suspended, pushes off, a block pair with the host — they cannot see
+ * the session), plus the chat-messages switch and a block pair with the sender.
+ */
+function messagePushSkip(u, { host, sender }) {
+  if (!u) return 'user_missing';
+  if (u.status && u.status !== 'ACTIVE') return 'not_active';
+  if (u.suspensionInfo && u.suspensionInfo.isSuspended === true) return 'suspended';
+  if (pushesOff(u)) return 'push_disabled';
+  if (u.notifications && u.notifications.chatMessages === false) return 'chat_messages_disabled';
+  if (host && !same(u._id, host._id) && blockedEitherWay(u, host)) return 'blocked_host';
+  if (sender && blockedEitherWay(u, sender)) return 'blocked_sender';
+  if (deviceTokens(u).length === 0) return 'no_device';
+  return null;
+}
+
+const PUSH_USER_FIELDS = '_id firstName status suspensionInfo notifications.pushNotifications notifications.chatMessages fcmDevices fcmTokens blockedUsers';
+
+function messagePayload(plan, session, uid, messageId, body) {
+  return {
+    type:            'SPORTS_MESSAGE',
+    sessionId:       String(session._id),
+    sportsPlanId:    String(plan._id),
+    sportType:       plan.sportType,
+    recipientUserId: String(uid),
+    messageId:       String(messageId),
+    title:           `${sportName(plan)} chat`,
+    body,
+  };
+}
+
+/** Users with this plan's chat on screen right now (never just in the room). */
+async function visibleChatUsers(planId) {
+  try {
+    return await sportsSocket().visibleChatUsers(String(planId));
+  } catch (err) {
+    console.error('[SPORTS_MESSAGE_PUSH] visibility lookup failed:', err.message);
+    return new Set();
+  }
+}
+
+/**
+ * ONE atomic update on the member row decides it: when their window is over and
+ * nothing is waiting, it starts a new window (this call sends); otherwise the
+ * message joins what is waiting (the tick sends). The row as it was just before
+ * the update says which — MongoDB applied exactly that.
+ * @returns { claimed, before }, or null when there is no JOINED row.
+ */
+async function claimOrQueue(sessionId, userId, messageId, now) {
+  const at = new Date(now);
+  const cutoff = new Date(now - MESSAGE_PUSH_WINDOW_MS);
+  const quiet = { $and: [
+    { $lte: [{ $ifNull: ['$push.pendingCount', 0] }, 0] },
+    { $lt: [{ $ifNull: ['$push.lastSentAt', new Date(0)] }, cutoff] },
+  ] };
+  const before = await SportsSessionMember.findOneAndUpdate(
+    { sessionId, userId, status: 'JOINED' },
+    [{ $set: { push: { $cond: [
+      quiet,
+      { lastSentAt: at, pendingCount: 0, pendingSince: null, pendingLastMessageId: null },
+      {
+        lastSentAt:           { $ifNull: ['$push.lastSentAt', null] },
+        pendingCount:         { $add: [{ $ifNull: ['$push.pendingCount', 0] }, 1] },
+        pendingSince:         { $ifNull: ['$push.pendingSince', at] },
+        pendingLastMessageId: messageId,
+      },
+    ] } } }],
+    { new: false },
+  ).lean();
+  if (!before) return null;
+  const p = before.push || {};
+  const claimed = !(p.pendingCount > 0) && (!p.lastSentAt || new Date(p.lastSentAt).getTime() < cutoff.getTime());
+  return { claimed, before };
+}
+
+/**
+ * A claimed push was not delivered: give the window back and leave the messages
+ * waiting, so the tick retries — while they are at most MESSAGE_PUSH_RETRY_MS old
+ * (pendingSince bounds it). Undoes only OUR claim: if anything else started a
+ * window since, that stands.
+ */
+function releaseClaim(memberId, claimedAt, previous, retry) {
+  const prev = previous || {};
+  return SportsSessionMember.updateOne(
+    { _id: memberId, 'push.lastSentAt': claimedAt },
+    [{ $set: { push: {
+      lastSentAt:           prev.lastSentAt || null,
+      pendingCount:         { $add: [{ $ifNull: ['$push.pendingCount', 0] }, retry.count] },
+      pendingSince:         { $ifNull: [retry.since, { $ifNull: ['$push.pendingSince', null] }] },
+      pendingLastMessageId: { $ifNull: ['$push.pendingLastMessageId', retry.messageId] },
+    } } }],
+  ).catch(err => console.error('[SPORTS_MESSAGE_PUSH] release failed:', err.message));
+}
+
+/**
+ * After a message was saved and broadcast: the first message after a quiet spell
+ * is pushed to each other player now; later ones wait for the tick. Recipients
+ * come from the plan (the authority), never from the request. Always resolves:
+ * a push can never affect the message.
+ */
+async function notifyNewMessage(plan, session, message, senderId, now = Date.now()) {
+  const summary = { event: 'sports_message_push', sessionId: String(session._id), considered: 0, sent: 0, queued: 0, skipped: {} };
+  const skip = r => { summary.skipped[r] = (summary.skipped[r] || 0) + 1; };
+  try {
+    if (!messagePushEnabled()) { skip('disabled'); return summary; }
+    if (chatStateOf(session, plan, now) !== 'active') { skip('chat_closed'); return summary; }
+    const recipients = (plan.playersJoined || []).map(String).filter(id => !same(id, senderId));
+    summary.considered = recipients.length;
+    if (recipients.length === 0) return summary;
+
+    const users = await User.find({ _id: { $in: [...recipients, String(senderId), String(plan.creatorId)] } })
+      .select(PUSH_USER_FIELDS).lean();
+    const byId = new Map(users.map(u => [String(u._id), u]));
+    const sender = byId.get(String(senderId));
+    const host = byId.get(String(plan.creatorId));
+    const visible = await visibleChatUsers(plan._id);
+    const body = singleMessageBody(sender && sender.firstName, message.text);
+
+    for (const uid of recipients) {
+      const u = byId.get(uid);
+      const reason = messagePushSkip(u, { host, sender });
+      if (reason) { skip(reason); continue; }
+      if (visible.has(uid)) { skip('chat_visible'); continue; }
+      const claim = await claimOrQueue(session._id, u._id, message._id, now);
+      if (!claim) { skip('no_member_row'); continue; }
+      if (!claim.claimed) { summary.queued++; continue; }
+      const res = await fcm().sendDataFcm(uid, deviceTokens(u), messagePayload(plan, session, uid, message._id, body));
+      if (res && res.delivered) { summary.sent++; continue; }
+      skip('fcm_failed');
+      await releaseClaim(claim.before._id, new Date(now), claim.before.push,
+        { count: 1, since: new Date(now), messageId: message._id });
+    }
+  } catch (err) {
+    summary.error = err.message;
+    console.error('[SPORTS_MESSAGE_PUSH] failed:', err.message);
+  }
+  // Counts and ids only — never names, tokens or message text.
+  console.log('[SPORTS_MESSAGE_PUSH]', JSON.stringify(summary));
+  return summary;
+}
+
+/**
+ * The newest message [uid] has not read and may see: a member's message, not
+ * deleted, not their own, not from anyone in a block pair with them, not one
+ * they hid. Read now, so a delete or a block since it was sent is respected.
+ */
+async function newestUnreadVisible(session, member, uid, blocked) {
+  const floors = [member.lastReadAt, member.joinedAt].filter(Boolean).map(d => new Date(d).getTime());
+  const since = new Date(floors.length ? Math.max(...floors) : 0);
+  const rows = await SportsMessage.find({
+    sessionId:   session._id,
+    messageType: 'TEXT',
+    deletedAt:   null,
+    createdAt:   { $gt: since },
+    senderId:    { $ne: new ObjectId(String(uid)), $nin: [...blocked].map(id => new ObjectId(id)) },
+  }).sort({ createdAt: -1, _id: -1 }).limit(20).select('senderId text createdAt').lean();
+  if (rows.length === 0) return null;
+  const hid = new Set((await SportsHiddenMessage.find({ userId: uid, messageId: { $in: rows.map(r => r._id) } })
+    .select('messageId').lean()).map(h => String(h.messageId)));
+  return rows.find(r => !hid.has(String(r._id))) || null;
+}
+
+/**
+ * One member's waiting messages. The claim (nothing waiting, a new window) is one
+ * conditional update, so of two ticks, or two servers, exactly one gets past it.
+ * Everything after is decided from the database NOW: still in the plan, the chat
+ * still open, still reachable, not looking at the chat, and what is still unread
+ * (unreadCounts — the count the app's badge shows).
+ */
+async function flushOne(row, now, summary) {
+  const skip = r => { summary.skipped[r] = (summary.skipped[r] || 0) + 1; };
+  const at = new Date(now);
+  const cutoff = new Date(now - MESSAGE_PUSH_WINDOW_MS);
+  const before = await SportsSessionMember.findOneAndUpdate(
+    {
+      _id: row._id,
+      'push.pendingCount': { $gt: 0 },
+      $or: [{ 'push.lastSentAt': null }, { 'push.lastSentAt': { $lt: cutoff } }],
+    },
+    { $set: { 'push.lastSentAt': at, 'push.pendingCount': 0, 'push.pendingSince': null, 'push.pendingLastMessageId': null } },
+    { new: false },
+  ).lean();
+  if (!before) { skip('claimed_elsewhere'); return; }
+  const waiting = before.push || {};
+  const since = waiting.pendingSince ? new Date(waiting.pendingSince).getTime() : now;
+  if (now - since > MESSAGE_PUSH_STALE_MS) { skip('stale'); return; }
+  if (before.status !== 'JOINED') { skip('not_a_member'); return; }
+
+  const [session, plan] = await Promise.all([
+    SportsSession.findById(before.sessionId).lean(),
+    SportsPlan.findById(before.sportsPlanId).lean(),
+  ]);
+  if (!session || !plan) { skip('gone'); return; }
+  const uid = String(before.userId);
+  if (!includesId(plan.playersJoined, uid)) { skip('not_a_member'); return; }
+  if (chatStateOf(session, plan, now) !== 'active') { skip('chat_closed'); return; }
+
+  const users = await User.find({ _id: { $in: [uid, String(plan.creatorId)] } }).select(PUSH_USER_FIELDS).lean();
+  const u = users.find(x => same(x._id, uid));
+  const host = users.find(x => same(x._id, plan.creatorId));
+  const reason = messagePushSkip(u, { host, sender: null });
+  if (reason) { skip(reason); return; }
+  if ((await visibleChatUsers(plan._id)).has(uid)) { skip('chat_visible'); return; }
+
+  // The member as they are now: a read since the claim counts.
+  const member = await SportsSessionMember.findById(before._id).select('lastReadAt joinedAt').lean();
+  const blocked = await blockedSet(u);
+  const unread = (await unreadCounts(uid, [{ session, member }], [...blocked])).get(String(session._id)) || 0;
+  if (unread === 0) { skip('read'); return; }
+  const latest = await newestUnreadVisible(session, member, uid, blocked);
+  // Only deleted, hidden or blocked messages are waiting: nothing to show.
+  if (!latest) { skip('nothing_visible'); return; }
+
+  let body;
+  if (unread === 1) {
+    const sender = await User.findById(latest.senderId).select('firstName').lean();
+    body = singleMessageBody(sender && sender.firstName, latest.text);
+  } else {
+    body = groupedMessageBody(unread, plan);
+  }
+  const res = await fcm().sendDataFcm(uid, deviceTokens(u), messagePayload(plan, session, uid, latest._id, body));
+  if (res && res.delivered) { summary.sent++; return; }
+  skip('fcm_failed');
+  if (now - since <= MESSAGE_PUSH_RETRY_MS) {
+    await releaseClaim(before._id, at, waiting, {
+      count: waiting.pendingCount, since: new Date(since), messageId: waiting.pendingLastMessageId || latest._id,
+    });
+  }
+}
+
+/**
+ * The every-minute step (cronJobs.js, the Sports block): members whose window is
+ * over with messages still waiting. One query on the partial index (it holds only
+ * rows with something waiting); each row is claimed before anything is sent.
+ * [now] is injectable for tests; production uses the server clock.
+ */
+async function flushMessagePushes(now = Date.now()) {
+  const summary = { event: 'sports_message_flush', due: 0, sent: 0, skipped: {} };
+  if (!messagePushEnabled()) return summary;
+  const cutoff = new Date(now - MESSAGE_PUSH_WINDOW_MS);
+  const due = await SportsSessionMember.find({
+    'push.pendingCount': { $gt: 0 },
+    $or: [{ 'push.lastSentAt': null }, { 'push.lastSentAt': { $lt: cutoff } }],
+  }).limit(MAX_FLUSH_PER_TICK).select('_id').lean();
+  summary.due = due.length;
+  for (const row of due) {
+    try {
+      await flushOne(row, now, summary);
+    } catch (err) {
+      console.error(`[SPORTS_MESSAGE_PUSH] flush member=${row._id} failed:`, err.message);
+    }
+  }
+  // Counts only — never names, tokens or message text.
+  if (summary.due > 0) console.log('[SPORTS_MESSAGE_PUSH]', JSON.stringify(summary));
+  return summary;
+}
+
+/**
+ * "Basketball session cancelled" — to the plan's players, never the host. Called
+ * once, from the guarded session update that makes the cancellation real
+ * (sportsSessionService.markCancelled), so a retried cancel or a repair on read
+ * cannot resend it. A cancellation first recorded after the game had ended (a
+ * repair) is not pushed: it would be news about the past. The usual skips apply
+ * (notifyMembers). Always resolves.
+ */
+async function notifySessionCancelled(plan, session, now = Date.now()) {
+  if (now >= new Date(plan.endTime).getTime()) {
+    console.log('[SPORTS_NOTIFY]', JSON.stringify({ event: 'sports_cancel_notification', sessionId: String(session._id), skipped: { ended: 1 } }));
+    return null;
+  }
+  const sport = sportName(plan);
+  const recipients = (plan.playersJoined || []).map(String).filter(id => !same(id, plan.creatorId));
+  return notifyMembers(plan, session, recipients, () => ({
+    type:  'SPORTS_SESSION_CANCELLED',
+    title: `${sport} session cancelled`,
+    body:  `The host cancelled this ${sport} session. You can still read the chat.`,
+  }), 'sports_cancel_notification');
+}
+
+
 module.exports = {
   listMessages,
   sendMessage,
@@ -1189,6 +1525,10 @@ module.exports = {
   announce,
   notifyMemberJoined,
   notifyMembers,
+  // Phase 4.
+  notifyNewMessage,
+  flushMessagePushes,
+  notifySessionCancelled,
   chatInfo,
   chatStateOf,
   expiresAtOf,
@@ -1206,5 +1546,7 @@ module.exports = {
   _internal: {
     INACTIVITY_MS, PAGE_DEFAULT, PAGE_MAX, TEXT_MAX, EDIT_WINDOW_MS, RANGE_MAX,
     cleanText, systemText, recordMessage, previewOf, hydrate, formatMessage,
+    MESSAGE_PUSH_WINDOW_MS, MESSAGE_PUSH_RETRY_MS, MESSAGE_PUSH_STALE_MS, MESSAGE_PUSH_BODY_MAX,
+    messagePushEnabled, singleMessageBody, groupedMessageBody, claimOrQueue,
   },
 };

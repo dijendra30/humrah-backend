@@ -31,6 +31,11 @@
 // PHASE 4 (notifications) hooks in at onPlanCreated / onPlayerJoined /
 // onPlayerLeft / onPlanCancelled: each is called exactly once per real change.
 //
+// PHASE 4. The cancellation push: markCancelled sends SPORTS_SESSION_CANCELLED
+// to the participants (never the host) when THIS call made the change — the same
+// guarded update that makes the chat say so once — so a retried cancel or a
+// repair on read cannot send it twice. formatSession adds the derived lifecycle.
+//
 // CHAT ENHANCEMENT. onPlayerRemoved: the host removed someone (the plan write in
 // sportsPlanService.removePlayer decides it). Their member row becomes REMOVED,
 // their sockets are told and taken out of the room, and the chat says "<name>
@@ -216,6 +221,9 @@ async function markCancelled(session, plan, cancelledAt) {
   session.cancelledAt = session.cancelledAt || cancelledAt;
   if (res.modifiedCount === 1) {
     await chat().announce(session, plan, 'SESSION_CANCELLED', plan.creatorId, 'SESSION_CANCELLED');
+    // Phase 4: once, on the real transition. Fire-and-forget: a push can never
+    // slow down or fail the cancellation.
+    chat().notifySessionCancelled(plan, session).catch(() => {});
   }
 }
 
@@ -349,6 +357,8 @@ function formatSession(session, plan, member, formattedPlan, now = Date.now(), e
     sportsPlanId:  String(plan._id),
     status:        session.status,
     phase:         sessionPhase(plan, session, now),
+    // Phase 4 (additive): lifecycle + lifecycleChangesAt; `phase` is unchanged.
+    ...planService()._internal.lifecycleOf(plan, session, now),
     role:          member && member.role === 'HOST' ? 'HOST' : 'PARTICIPANT',
     memberCount:   (plan.playersJoined || []).length,
     playerLimit:   plan.playerLimit,
