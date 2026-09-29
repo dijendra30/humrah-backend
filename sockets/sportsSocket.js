@@ -48,6 +48,15 @@
 // A new reply's quote is adjusted per reader: a quote of someone the reader is
 // in a block pair with is sent as unavailable, and one the reader hid for
 // themselves as hidden — the same as a history read would show them.
+//
+// Phase 4 — push suppression (SPORTS_PHASE_4_AUDIT.md §11, §15, §20):
+//   client → server    sports_chat_visible  { planId, visible }
+// Sent by the chat screen when it comes on screen and when it goes off it.
+// Honoured only from a socket already admitted to sports:{planId} (membership
+// re-read at join); anything else is ignored. It only ever SUPPRESSES message
+// pushes to that socket's own user — it grants nothing. Being in the room is not
+// "visible": the plan page joins the same room, and a chat in the background
+// keeps its socket. A disconnect, or leaving the room, clears it.
 // -----------------------------------------------------------------------------
 'use strict';
 
@@ -253,8 +262,19 @@ function initSportsSocket(io) {
       const planId = payload && typeof payload.planId === 'string' ? payload.planId : null;
       if (!isValidId(planId)) return reply({ ok: false, error: 'invalid_plan_id' });
       stopTyping(`${socket.id}|${planId}`);
+      if (socket.data.chatVisible === planId) socket.data.chatVisible = null;
       socket.leave(planRoom(planId));
       return reply({ ok: true });
+    });
+
+    // ── Chat on screen (Phase 4) ──────────────────────────────────────────────
+    socket.on('sports_chat_visible', (payload, ack) => {
+      const reply = typeof ack === 'function' ? ack : () => {};
+      const planId = payload && typeof payload.planId === 'string' ? payload.planId : null;
+      if (!isValidId(planId) || !socket.rooms.has(planRoom(planId))) return reply({ ok: false, error: 'not_in_room' });
+      if (payload.visible === true) socket.data.chatVisible = planId;
+      else if (socket.data.chatVisible === planId) socket.data.chatVisible = null;
+      return reply({ ok: true, visible: socket.data.chatVisible === planId });
     });
 
     // ── Typing (Phase 3) ──────────────────────────────────────────────────────
@@ -464,6 +484,20 @@ function emitSportsPoll(planId, sessionId, pollFor) {
   }), null).catch(err => console.error('[SPORTS_SOCKET] poll broadcast failed:', err.message));
 }
 
+/**
+ * Phase 4: the users who have this plan's chat on screen right now — a socket in
+ * the plan room whose chat said it is visible. Used only to skip message pushes.
+ */
+async function visibleChatUsers(planId) {
+  const out = new Set();
+  if (!ioRef || !planId) return out;
+  const sockets = await ioRef.of(NAMESPACE).in(planRoom(String(planId))).fetchSockets();
+  for (const s of sockets) {
+    if (s.data && s.data.chatVisible === String(planId)) out.add(String(s.data.userId));
+  }
+  return out;
+}
+
 /** To one user's own sockets on this namespace only (e.g. "delete for me"). */
 function emitToUser(userId, event, payload) {
   if (!ioRef || !userId) return;
@@ -520,6 +554,7 @@ module.exports = {
   emitToUser,
   removeUserFromChat,
   emitSessionParticipantRemoved,
+  visibleChatUsers,
   // For tests.
   _internal: { typingBySocket, TYPING_TTL_MS },
 };
