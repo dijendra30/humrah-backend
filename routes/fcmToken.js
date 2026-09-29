@@ -31,7 +31,7 @@ function normalizeCapabilityBool(value) {
 // Saves (or deduplicates) the FCM token for the authenticated user.
 router.post("/fcm-token", async (req, res) => {
   try {
-    const { fcmToken, androidVersion, appVersion, supportsHumrahRooms } = req.body;
+    const { fcmToken, androidVersion, appVersion, supportsHumrahRooms, supportsSportsDiscovery } = req.body;
     if (!fcmToken || typeof fcmToken !== "string" || fcmToken.trim() === "") {
       return res.status(400).json({ success: false, message: "fcmToken is required" });
     }
@@ -54,12 +54,17 @@ router.post("/fcm-token", async (req, res) => {
       if (supportsHumrahRooms !== undefined) {
         user.fcmDevices[existingDeviceIndex].supportsHumrahRooms = normalizeCapabilityBool(supportsHumrahRooms);
       }
+      // Sports discovery: same rule — only changed when the app supplies it.
+      if (supportsSportsDiscovery !== undefined) {
+        user.fcmDevices[existingDeviceIndex].supportsSportsDiscovery = normalizeCapabilityBool(supportsSportsDiscovery);
+      }
     } else {
       user.fcmDevices.push({
         token: tokenStr,
         androidVersion: androidVersion || "Unknown",
         appVersion: appVersion || "Unknown",
         supportsHumrahRooms: normalizeCapabilityBool(supportsHumrahRooms),
+        supportsSportsDiscovery: normalizeCapabilityBool(supportsSportsDiscovery),
         updatedAt: new Date()
       });
     }
