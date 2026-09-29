@@ -511,6 +511,9 @@ const userSchema = new mongoose.Schema({
       androidVersion: String, 
       appVersion: String,
         supportsHumrahRooms: { type: Boolean, default: false }, 
+        // Sports discovery (Phase 5C): the app build on this device can open a
+        // "plan near you" push. Only devices that say so are sent one.
+        supportsSportsDiscovery: { type: Boolean, default: false },
       updatedAt: { type: Date, default: Date.now } 
     }], 
     default: [] 
