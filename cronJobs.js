@@ -56,6 +56,15 @@ cron.schedule('* * * * *', async () => {
   }
 });
 
+// Sports discovery (Phase 5D): one startup line that states the gate (OFF / ON since / enabled
+// but not running), so an operator can see it in the log without reading the environment.
+// It only logs; nothing is started here.
+try {
+  require('./services/sportsDiscoveryService').logStartupBanner();
+} catch (err) {
+  console.error('[SPORTS_DISCOVERY] startup banner failed:', err && err.name);
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // EVERY MINUTE — Sports attendance check
 //

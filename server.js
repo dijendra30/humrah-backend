@@ -707,6 +707,14 @@ app.use('/api/chats',             authenticate, enforceLegalAcceptance, require(
 app.use('/api/settings',          authenticate, enforceLegalAcceptance, settingsRoutes);
 app.use('/api/notifications',     authenticate, enforceLegalAcceptance, require('./routes/notifications'));
 app.use('/api/profile-assistant', authenticate, profileAssistantRoutes);
+// Sports discovery (Phase 5D): read-only status for operators. It can only read (one GET route),
+// is super-admin only, and is mounted inside a try so it can never stop the server from starting.
+try {
+  const { superAdminOnly: sportsDiscoverySuperAdmin } = require('./middleware/auth');
+  app.use('/api/admin/sports-discovery', authenticate, sportsDiscoverySuperAdmin, require('./routes/sportsDiscoveryAdmin'));
+} catch (err) {
+  console.error('[SPORTS_DISCOVERY] status route not mounted:', err && err.name);
+}
 app.use('/api/admin',             authenticate, require('./routes/admin'));
 app.use('/api/admin/branding',    require('./routes/branding.route'));
 app.use('/api/admin-dashboard',   authenticate, require('./routes/adminDashboard'));
