@@ -292,7 +292,13 @@ router.post('/create', authenticate, async (req, res) => {
     user.last_known_lng = Number(lng);
     user.last_location_updated_at = now;
     // Also update liveLocation if the body provided city/state (refreshes timestamp)
+    // type + coordinates keep liveLocation valid GeoJSON: users has a { liveLocation: '2dsphere' }
+    // index (models/User.js), and a bare {lat, lng} object is read as a legacy pair with the
+    // FIRST field as longitude, so it is indexed at the wrong point and, east of 90°E, rejected
+    // outright ("Can't extract geo keys"). lat/lng are range-checked at the top of this route.
     user.liveLocation = {
+      type:        'Point',
+      coordinates: [Number(lng), Number(lat)],
       lat:       Number(lat),
       lng:       Number(lng),
       city:      city || user.liveLocation?.city || null,
