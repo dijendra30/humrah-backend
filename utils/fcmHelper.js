@@ -16,6 +16,10 @@ const User  = require('../models/User');
  * @param {string}   userId  - Recipient MongoDB user ID (used for token pruning)
  * @param {string[]} tokens  - FCM registration tokens (deduplicated internally)
  * @param {object}   data    - Key-value payload (all values auto-coerced to strings)
+ * @param {object}   [options]
+ * @param {boolean}  [options.quietLog] - true: do not write the recipient's user id to the log
+ *                   (Sports discovery uses this so its recipients cannot be read back from the
+ *                   logs). Default false: every existing caller logs exactly as before.
  * @returns {Promise<{attempted:number, successCount:number, failureCount:number,
  *                    invalidTokensRemoved:number, delivered:boolean, error:string|null}>}
  *
@@ -24,7 +28,8 @@ const User  = require('../models/User');
  * that and burned a 12h user cooldown even when nothing was delivered. It now always
  * resolves with an explicit result and never throws.
  */
-async function sendDataFcm(userId, tokens, data) {
+async function sendDataFcm(userId, tokens, data, options = {}) {
+  const quietLog = !!(options && options.quietLog === true);
   const result = {
     attempted: 0,
     successCount: 0,
@@ -79,12 +84,14 @@ async function sendDataFcm(userId, tokens, data) {
           },
         });
         result.invalidTokensRemoved = bad.length;
-        console.log(`[FCM] Pruned ${bad.length} invalid token(s) for user ${userId}`);
+        console.log(quietLog
+          ? `[FCM] Pruned ${bad.length} invalid token(s)`
+          : `[FCM] Pruned ${bad.length} invalid token(s) for user ${userId}`);
       }
     }
 
     console.log('[FCM] type=' + (stringData.type || '?') +
-      ' to=' + userId +
+      (quietLog ? '' : ' to=' + userId) +
       ' success=' + resp.successCount +
       ' failure=' + resp.failureCount);
   } catch (err) {

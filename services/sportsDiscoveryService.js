@@ -8,15 +8,22 @@
 //   existing every-minute Sports cron (cronJobs.js)
 //     └─ tickSportsDiscovery()
 //          0. kill switch + rollout marker           (off unless both are set)
-//          1. retry pass                             one retry per failed push
-//          2. resume pass                            runs whose worker died
-//          3. plans created in the last 30 minutes   claim → select ONCE → send
+//          1. safety gate                            breaker not tripped, unique indexes present (5D)
+//          2. retry pass                             one retry per failed push
+//          3. resume pass                            runs whose worker died, within the window
+//          4. plans created in the last 30 minutes   claim → select ONCE → send
+//          5. self-check                             re-count the people just notified (5D)
 //
 // Everything is a conditional Mongo update, so it survives a restart and is safe on
 // several servers at once. createPlan / joinPlan / getNearbyPlans are not touched:
 // the plan page and the atomic join stay the authority (a tap fetches the plan
 // fresh). It never sends anything unless SPORTS_DISCOVERY_ENABLED=true AND
 // SPORTS_DISCOVERY_STARTED_AT is a valid time.
+//
+// Phase 5D additions (all safety, none change who is notified): a resumed run can no
+// longer announce a plan late or across a re-activation; the unique indexes are verified
+// before any send; a circuit breaker stops it on a critical failure and keeps it
+// stopped across restarts; recipients are never written to the log.
 //
 // Logs: aggregate counts and reasons only. No ids, coordinates or tokens.
 // -----------------------------------------------------------------------------
@@ -27,6 +34,7 @@ const SportsPlan = require('../models/SportsPlan');
 const User = require('../models/User');
 const SportsDiscoveryRun = require('../models/SportsDiscoveryRun');
 const SportsDiscoveryDelivery = require('../models/SportsDiscoveryDelivery');
+const control = require('./sportsDiscoveryControl');
 
 // Lazy, like the other Sports services, so requiring this file loads nothing heavy.
 const fcm = () => require('../utils/fcmHelper');
@@ -34,6 +42,7 @@ const chat = () => require('./sportsChatService');
 const plans = () => require('./sportsPlanService');
 
 const { ObjectId } = mongoose.Types;
+const { errTag } = control;
 const SEC = 1000;
 const MIN = 60 * SEC;
 const HOUR = 60 * MIN;
@@ -44,6 +53,9 @@ const MAX_ATTEMPTS = 3;             // claims per plan (a crash-loop guard)
 const RETRY_DELAY_MS = 2 * MIN;     // "approximately 2 minutes later" (5A §16)
 const TICK_BUDGET_MS = 45 * SEC;    // no new plan is claimed after this
 const CAP_LOOKBACK_MS = 7 * DAY;
+const FAIL_STREAK_LIMIT = 8;        // first-attempt pushes in a row that FCM refused before the breaker trips
+// The only keys a discovery push may carry (5A §18–§20, §27). Anything else is refused.
+const PAYLOAD_KEYS = Object.freeze(['body', 'recipientUserId', 'sportType', 'sportsPlanId', 'spotsLeft', 'startTime', 'title', 'type']);
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 // The ROOM_ENGAGEMENT_ENABLED / SPORTS_MESSAGE_PUSH_ENABLED convention: unset or
@@ -97,6 +109,23 @@ function config() {
     uncertainMs:     envInt('SPORTS_DISCOVERY_UNCERTAIN_MIN', 5, 1, 24 * 60) * MIN,
     leaseMs:         envInt('SPORTS_DISCOVERY_LEASE_MIN', 5, 1, 60) * MIN,
   };
+}
+
+/**
+ * One line at server start that states the gate, so an operator can see it in the log
+ * without reading the environment (the same idea as the Meetup banner). Starts nothing.
+ */
+function logStartupBanner() {
+  const cfg = config();
+  if (!cfg.enabled) {
+    console.log('[SPORTS_DISCOVERY] startup: OFF (SPORTS_DISCOVERY_ENABLED is not "true"). It sends nothing.');
+    return;
+  }
+  if (cfg.startedAt === null) {
+    console.warn('[SPORTS_DISCOVERY] startup: ENABLED BUT NOT RUNNING: SPORTS_DISCOVERY_STARTED_AT is missing or not a valid time.');
+    return;
+  }
+  console.log(`[SPORTS_DISCOVERY] startup: ON. Announces plans created after ${new Date(cfg.startedAt).toISOString()} (radius ${cfg.radiusKm} km, up to ${cfg.maxRecipients} people per plan, caps ${cfg.capHour}/hour and ${cfg.capDay}/day, 1 per creator per ${cfg.creatorMs / DAY} days).`);
 }
 
 // ── Small pure helpers (unit-tested through _internal) ────────────────────────
@@ -171,6 +200,11 @@ function accountIssue(u, now) {
   return null;
 }
 
+// A push must carry exactly the agreed eight keys — no more, no fewer.
+function payloadShapeOk(payload) {
+  const keys = Object.keys(payload || {}).sort();
+  return keys.length === PAYLOAD_KEYS.length && keys.every((k, i) => k === PAYLOAD_KEYS[i]);
+}
 
 // ── Plan gates ────────────────────────────────────────────────────────────────
 const PLAN_FIELDS = 'creatorId sportType customSportName startTime endTime location playerLimit playersJoined kickedPlayers cardStatus createdAt';
@@ -203,9 +237,13 @@ const CANDIDATE_FIELDS = [
  * The nearest eligible people for a plan (5A §29–§30 steps 3–11). Batched: one
  * query per rule, never one per candidate. Returns { recipients: [ObjectId], stats }.
  * Nothing about position leaves this function except the ORDER (nearest first).
+ *
+ * stats: candidates = what the query returned (location, freshness, status, verification,
+ * preferences, capability, blocks and membership are enforced INSIDE the query, so they are
+ * not counted separately); the rest are the people dropped afterwards, by reason.
  */
 async function selectRecipients(plan, now, cfg) {
-  const stats = { candidates: 0, eligible: 0, selected: 0 };
+  const stats = { candidates: 0, eligible: 0, selected: 0, notInterested: 0, overlapped: 0, capped: 0, alreadyInvited: 0 };
   const creator = await User.findById(plan.creatorId).select('_id blockedUsers').lean();
   if (!creator) return { recipients: [], stats };
 
@@ -250,7 +288,9 @@ async function selectRecipients(plan, now, cfg) {
     }).select('playersJoined').lean();
     for (const p of past) for (const id of p.playersJoined || []) if (otherSet.has(String(id))) participated.add(String(id));
   }
+  const beforeInterest = pool.length;
   pool = pool.filter(u => interested.has(String(u._id)) || participated.has(String(u._id)));
+  stats.notInterested = beforeInterest - pool.length;
   if (pool.length === 0) return { recipients: [], stats };
 
   // Overlapping non-cancelled plans (5A §10), in ONE query.
@@ -265,7 +305,9 @@ async function selectRecipients(plan, now, cfg) {
     endTime: { $gt: plan.startTime },
   }).select('playersJoined').lean();
   for (const p of overlap) for (const id of p.playersJoined || []) if (idSet.has(String(id))) clashing.add(String(id));
+  const beforeOverlap = pool.length;
   pool = pool.filter(u => !clashing.has(String(u._id)));
+  stats.overlapped = beforeOverlap - pool.length;
 
   // Caps, cooldowns and "already invited to this plan" (5A §15–§16), in ONE query.
   const rows = await SportsDiscoveryDelivery.find({
@@ -280,8 +322,9 @@ async function selectRecipients(plan, now, cfg) {
   }
   pool = pool.filter(u => {
     const mine = byUser.get(String(u._id)) || [];
-    if (mine.some(r => same(r.sportsPlanId, plan._id))) return false;
-    return capViolation(mine.filter(r => SportsDiscoveryDelivery.COUNTED.includes(r.status)), plan.creatorId, now, cfg) === null;
+    if (mine.some(r => same(r.sportsPlanId, plan._id))) { stats.alreadyInvited++; return false; }
+    if (capViolation(mine.filter(r => SportsDiscoveryDelivery.COUNTED.includes(r.status)), plan.creatorId, now, cfg) !== null) { stats.capped++; return false; }
+    return true;
   });
   stats.eligible = pool.length;
 
@@ -353,11 +396,35 @@ async function lostCapRace(row, cfg, now) {
   return capViolation(others, row.creatorId, now, cfg) !== null;
 }
 
+// What the tick learns from each push: the people notified (for the self-check) and how many
+// first attempts in a row FCM refused (a systemic failure trips the breaker).
+function newGuard() { return { stop: false, tripReason: null, failureStreak: 0, sentUsers: [] }; }
+function noteOutcome(guard, outcome, userId, firstAttempt) {
+  if (outcome === 'sent') {
+    guard.sentUsers.push(String(userId));
+    if (firstAttempt) guard.failureStreak = 0;
+    return;
+  }
+  if (!firstAttempt) return;
+  if (outcome === 'failed_retryable' || outcome === 'send_error' || outcome === 'failed') {
+    guard.failureStreak += 1;
+    if (guard.failureStreak >= FAIL_STREAK_LIMIT && !guard.tripReason) { guard.tripReason = 'fcm_failing'; guard.stop = true; }
+  }
+}
+
 /** Sends for an already-inserted (or retry-claimed) row and records the outcome. */
-async function sendAndRecord(row, plan, user, cfg, now, { retry }) {
+async function sendAndRecord(row, plan, user, cfg, now, { retry, guard }) {
+  const payload = makePayload(plan, row.userId, now);
+  if (!payloadShapeOk(payload)) {
+    // Never send anything but the agreed eight keys. This cannot happen unless the code is wrong.
+    await skipRow(row, 'payload_invariant');
+    if (guard && !guard.tripReason) { guard.tripReason = 'payload_invariant'; guard.stop = true; }
+    return 'payload_invariant';
+  }
   let res;
   try {
-    res = await fcm().sendDataFcm(row.userId, capableTokens(user), makePayload(plan, row.userId, now));
+    // quietLog: the shared helper would otherwise write the recipient's id into the log.
+    res = await fcm().sendDataFcm(row.userId, capableTokens(user), payload, { quietLog: true });
   } catch (_) {
     // Unknown outcome: it may have gone out. The row stays 'sending' and is never resent.
     return 'send_error';
@@ -380,7 +447,7 @@ const skipRow = (row, reason) => SportsDiscoveryDelivery.updateOne(
   { _id: row._id, status: 'sending' }, { $set: { status: 'skipped', skipReason: reason } });
 
 /** One first-time push for (plan, user). Returns an outcome word. */
-async function deliverOne(planId, creatorId, userId, clock, cfg) {
+async function deliverOne(planId, creatorId, userId, clock, cfg, guard) {
   if (await SportsDiscoveryDelivery.exists({ sportsPlanId: planId, userId })) return 'already_invited';
   const now = clock();
   const check = await recheck(planId, userId, creatorId, now, cfg, null);
@@ -396,19 +463,22 @@ async function deliverOne(planId, creatorId, userId, clock, cfg) {
     throw err;
   }
   if (await lostCapRace(row, cfg, now)) { await skipRow(row, 'cap_race'); return 'cap_race'; }
-  return sendAndRecord(row, check.plan, check.user, cfg, now, { retry: false });
+  return sendAndRecord(row, check.plan, check.user, cfg, now, { retry: false, guard });
 }
 
 // ── Retry pass (5A §16): one retry, within the window, only if still eligible ──
-async function retryPass(clock, cfg, summary) {
+async function retryPass(clock, cfg, summary, guard) {
   const now = clock();
-  // Windows that lapsed are final.
+  // Windows that lapsed are final, and so is anything from before the current activation
+  // time (a push that failed under an earlier activation is never retried under a later one).
   const lapsed = await SportsDiscoveryDelivery.updateMany(
-    { status: 'failed_retryable', retryUntil: { $lte: new Date(now) } }, { $set: { status: 'failed' } });
+    { status: 'failed_retryable', $or: [{ retryUntil: { $lte: new Date(now) } }, { claimedAt: { $lt: new Date(cfg.startedAt) } }] },
+    { $set: { status: 'failed' } });
   summary.failed += lapsed.modifiedCount || 0;
 
   const due = await SportsDiscoveryDelivery.find({
-    status: 'failed_retryable', retryAfter: { $lte: new Date(now) }, retryUntil: { $gt: new Date(now) },
+    status: 'failed_retryable', claimedAt: { $gte: new Date(cfg.startedAt) },
+    retryAfter: { $lte: new Date(now) }, retryUntil: { $gt: new Date(now) },
   }).sort({ retryAfter: 1 }).limit(cfg.maxRecipients * 2).select('_id').lean();
 
   for (const { _id } of due) {
@@ -422,10 +492,12 @@ async function retryPass(clock, cfg, summary) {
       const check = await recheck(row.sportsPlanId, row.userId, row.creatorId, t, cfg, row._id);
       if (!check.ok) { await skipRow(row, check.reason); tally(summary, check.reason); continue; }
       if (await lostCapRace(row, cfg, t)) { await skipRow(row, 'cap_race'); tally(summary, 'cap_race'); continue; }
-      tally(summary, await sendAndRecord(row, check.plan, check.user, cfg, t, { retry: true }));
+      const outcome = await sendAndRecord(row, check.plan, check.user, cfg, t, { retry: true, guard });
+      tally(summary, outcome);
+      noteOutcome(guard, outcome, row.userId, false);
     } catch (err) {
       summary.errors++;
-      console.error(`[SPORTS_DISCOVERY] retry failed: ${err && err.name}`);
+      console.error(`[SPORTS_DISCOVERY] retry failed: ${errTag(err)}`);
     }
   }
 }
@@ -434,6 +506,12 @@ function tally(summary, outcome) {
   if (outcome === 'sent') summary.sent++;
   else if (outcome === 'failed' || outcome === 'failed_retryable' || outcome === 'send_error') summary.failed++;
   else summary.skipped[outcome] = (summary.skipped[outcome] || 0) + 1;
+}
+
+function addDropped(summary, stats) {
+  for (const [key, n] of [['not_interested', stats.notInterested], ['overlap', stats.overlapped], ['cap', stats.capped], ['already_invited', stats.alreadyInvited]]) {
+    if (n > 0) summary.dropped[key] = (summary.dropped[key] || 0) + n;
+  }
 }
 
 // ── Plan claim (5B §7) ────────────────────────────────────────────────────────
@@ -458,7 +536,7 @@ const finishRun = (run, reason, tallies) => SportsDiscoveryRun.updateOne(
     $inc: { 'counts.sent': tallies.sent, 'counts.failed': tallies.failed, 'counts.skipped': tallies.skippedTotal } });
 
 /** One claimed run: choose the recipients once, then walk them. */
-async function processRun(run, planDoc, clock, cfg, summary) {
+async function processRun(run, planDoc, clock, cfg, summary, guard) {
   const tallies = { sent: 0, failed: 0, skippedTotal: 0 };
   const count = outcome => {
     const before = { sent: summary.sent, failed: summary.failed };
@@ -478,6 +556,7 @@ async function processRun(run, planDoc, clock, cfg, summary) {
     summary.candidates += picked.stats.candidates;
     summary.eligible += picked.stats.eligible;
     summary.selected += picked.stats.selected;
+    addDropped(summary, picked.stats);
     // Stored once. If another claim stored first, theirs is the list.
     const stored = await SportsDiscoveryRun.findOneAndUpdate(
       { _id: run._id, selectedAt: null },
@@ -488,25 +567,28 @@ async function processRun(run, planDoc, clock, cfg, summary) {
   }
 
   for (const userId of recipients) {
+    if (guard.stop) return;                                                 // the breaker is about to trip
     if (clock() >= new Date(run.leaseUntil).getTime() - 5 * SEC) return;   // lease nearly gone: the next claim resumes
     let outcome;
     try {
-      outcome = await deliverOne(planDoc._id, planDoc.creatorId, userId, clock, cfg);
+      outcome = await deliverOne(planDoc._id, planDoc.creatorId, userId, clock, cfg, guard);
     } catch (err) {
       summary.errors++;
-      console.error(`[SPORTS_DISCOVERY] send step failed: ${err && err.name}`);
+      console.error(`[SPORTS_DISCOVERY] send step failed: ${errTag(err)}`);
       continue;
     }
     if (outcome === 'STOP') { await finishRun(run, 'plan_ineligible', tallies); return; }
     count(outcome);
+    noteOutcome(guard, outcome, userId, true);
   }
+  if (guard.stop) return;
   await finishRun(run, 'completed', tallies);
 }
 
 // ── The tick ──────────────────────────────────────────────────────────────────
 async function runTick(nowOverride = null) {
   const clock = () => (nowOverride !== null ? nowOverride : Date.now());
-  const summary = { plans: 0, candidates: 0, eligible: 0, selected: 0, sent: 0, failed: 0, retried: 0, errors: 0, skipped: {} };
+  const summary = { scanned: 0, plans: 0, candidates: 0, eligible: 0, selected: 0, sent: 0, failed: 0, retried: 0, errors: 0, skipped: {}, dropped: {} };
   const cfg = config();
 
   if (!cfg.enabled) return { ...summary, disabled: true };
@@ -516,17 +598,28 @@ async function runTick(nowOverride = null) {
     return { ...summary, disabled: true, reason: 'no_start_marker' };
   }
 
+  // The environment gate is open. Before ANY work: is the breaker tripped, and do the
+  // unique indexes that make duplicates impossible really exist?
+  const gate = await control.checkGate(cfg, clock());
+  if (!gate.ok) return { ...summary, disabled: true, reason: gate.reason };
+
   const began = Date.now();
-  await retryPass(clock, cfg, summary).catch(err => { summary.errors++; console.error(`[SPORTS_DISCOVERY] retry pass failed: ${err && err.name}`); });
+  const guard = newGuard();
+  await retryPass(clock, cfg, summary, guard).catch(err => { summary.errors++; console.error(`[SPORTS_DISCOVERY] retry pass failed: ${errTag(err)}`); });
 
   const now = clock();
-  // Runs that were claimed before and whose worker never finished: give up after
-  // the claim cap, otherwise resume them (the recipient list is already stored).
+  // Plans older than the discovery window, or from before the current activation time, are
+  // never announced — and neither is a run for them that is picked up late. So a run may only
+  // be RESUMED while it is younger than the window and newer than the activation time; older
+  // ones (and ones claimed too many times) are closed. Bounded to the last 24 hours, so the
+  // query uses the createdAt index.
+  const staleBefore = new Date(Math.max(now - cfg.windowMs, cfg.startedAt));
   await SportsDiscoveryRun.updateMany(
-    { status: 'processing', attempts: { $gte: MAX_ATTEMPTS }, leaseUntil: { $lte: new Date(now) } },
+    { status: 'processing', leaseUntil: { $lte: new Date(now) }, createdAt: { $gte: new Date(now - DAY) },
+      $or: [{ attempts: { $gte: MAX_ATTEMPTS } }, { createdAt: { $lt: staleBefore } }] },
     { $set: { status: 'done', doneReason: 'abandoned', leaseUntil: null } });
   const resumable = await SportsDiscoveryRun.find({
-    status: 'processing', attempts: { $gt: 0, $lt: MAX_ATTEMPTS }, leaseUntil: { $lte: new Date(now) },
+    status: 'processing', attempts: { $gt: 0, $lt: MAX_ATTEMPTS }, leaseUntil: { $lte: new Date(now) }, createdAt: { $gte: staleBefore },
   }).sort({ createdAt: 1 }).limit(cfg.maxPlansPerTick).select('sportsPlanId').lean();
 
   // New plans: open, not full, far enough away, created inside the window and after
@@ -541,6 +634,7 @@ async function runTick(nowOverride = null) {
   }).sort({ createdAt: 1 }).limit(cfg.maxPlansPerTick * 5).select('_id').lean();
 
   const wanted = [...new Set([...resumable.map(r => String(r.sportsPlanId)), ...fresh.map(p => String(p._id))])];
+  summary.scanned = wanted.length;
   if (wanted.length > 0) {
     const runs = await SportsDiscoveryRun.find({ sportsPlanId: { $in: wanted.map(id => new ObjectId(id)) } })
       .select('sportsPlanId status leaseUntil attempts').lean();
@@ -551,6 +645,7 @@ async function runTick(nowOverride = null) {
     }).slice(0, cfg.maxPlansPerTick);
 
     for (const id of todo) {
+      if (guard.stop) break;
       if (Date.now() - began > TICK_BUDGET_MS) break;
       try {
         const run = await claimRun(new ObjectId(id), clock(), cfg);
@@ -558,17 +653,35 @@ async function runTick(nowOverride = null) {
         summary.plans++;
         const planDoc = await SportsPlan.findById(id).select(PLAN_FIELDS).lean();
         if (!planDoc) { await finishRun(run, 'plan_ineligible', { sent: 0, failed: 0, skippedTotal: 0 }); continue; }
-        await processRun(run, planDoc, clock, cfg, summary);
+        await processRun(run, planDoc, clock, cfg, summary, guard);
       } catch (err) {
         summary.errors++;
-        console.error(`[SPORTS_DISCOVERY] plan failed: ${err && err.name}`);
+        console.error(`[SPORTS_DISCOVERY] plan failed: ${errTag(err)}`);
       }
     }
   }
 
-  if (summary.plans || summary.retried || summary.errors) {
-    const skipped = Object.entries(summary.skipped).map(([k, v]) => `${k}=${v}`).join(',') || 'none';
-    console.log(`[SPORTS_DISCOVERY] tick plans=${summary.plans} candidates=${summary.candidates} eligible=${summary.eligible} selected=${summary.selected} sent=${summary.sent} failed=${summary.failed} retried=${summary.retried} errors=${summary.errors} skipped=${skipped}`);
+  // Self-protection and bookkeeping. None of it is allowed to fail the tick.
+  try {
+    if (guard.tripReason) {
+      summary.tripped = guard.tripReason;
+      await control.trip(guard.tripReason, { failureStreak: guard.failureStreak, sent: summary.sent, failed: summary.failed }, clock());
+    } else if (summary.sent > 0) {
+      const audit = await control.auditInvariants(guard.sentUsers, clock(), cfg);
+      if (audit.violations > 0) {
+        summary.tripped = 'cap_invariant';
+        await control.trip('cap_invariant', audit.kinds, clock());
+      }
+    }
+    const streakTrip = await control.finishTick(gate.control, summary, clock());
+    if (streakTrip) summary.tripped = streakTrip;
+  } catch (err) {
+    console.error(`[SPORTS_DISCOVERY] bookkeeping failed: ${errTag(err)}`);
+  }
+
+  if (summary.plans || summary.retried || summary.errors || summary.tripped) {
+    const list = m => Object.entries(m).map(([k, v]) => `${k}=${v}`).join(',') || 'none';
+    console.log(`[SPORTS_DISCOVERY] tick scanned=${summary.scanned} plans=${summary.plans} candidates=${summary.candidates} eligible=${summary.eligible} selected=${summary.selected} sent=${summary.sent} failed=${summary.failed} retried=${summary.retried} errors=${summary.errors} dropped=${list(summary.dropped)} skipped=${list(summary.skipped)}${summary.tripped ? ` TRIPPED=${summary.tripped}` : ''}`);
   }
   return summary;
 }
@@ -584,11 +697,16 @@ async function tickSportsDiscovery(nowOverride = null) {
   try { return await runTick(nowOverride); } finally { ticking = false; }
 }
 
+/** The read-only report behind GET /api/admin/sports-discovery/status. */
+const getStatus = ({ deep = false } = {}) => control.buildStatus({ cfg: config(), deep });
+
 module.exports = {
   tickSportsDiscovery,
+  logStartupBanner,
+  getStatus,
   _internal: {
     runTick, config, envBool, envInt, hasSportsInterest, isVerified, isSuspended, capableTokens, blockedEitherWay,
-    capViolation, accountIssue, makePayload, selectRecipients, claimRun, INTEREST_LABELS, TYPE, MAX_ATTEMPTS,
-    RETRY_DELAY_MS,
+    capViolation, accountIssue, makePayload, payloadShapeOk, selectRecipients, claimRun, INTEREST_LABELS, TYPE,
+    MAX_ATTEMPTS, RETRY_DELAY_MS, FAIL_STREAK_LIMIT, PAYLOAD_KEYS,
   },
 };
