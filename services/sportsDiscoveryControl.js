@@ -65,12 +65,19 @@ const sameKey = (a, b) => JSON.stringify(a) === JSON.stringify(b);
  * Do the indexes exist? Mongoose builds them automatically and ignores a failure, so the two
  * that make duplicates impossible are CHECKED here (the unique (plan, user) index and the
  * unique per-plan run index). The rest are reported but are only performance.
+ *
+ * Also CHECKED: users { liveLocation: '2dsphere' }, declared in models/User.js. The candidate
+ * query is a $near on it, and without it MongoDB refuses the query (MongoServerError 291,
+ * "unable to find index for $geoNear query"). Its build fails, silently, when any user holds a
+ * liveLocation that is not valid GeoJSON. Without it discovery does not run at all: nothing is
+ * claimed, nothing is sent, and the status route names the missing index.
  */
 async function indexState(force = false) {
   const now = Date.now();
   if (!force && indexCache.at && now - indexCache.at < (indexCache.ok ? INDEX_OK_TTL_MS : INDEX_BAD_TTL_MS)) return indexCache;
   const detail = {
     runUniquePlan: false, deliveryUniquePlanUser: false,   // safety-critical
+    userLiveLocationGeo: false,                             // required: the candidate query cannot run without it
     deliveryUserClaimed: false, deliveryRetryPartial: false, deliveryTtl: false, runTtl: false,   // performance / housekeeping
   };
   try { await Promise.all([SportsDiscoveryRun.init(), SportsDiscoveryDelivery.init()]); }
@@ -85,7 +92,10 @@ async function indexState(force = false) {
     detail.deliveryTtl = !!(find(di, { createdAt: 1 }) && find(di, { createdAt: 1 }).expireAfterSeconds > 0);
     detail.runTtl = !!(find(ri, { createdAt: 1 }) && find(ri, { createdAt: 1 }).expireAfterSeconds > 0);
   } catch (err) { detail.listError = errTag(err); }
-  indexCache = { at: now, ok: detail.runUniquePlan && detail.deliveryUniquePlanUser, detail };
+  try {
+    detail.userLiveLocationGeo = !!(await User.collection.indexes()).find(i => sameKey(i.key, { liveLocation: '2dsphere' }));
+  } catch (err) { detail.userListError = errTag(err); }
+  indexCache = { at: now, ok: detail.runUniquePlan && detail.deliveryUniquePlanUser && detail.userLiveLocationGeo, detail };
   return indexCache;
 }
 
@@ -101,7 +111,12 @@ async function checkGate(cfg, now) {
   }
   const idx = await indexState();
   if (!idx.ok) {
-    logEvery('index', 5 * MIN, () => console.error('[SPORTS_DISCOVERY] NOT RUNNING: the unique indexes that prevent duplicate notifications are missing or could not be verified.'));
+    const d = idx.detail || {};
+    if (d.runUniquePlan && d.deliveryUniquePlanUser && !d.userLiveLocationGeo) {
+      logEvery('index', 5 * MIN, () => console.error('[SPORTS_DISCOVERY] NOT RUNNING: users has no { liveLocation: "2dsphere" } index, so the candidate query cannot run (MongoServerError 291). Nothing is claimed or sent.'));
+    } else {
+      logEvery('index', 5 * MIN, () => console.error('[SPORTS_DISCOVERY] NOT RUNNING: the unique indexes that prevent duplicate notifications are missing or could not be verified.'));
+    }
     return { ok: false, reason: 'index_missing' };
   }
   let control = await SportsDiscoveryControl.findById(KEY).lean();
@@ -250,6 +265,7 @@ async function buildStatus({ cfg, deep = false }) {
   const blockers = [];
   const warnings = [];
   if (!idx.ok) blockers.push('indexes_missing');
+  if (idx.detail && idx.detail.userLiveLocationGeo === false) blockers.push('user_live_location_index_missing');
   if (breakerTripped) blockers.push('breaker_tripped');
   if (!firebase.initialized) blockers.push('firebase_not_initialized');
   if (cfg.enabled && !startedAtValid) blockers.push('started_at_missing_or_invalid');
