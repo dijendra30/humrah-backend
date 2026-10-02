@@ -9,25 +9,31 @@
 // Operations used: listIndexes, countDocuments, and (only with --show-ids) find({...}, {_id: 1}).limit(5).
 // No insert, update, delete, index creation or index drop. Use a READ-ONLY database user if you can.
 //
-//   node <path>\SPORTS_DISCOVERY_291_KIT\diagnose-livelocation.js [--db <name>] [--show-ids]
+//   Inside the backend container (Coolify terminal):   node /app/diagnose-livelocation.js --show-ids
+//   On a PC:                                            node <path>\diagnose-livelocation.js [--db <name>] [--show-ids]
 //
-// It runs from ANY folder: it uses the mongoose already installed in the Humrah backend (HUMRAH_BACKEND_DIR, else the
-// current folder, else C:\Users\DIJENDRA\Desktop\humrah-backend-main). Nothing is installed.
+// It uses the mongoose already installed in the Humrah backend (HUMRAH_BACKEND_DIR, else this script's own folder — /app
+// in the container — else the current folder, else C:\Users\DIJENDRA\Desktop\humrah-backend-main). Nothing is installed.
 //
-// The connection string: if HUMRAH_DIAG_MONGO_URI is set it is used; otherwise the script ASKS for it with a hidden
-// prompt (nothing is echoed, so it never appears on screen, in shell history or in a log, and characters like & need no
-// quoting). It is never printed, and errors show only their name and code. There is deliberately no --uri option.
+// The connection string, in this order:
+//   1. HUMRAH_DIAG_MONGO_URI, if set;
+//   2. MONGODB_URI — the variable the running backend itself connects with (server.js: mongoose.connect(process.env.MONGODB_URI)),
+//      so inside the container it is the SAME database the app uses, with nothing to type;
+//   3. otherwise, only in an interactive terminal, a hidden prompt (nothing echoed).
+// It is never printed: not the URI, user, password, host or database name. Errors show only their name and code.
+// There is deliberately no --uri option, and no HTTP route: it is a command-line script only.
 //
 // Exit code: 0 = index present, or absent but buildable; 1 = absent AND at least one document would block the build;
-// 2 = could not run.
+// 2 = could not determine the state safely (no connection string, no users collection, any error).
 'use strict';
 const path = require('path');
 
 const DEFAULT_BACKEND = 'C:\\Users\\DIJENDRA\\Desktop\\humrah-backend-main';
+const BACKEND_URI_VAR = 'MONGODB_URI';
 
 /** The backend's own mongoose: no second copy is installed. Returns { mongoose, from } or throws a clear error. */
 function loadBackendMongoose() {
-  const candidates = [process.env.HUMRAH_BACKEND_DIR, process.cwd(), DEFAULT_BACKEND].filter(Boolean);
+  const candidates = [process.env.HUMRAH_BACKEND_DIR, __dirname, process.cwd(), DEFAULT_BACKEND].filter(Boolean);
   for (const dir of candidates) {
     try { return { mongoose: require(require.resolve('mongoose', { paths: [dir] })), from: dir }; }
     catch (e) { if (e.code !== 'MODULE_NOT_FOUND') throw e; }
@@ -84,6 +90,9 @@ const CLASSES = [
 ];
 
 async function diagnose(db, { showIds = false } = {}) {
+  // A missing users collection means this is not the database the app uses: refuse to draw any conclusion.
+  const exists = (await db.listCollections({ name: 'users' }, { nameOnly: true }).toArray()).length > 0;
+  if (!exists) return { usersCollectionExists: false };
   const users = db.collection('users');
   const indexes = await users.indexes();
   const geo = indexes.find(i => JSON.stringify(i.key) === JSON.stringify({ liveLocation: '2dsphere' }));
@@ -112,15 +121,30 @@ if (require.main === module) {
     const arg = n => { const i = process.argv.indexOf(n); return i > 0 ? process.argv[i + 1] : undefined; };
     const { mongoose, from } = loadBackendMongoose();          // fail before asking for anything if mongoose is missing
     console.log(`using mongoose ${mongoose.version} from ${from}`);
-    let uri = process.env.HUMRAH_DIAG_MONGO_URI;
-    if (uri) console.log('connection string: taken from HUMRAH_DIAG_MONGO_URI (not shown)');
-    else uri = (await askHidden('Paste the READ-ONLY connection string (hidden), then press Enter: ')).trim();
-    if (!/^mongodb(\+srv)?:\/\//i.test(uri || '')) { console.error('That is not a mongodb:// or mongodb+srv:// connection string (not shown).'); process.exitCode = 2; return; }
-    const conn = await mongoose.createConnection(uri, { ...(arg('--db') ? { dbName: arg('--db') } : {}), serverSelectionTimeoutMS: 15000 }).asPromise();
+    let uri;
+    if (process.env.HUMRAH_DIAG_MONGO_URI) {
+      uri = process.env.HUMRAH_DIAG_MONGO_URI;
+      console.log('connection string: taken from HUMRAH_DIAG_MONGO_URI (not shown)');
+    } else if (process.env[BACKEND_URI_VAR]) {
+      uri = process.env[BACKEND_URI_VAR];
+      console.log(`connection string: using existing backend MongoDB configuration (${BACKEND_URI_VAR}, not shown)`);
+    } else if (process.stdin.isTTY) {
+      uri = (await askHidden('Paste the READ-ONLY connection string (hidden), then press Enter: ')).trim();
+    } else {
+      console.error(`could not run: no connection string (neither HUMRAH_DIAG_MONGO_URI nor ${BACKEND_URI_VAR} is set, and there is no terminal to ask in)`);
+      process.exitCode = 2; return;
+    }
+    if (!/^mongodb(\+srv)?:\/\//i.test(uri || '')) { console.error('could not run: that is not a mongodb:// or mongodb+srv:// connection string (not shown).'); process.exitCode = 2; return; }
+    // No models are compiled here, and autoIndex/autoCreate are off, so the connection itself can create nothing.
+    const conn = await mongoose.createConnection(uri, { ...(arg('--db') ? { dbName: arg('--db') } : {}), serverSelectionTimeoutMS: 15000, autoIndex: false, autoCreate: false }).asPromise();
     uri = null;
     try {
       const r = await diagnose(conn.db, { showIds: process.argv.includes('--show-ids') });
-      console.log(`database: ${conn.db.databaseName}   users: ${r.total}`);
+      if (r.usersCollectionExists === false) {
+        console.error('could not run: the configured database has no "users" collection, so this is not the database the app uses (nothing was concluded).');
+        process.exitCode = 2; return;
+      }
+      console.log(`users collection: present   documents: ${r.total}`);
       console.log(`users { liveLocation: "2dsphere" } index: ${r.indexPresent ? 'PRESENT (' + r.indexName + ')' : 'MISSING'}`);
       console.log('all users indexes: ' + r.indexes.map(i => i.name).join(', '));
       console.log('\nliveLocation shapes:');
