@@ -14,6 +14,12 @@
 //                         start time are never announced) it can never re-announce the
 //                         plans that were skipped while it was stopped.
 //   the last tick         counts only (no ids, no tokens, no coordinates).
+//   the activation        written once per SPORTS_DISCOVERY_STARTED_AT, by the first tick that
+//                         runs under it: what the history held BEFORE that time (runs, how many
+//                         chose recipients or sent, deliveries). Counts only. Runs and deliveries
+//                         expire after 60 days; this record does not, so an activation stays
+//                         auditable (e.g. that the only earlier run was the 30 Sep 2026
+//                         MongoServerError 291 claim, which chose nobody and sent nothing).
 //
 // Nothing here is ever sent to a client except through that read-only status route.
 // -----------------------------------------------------------------------------
@@ -36,6 +42,9 @@ const sportsDiscoveryControlSchema = new mongoose.Schema({
   lastTickAt:      { type: Date, default: null },
   lastTick:        { type: mongoose.Schema.Types.Mixed, default: null },
   lastHeartbeatAt: { type: Date, default: null },
+  // { startedAt, recordedAt, before: { runs, selected, withSends, sent, inProgress, deliveries } }. The previous one is kept.
+  activation:         { type: mongoose.Schema.Types.Mixed, default: null },
+  previousActivation: { type: mongoose.Schema.Types.Mixed, default: null },
 }, { timestamps: true, minimize: false });
 
 module.exports = mongoose.model('SportsDiscoveryControl', sportsDiscoveryControlSchema);

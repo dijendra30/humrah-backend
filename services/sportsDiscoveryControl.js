@@ -11,6 +11,8 @@
 //   auditInvariants after a tick that sent: re-count the people just notified and prove
 //                   no cap was exceeded; a breach trips the breaker
 //   finishTick      error-streak bookkeeping, the last-tick summary, a heartbeat
+//   runCounts       what the run records say happened, as counts (read-only)
+//   recordActivation once per activation time: what the history held before it (counts only)
 //   buildStatus     the read-only report behind GET /api/admin/sports-discovery/status
 //
 // Logs: aggregate reasons only. No user ids, tokens or coordinates.
@@ -133,7 +135,64 @@ async function checkGate(cfg, now) {
     console.log('[SPORTS_DISCOVERY] circuit breaker re-armed by a later SPORTS_DISCOVERY_STARTED_AT.');
     control = await SportsDiscoveryControl.findById(KEY).lean();
   }
+  await recordActivation(cfg, control, now);
   return { ok: true, control };
+}
+
+// ── Run history and the activation record ─────────────────────────────────────
+/**
+ * Counts over the run records (no ids). `selected` = runs that chose their recipients
+ * (selectedAt set). A run without selectedAt never chose anyone, and recipients are only
+ * walked after selection (sportsDiscoveryService.processRun), so it cannot have sent: it is a
+ * claim that failed, or is still working, before candidate selection — the shape the
+ * MongoServerError 291 incident of 30 Sep 2026 left. Read-only.
+ */
+async function runCounts(match, now) {
+  const [g] = await SportsDiscoveryRun.aggregate([
+    { $match: match || {} },
+    { $group: {
+      _id: null,
+      runs:       { $sum: 1 },
+      selected:   { $sum: { $cond: [{ $ne: [{ $ifNull: ['$selectedAt', null] }, null] }, 1, 0] } },
+      withSends:  { $sum: { $cond: [{ $gt: [{ $ifNull: ['$counts.sent', 0] }, 0] }, 1, 0] } },
+      sent:       { $sum: { $ifNull: ['$counts.sent', 0] } },
+      inProgress: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'processing'] }, { $gt: ['$leaseUntil', new Date(now)] }] }, 1, 0] } },
+      firstAt:    { $min: '$createdAt' },
+      lastAt:     { $max: '$createdAt' },
+    } },
+  ]).option({ maxTimeMS: 5000 });
+  if (!g) return { runs: 0, selected: 0, unselected: 0, withSends: 0, sent: 0, inProgress: 0, firstAt: null, lastAt: null };
+  return {
+    runs: g.runs, selected: g.selected, unselected: g.runs - g.selected, withSends: g.withSends, sent: g.sent, inProgress: g.inProgress,
+    firstAt: g.firstAt ? new Date(g.firstAt).toISOString() : null, lastAt: g.lastAt ? new Date(g.lastAt).toISOString() : null,
+  };
+}
+
+/**
+ * Once per SPORTS_DISCOVERY_STARTED_AT, by the first tick that runs under it: store what the
+ * history held BEFORE that time. Nothing is deleted or rewritten: runs and deliveries stay as
+ * they are (and are never processed again, because plans created before the activation time are
+ * never announced). This only makes the activation auditable after those records expire.
+ * Never throws and never changes the outcome of the gate.
+ */
+async function recordActivation(cfg, control, now) {
+  const startedAt = new Date(cfg.startedAt).toISOString();
+  if (control && control.activation && control.activation.startedAt === startedAt) return;
+  try {
+    const before = { createdAt: { $lt: new Date(cfg.startedAt) } };
+    const runs = await runCounts(before, now);
+    const deliveries = await SportsDiscoveryDelivery.countDocuments(before).maxTimeMS(5000);
+    const activation = { startedAt, recordedAt: new Date(now).toISOString(), before: { ...runs, deliveries } };
+    // Conditional: with several servers, only the first write for this activation time lands.
+    await SportsDiscoveryControl.updateOne(
+      { _id: KEY, 'activation.startedAt': { $ne: startedAt } },
+      { $set: { activation, previousActivation: (control && control.activation) || null } },
+      { upsert: true });
+    console.log(`[SPORTS_DISCOVERY] activation ${startedAt} recorded. Before it: runs=${runs.runs} (selection completed: ${runs.selected}, sent: ${runs.sent}) deliveries=${deliveries}. Nothing before this time is processed.`);
+  } catch (err) {
+    if (err && err.code === 11000) return;   // another server recorded this activation first
+    logEvery('activation', 30 * MIN, () => console.error(`[SPORTS_DISCOVERY] could not record the activation: ${errTag(err)}`));
+  }
 }
 
 /** Trip the breaker: stop this process now and persist the stop. */
@@ -246,6 +305,7 @@ async function buildStatus({ cfg, deep = false }) {
   const out = {};
   await guarded('runs', out, () => SportsDiscoveryRun.estimatedDocumentCount());
   await guarded('deliveries', out, () => SportsDiscoveryDelivery.estimatedDocumentCount());
+  await guarded('runHistory', out, () => runCounts({}, now));
   const byStatus = {};
   const last24h = {};
   try {
@@ -292,6 +352,10 @@ async function buildStatus({ cfg, deep = false }) {
     lastHeartbeatAt: control && control.lastHeartbeatAt ? new Date(control.lastHeartbeatAt).toISOString() : null,
     indexes: idx.detail,
     totals: { runs: out.runs, deliveries: out.deliveries, deliveriesByStatus: byStatus, deliveriesLast24h: last24h },
+    // Every run still kept (runs expire after 60 days): how many chose recipients, sent, or are in progress.
+    runHistory: out.runHistory,
+    activation: control && control.activation ? control.activation : null,
+    previousActivation: control && control.previousActivation ? control.previousActivation : null,
     firebase,
     ...(out.errors ? { errors: out.errors } : {}),
   };
@@ -311,7 +375,7 @@ async function buildStatus({ cfg, deep = false }) {
 }
 
 module.exports = {
-  checkGate, trip, auditInvariants, finishTick, buildStatus, indexState, errTag, publicSummary,
+  checkGate, trip, auditInvariants, finishTick, buildStatus, indexState, errTag, publicSummary, runCounts, recordActivation,
   ERROR_TICK_LIMIT,
   _internal: { reset, isTripped, HEARTBEAT_MS },
 };
