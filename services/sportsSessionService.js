@@ -368,10 +368,75 @@ function formatSession(session, plan, member, formattedPlan, now = Date.now(), e
     cancelledAt:   session.cancelledAt ? new Date(session.cancelledAt).toISOString() : null,
     // Phase 3 — the chat.
     ...chat().chatInfo(session, plan, member, now),
+    // What a long press on this card may do (LEAVE | HOST_CANCEL | DELETE); see removalOf.
+    removal:       removalOf(session, plan, !!(member && member.role === 'HOST'), now),
     lastMessage:   extras.lastMessage || null,
     unreadCount:   extras.unreadCount || 0,
     plan:          formattedPlan,
   };
+}
+
+// ── Removing a session from your own list ─────────────────────────────────────
+//
+// What a long press on a Messages → Sessions card may do, decided here so the app
+// never guesses (formatSession → `removal`):
+//   LEAVE        a participant, the plan still open and not ended: the existing leave
+//                (sportsPlanService.leavePlan). After it they are not in the plan, so
+//                the session is no longer theirs to list.
+//   HOST_CANCEL  the host of a plan still open and not ended: the host cannot leave
+//                (the existing rule); only cancelling — a change for everyone, made
+//                from the plan, never from a long press — would remove it.
+//   DELETE       anything finished for this person: the chat is cancelled or expired
+//                (no-join included), or the game has ended. Per user only: hideSession.
+function removalOf(session, plan, isHost, now = Date.now()) {
+  const state = chat().chatStateOf(session, plan, now);
+  const finished = state !== 'active' || plan.cardStatus === 'cancelled' || now >= new Date(plan.endTime).getTime();
+  if (finished) return 'DELETE';
+  return isHost ? 'HOST_CANCEL' : 'LEAVE';
+}
+
+/** Hidden from this member's list, unless the chat has had qualifying activity since. */
+function hiddenFromList(member, session) {
+  if (!member || !member.hiddenAt) return false;
+  const last = session.lastMessageAt ? new Date(session.lastMessageAt).getTime() : 0;
+  return last <= new Date(member.hiddenAt).getTime();
+}
+
+/**
+ * POST /sessions/:sessionId/hide — "Delete" a session from MY Sessions list. Members of
+ * the plan only, and only once it is finished for them (removal DELETE): an open plan is
+ * left or cancelled through the existing routes instead, never hidden around them.
+ * Writes one field on the caller's own member row; nothing shared changes. Repeating it
+ * is harmless.
+ */
+async function hideSession(user, sessionId, now = Date.now()) {
+  if (!isValidId(sessionId)) return notFound();
+  const session = await SportsSession.findById(sessionId).lean();
+  if (!session) return notFound();
+  const plan = await SportsPlan.findById(session.sportsPlanId).lean();
+  if (!plan) return notFound();
+  if (await planService()._internal.isBlockedPair(user, plan.creatorId)) return notFound();
+  if (!includesId(plan.playersJoined, user._id)) {
+    return fail(403, 'NOT_A_SESSION_MEMBER', 'Only people in this plan can remove its session.',
+      { sportsPlanId: String(plan._id), removed: includesId(plan.kickedPlayers, user._id) });
+  }
+  const host = same(plan.creatorId, user._id);
+  const removal = removalOf(session, plan, host, now);
+  if (removal !== 'DELETE') {
+    return fail(409, 'SESSION_STILL_ACTIVE', host
+      ? 'You are hosting this plan. It can only be removed by cancelling it.'
+      : 'This plan is still on. Leave it to remove it from your sessions.', { removal });
+  }
+  await SportsSessionMember.updateOne(
+    { sessionId: session._id, userId: user._id },
+    {
+      $set:         { hiddenAt: new Date(now) },
+      // A row a sync write missed: created as the reconcile repair would create it.
+      $setOnInsert: { sportsPlanId: plan._id, status: 'JOINED', role: host ? 'HOST' : 'PARTICIPANT', joinedAt: new Date(now) },
+    },
+    { upsert: true },
+  );
+  return { success: true, status: 200, hidden: true, sessionId: String(session._id) };
 }
 
 /** When a closed chat stops being listed; null for an open one. */
@@ -508,6 +573,8 @@ async function listMySessions(user) {
     const state = c.chatStateOf(s, p, now);
     const until = listedUntil(s, p, state);
     if (until && now >= until.getTime()) continue;
+    // Removed from this person's own list ("Delete"), with nothing newer since.
+    if (hiddenFromList(mineBySession.get(String(s._id)), s)) continue;
     const m = mineBySession.get(String(s._id)) || { role: same(uid, p.creatorId) ? 'HOST' : 'PARTICIPANT' };
     const lastAt = s.lastMessage ? new Date(s.lastMessage.createdAt).getTime() : new Date(s.createdAt || 0).getTime();
     entries.push({ plan: p, session: s, member: m, open: state === 'active', lastAt });
@@ -674,10 +741,11 @@ module.exports = {
   listMySessions,
   getSession,
   removeMember,
+  hideSession,
   tickNoJoin,
   // For the chat service, tests and the reports.
   _internal: {
     ensureSession, reconcile, markJoined, sessionPhase, LIST_AFTER_CLOSE_MS, RECENT_PLAN_MS, MAX_SESSIONS,
-    closeIfNoJoin, NO_JOIN_GRACE_MS, NO_JOIN_LOOKBACK_MS,
+    closeIfNoJoin, NO_JOIN_GRACE_MS, NO_JOIN_LOOKBACK_MS, removalOf, hiddenFromList,
   },
 };

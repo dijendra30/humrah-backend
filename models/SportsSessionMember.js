@@ -47,6 +47,11 @@ const sportsSessionMemberSchema = new mongoose.Schema({
     pendingSince:         { type: Date },
     pendingLastMessageId: { type: mongoose.Schema.Types.ObjectId },
   },
+  // "Delete" from Messages → Sessions (services/sportsSessionService.js, hideSession):
+  // set when THIS member removed the session from their own list. Only their list
+  // reads it; membership, the session, its messages and the plan are untouched. The
+  // session shows again if the chat has newer qualifying activity (lastMessageAt).
+  hiddenAt: { type: Date, default: null },
 }, { timestamps: true });
 
 // One row per person per session; upserts on this pair keep joins idempotent.

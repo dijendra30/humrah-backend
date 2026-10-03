@@ -48,6 +48,16 @@ router.get(
 );
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Private concerns ("Keep Private"): the caller's own, never a ticket until the
+// caller sends one. MUST be declared BEFORE /:ticketId ("private" is not a ticket).
+// controllers/privateSafetyConcernController.js
+// ─────────────────────────────────────────────────────────────────────────────
+const privateConcerns = require('../controllers/privateSafetyConcernController');
+router.post('/private', privateConcerns.savePrivate);
+router.get('/private', privateConcerns.listPrivate);
+router.post('/private/:concernId/send', privateConcerns.sendPrivate);
+
+// ─────────────────────────────────────────────────────────────────────────────
 // POST /api/safety-tickets
 // Submit a new safety concern → create ticket → Gemini → Telegram → bot message
 // ─────────────────────────────────────────────────────────────────────────────

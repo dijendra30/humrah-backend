@@ -171,6 +171,12 @@ router.post('/sessions/:sessionId/messages/:messageId/link-check', linkLimiter, 
   send(res, await chatSvc.checkMessageLink(req.user, req.params.sessionId, req.params.messageId, req.body || {}));
 }));
 
+// "Delete" a finished session from the caller's own Messages → Sessions list. Per user
+// only: nothing shared changes (sportsSessionService.hideSession).
+router.post('/sessions/:sessionId/hide', hideLimiter, handle(async (req, res) => {
+  send(res, await sessionSvc.hideSession(req.user, req.params.sessionId));
+}));
+
 router.post('/sessions/:sessionId/members/:userId/remove', removeLimiter, handle(async (req, res) => {
   const result = await sessionSvc.removeMember(req.user, req.params.sessionId, req.params.userId);
   if (result.success) {
