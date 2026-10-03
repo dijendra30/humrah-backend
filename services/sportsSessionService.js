@@ -376,6 +376,8 @@ function formatSession(session, plan, member, formattedPlan, now = Date.now(), e
 
 /** When a closed chat stops being listed; null for an open one. */
 function listedUntil(session, plan, state) {
+  // No-join: an hour after it closed, whatever happens to it afterwards (a late cancel included).
+  if (session.noJoinAt) return new Date(new Date(session.noJoinAt).getTime() + chat()._internal.NO_JOIN_VISIBLE_MS);
   if (state === 'cancelled') {
     const at = session.cancelledAt || plan.cancelledAt || session.updatedAt;
     return new Date(new Date(at).getTime() + LIST_AFTER_CLOSE_MS);
@@ -577,6 +579,91 @@ async function getSession(user, sessionId) {
   };
 }
 
+// ── No-join outcome ───────────────────────────────────────────────────────────
+//
+// Joins close when the game starts (sportsPlanService.joinPlan: startTime > now), so
+// from then on "nobody joined" is final. The every-minute Sports tick (cronJobs.js)
+// finds plans that started, are not cancelled, and hold only their host; a plan
+// nobody else EVER joined has its session closed once — status 'expired',
+// noJoinAt — and the host gets one SPORTS_NO_JOIN push.
+//
+//   "ever joined": playersJoined is the host alone, kickedPlayers is empty (a removed
+//   player had joined), and the session has no member row but the host's (rows are
+//   kept when someone leaves, so a join that later left still counts). The same
+//   membership records the rest of Sports uses; nothing new is counted.
+//   Once: the session update is conditional (status 'active', noJoinAt null), so of
+//   two ticks, two servers or a retry, exactly one changes it, and only that one
+//   sends the push. A failed push is not retried (no duplicates, ever).
+//   Not early: only plans that started at least NO_JOIN_GRACE_MS ago, so no server
+//   (or clock) can still be accepting a join for it.
+//   Bounded: plans that started within NO_JOIN_LOOKBACK_MS. Older ones (e.g. while
+//   the server was down, or before this was deployed) keep the existing lifecycle:
+//   no late "no one joined" news.
+// Kill switch: SPORTS_NO_JOIN_ENABLED (default on), read on every tick.
+const NO_JOIN_GRACE_MS    = 2 * 60 * 1000;
+const NO_JOIN_LOOKBACK_MS = 2 * 60 * 60 * 1000;
+const MAX_NO_JOIN_PER_TICK = 100;
+const noJoinEnabled = () => {
+  const v = process.env.SPORTS_NO_JOIN_ENABLED;
+  return v === undefined || v === null || String(v).trim() === '' || String(v).trim().toLowerCase() === 'true';
+};
+
+/** One plan: 'closed', or why not. */
+async function closeIfNoJoin(plan, now) {
+  const players = (plan.playersJoined || []).map(String);
+  if (players.length !== 1 || !same(players[0], plan.creatorId)) return 'not_host_only';
+  if ((plan.kickedPlayers || []).length > 0) return 'someone_joined';
+  const session = await ensureSession(plan);
+  if (!session || session.status !== 'active' || session.noJoinAt) return 'already_closed';
+  if (await SportsSessionMember.exists({ sessionId: session._id, userId: { $ne: plan.creatorId } })) return 'someone_joined';
+
+  const at = new Date(now);
+  const res = await SportsSession.updateOne(
+    { _id: session._id, status: 'active', noJoinAt: null },
+    { $set: { status: 'expired', expiredAt: at, noJoinAt: at } },
+  );
+  if (res.modifiedCount !== 1) return 'already_closed';
+  console.log(`[SPORTS_NO_JOIN] closed session=${session._id} plan=${plan._id}`);
+
+  // The plan as it is now: a cancel that landed meanwhile gets no "no one joined" push.
+  const fresh = await SportsPlan.findById(plan._id).lean();
+  if (!fresh || fresh.cardStatus === 'cancelled') return 'closed';
+  const closed = { ...session, status: 'expired', expiredAt: at, noJoinAt: at };
+  await chat().notifyNoJoin(fresh, closed);
+  // Open screens on the plan or its chat re-read it (the existing plan_updated event).
+  try { sportsSocket().emitPlanChanged(planService()._internal.formatPlan(fresh, fresh.creatorId)); } catch (_) { /* display only */ }
+  return 'closed';
+}
+
+/**
+ * Called by the every-minute Sports tick. Never throws for one plan; returns counts.
+ * [now] is for tests.
+ */
+async function tickNoJoin(now = Date.now()) {
+  const summary = { checked: 0, closed: 0, skipped: {} };
+  if (!noJoinEnabled()) return { ...summary, disabled: true };
+  const plans = await SportsPlan.find({
+    cardStatus: 'open',
+    startTime: { $lte: new Date(now - NO_JOIN_GRACE_MS), $gt: new Date(now - NO_JOIN_LOOKBACK_MS) },
+    'playersJoined.1': { $exists: false },
+  }).sort({ startTime: 1 }).limit(MAX_NO_JOIN_PER_TICK).lean();
+  for (const plan of plans) {
+    summary.checked++;
+    let outcome;
+    try {
+      outcome = await closeIfNoJoin(plan, now);
+    } catch (err) {
+      outcome = 'error';
+      console.error(`[SPORTS_NO_JOIN] plan=${plan._id} failed: ${(err && err.name) || 'Error'}`);
+    }
+    if (outcome === 'closed') summary.closed++;
+    else summary.skipped[outcome] = (summary.skipped[outcome] || 0) + 1;
+  }
+  // Counts and ids only.
+  if (summary.closed || summary.skipped.error) console.log('[SPORTS_NO_JOIN]', JSON.stringify(summary));
+  return summary;
+}
+
 module.exports = {
   onPlanCreated,
   onPlayerJoined,
@@ -587,6 +674,10 @@ module.exports = {
   listMySessions,
   getSession,
   removeMember,
+  tickNoJoin,
   // For the chat service, tests and the reports.
-  _internal: { ensureSession, reconcile, markJoined, sessionPhase, LIST_AFTER_CLOSE_MS, RECENT_PLAN_MS, MAX_SESSIONS },
+  _internal: {
+    ensureSession, reconcile, markJoined, sessionPhase, LIST_AFTER_CLOSE_MS, RECENT_PLAN_MS, MAX_SESSIONS,
+    closeIfNoJoin, NO_JOIN_GRACE_MS, NO_JOIN_LOOKBACK_MS,
+  },
 };

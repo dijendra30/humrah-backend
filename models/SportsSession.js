@@ -31,6 +31,14 @@
 //                     Chat enhancement: messageId (so an edit or a delete of the
 //                     newest message can update it) and deletionType (the preview
 //                     of a deleted message says so, and never keeps its text).
+//
+// No-join outcome (services/sportsSessionService.js, tickNoJoin):
+//   noJoinAt          set once, by the every-minute Sports tick, when the plan has
+//                     started (joins are closed) and nobody but the host ever joined.
+//                     The same guarded update sets status 'expired' (expiredAt =
+//                     noJoinAt), so every existing write guard refuses the chat from
+//                     then on. The chat leaves Messages → Sessions an hour later.
+//                     Null for every other session, so nothing else changes.
 // -----------------------------------------------------------------------------
 'use strict';
 
@@ -55,6 +63,7 @@ const sportsSessionSchema = new mongoose.Schema({
   expiredAt:    { type: Date, default: null },
   lastMessageAt: { type: Date, default: null },
   lastMessage:   { type: lastMessageSchema, default: null },
+  noJoinAt:      { type: Date, default: null },
 }, { timestamps: true });
 
 // One session per plan. Also what makes creation idempotent: a retried or racing

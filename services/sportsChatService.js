@@ -66,6 +66,10 @@
 //                     room is NOT enough, since the plan page joins it too.
 //                     Kill switch: SPORTS_MESSAGE_PUSH_ENABLED (default on).
 //   SPORTS_SESSION_CANCELLED   once, when the host's cancel really happened.
+//   SPORTS_NO_JOIN    once, to the host, when the plan started and nobody else had
+//                     ever joined (sportsSessionService.tickNoJoin). The chat is then
+//                     'expired' with noJoinAt set: every write is refused with
+//                     CHAT_EXPIRED + reason NO_JOIN, and chatInfo says closedReason.
 // -----------------------------------------------------------------------------
 'use strict';
 
@@ -117,6 +121,10 @@ const fail = (status, code, message, extra = {}) => ({ success: false, status, c
 const notFound = () => fail(404, 'SESSION_NOT_FOUND', 'This session does not exist or is no longer available.');
 const chatClosed = () => fail(403, 'CHAT_CLOSED', 'This sports session was cancelled, so its chat is read-only.');
 const chatExpired = () => fail(403, 'CHAT_EXPIRED', 'This chat expired after 7 days without messages.');
+// No-join outcome: the same code (an older app treats it as any expired chat), with the reason.
+const chatNoJoin = () => fail(403, 'CHAT_EXPIRED', 'No one joined this plan, so its chat is closed.', { reason: 'NO_JOIN' });
+// A no-join chat stays in Messages → Sessions this long after it closed, then leaves the list.
+const NO_JOIN_VISIBLE_MS = 60 * 60 * 1000;
 const messageNotFound = () => fail(404, 'MESSAGE_NOT_FOUND', 'That message is not in this chat.');
 const messageDeleted = () => fail(409, 'MESSAGE_DELETED', 'That message was deleted.');
 const isValidId = id => typeof id === 'string' && /^[a-f0-9]{24}$/i.test(id);
@@ -235,6 +243,7 @@ async function readOnlyRefusal(session, plan, now) {
   const state = chatStateOf(session, plan, now);
   if (state === 'cancelled') return chatClosed();
   if (state === 'expired') {
+    if (session && session.noJoinAt) return chatNoJoin();
     await persistExpiryIfDue(session, plan, now);
     return chatExpired();
   }
@@ -479,6 +488,9 @@ function chatInfo(session, plan, member, now = Date.now()) {
     joinsOpen:  plan.cardStatus === 'open' && now < new Date(plan.startTime).getTime(),
     canSend:    state === 'active' && memberCount >= 2,
     lastReadAt: member && member.lastReadAt ? iso(member.lastReadAt) : null,
+    // No-join outcome (additive): why the chat closed, and until when it is listed.
+    closedReason: session && session.noJoinAt ? 'NO_JOIN' : null,
+    visibleUntil: session && session.noJoinAt ? iso(new Date(new Date(session.noJoinAt).getTime() + NO_JOIN_VISIBLE_MS)) : null,
   };
 }
 
@@ -675,6 +687,7 @@ async function sendMessage(user, sessionId, body = {}) {
     // Lost to an expiry or a cancellation that landed first.
     const fresh = await SportsSession.findById(session._id).lean();
     if (fresh && chatStateOf(fresh, plan, now) === 'cancelled') return chatClosed();
+    if (fresh && fresh.noJoinAt) return chatNoJoin();
     await persistExpiryIfDue(fresh || session, plan, now);
     return chatExpired();
   }
@@ -1510,6 +1523,22 @@ async function notifySessionCancelled(plan, session, now = Date.now()) {
   }), 'sports_cancel_notification');
 }
 
+/**
+ * The no-join outcome, to the host only, once: called by the guarded update that
+ * made the change (sportsSessionService.tickNoJoin), so a second tick, a second
+ * server or a restart cannot send it again. Neutral wording: the timing, never the
+ * host. Names no venue, place, time or person. The usual skips apply (notifyMembers:
+ * inactive, suspended, pushes off, no device). Always resolves.
+ */
+function notifyNoJoin(plan, session) {
+  const sport = sportName(plan);
+  return notifyMembers(plan, session, [String(plan.creatorId)], () => ({
+    type:  'SPORTS_NO_JOIN',
+    title: `${sportEmoji(plan)} No one joined this time`,
+    body:  `Your ${sport.toLowerCase()} plan didn't get any participants.`,
+  }), 'sports_no_join_notification');
+}
+
 
 module.exports = {
   listMessages,
@@ -1529,6 +1558,7 @@ module.exports = {
   notifyNewMessage,
   flushMessagePushes,
   notifySessionCancelled,
+  notifyNoJoin,
   chatInfo,
   chatStateOf,
   expiresAtOf,
@@ -1544,7 +1574,7 @@ module.exports = {
   usersFor,
   // For the socket (typing is allowed only in an open chat) and tests.
   _internal: {
-    INACTIVITY_MS, PAGE_DEFAULT, PAGE_MAX, TEXT_MAX, EDIT_WINDOW_MS, RANGE_MAX,
+    INACTIVITY_MS, PAGE_DEFAULT, PAGE_MAX, TEXT_MAX, EDIT_WINDOW_MS, RANGE_MAX, NO_JOIN_VISIBLE_MS,
     cleanText, systemText, recordMessage, previewOf, hydrate, formatMessage,
     MESSAGE_PUSH_WINDOW_MS, MESSAGE_PUSH_RETRY_MS, MESSAGE_PUSH_STALE_MS, MESSAGE_PUSH_BODY_MAX,
     messagePushEnabled, singleMessageBody, groupedMessageBody, claimOrQueue,

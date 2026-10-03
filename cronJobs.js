@@ -99,6 +99,15 @@ cron.schedule('* * * * *', async () => {
   } catch (err) {
     console.error('[CRON] Sports discovery tick error:', err && err.name);
   }
+  // No-join outcome: a plan that started with nobody but its host ever in it closes its
+  // chat once and tells the host once (services/sportsSessionService.js, tickNoJoin).
+  // Kill switch SPORTS_NO_JOIN_ENABLED (default on); its own try, like the others.
+  try {
+    const { tickNoJoin } = require('./services/sportsSessionService');
+    await tickNoJoin();
+  } catch (err) {
+    console.error('[CRON] Sports no-join tick error:', err && err.name);
+  }
 });
 
 // ══════════════════════════════════════════════════════════════════════════════

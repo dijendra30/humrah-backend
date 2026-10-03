@@ -371,6 +371,14 @@ function emitPlanUpdated(io, plan) {
   io.of(NAMESPACE).to(planRoom(plan.id)).emit('plan_updated', snapshot(plan));
 }
 
+/**
+ * plan_updated from a service with no request (the no-join tick): screens open on the
+ * plan or its chat re-read it, as for any plan event. [plan] is already formatted.
+ */
+function emitPlanChanged(plan) {
+  emitPlanUpdated(ioRef, plan);
+}
+
 // ── Session events (Phase 2A) ──────────────────────────────────────────────────
 //
 // A session's members are exactly its plan's members, so session events go to the
@@ -542,6 +550,7 @@ module.exports = {
   emitPlanLeft,
   emitPlanCancelled,
   emitPlanUpdated,
+  emitPlanChanged,
   evictUserFromPlanRoom,
   emitSessionParticipantJoined,
   emitSessionParticipantLeft,
