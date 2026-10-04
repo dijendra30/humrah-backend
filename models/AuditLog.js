@@ -90,6 +90,24 @@ const auditLogSchema = new mongoose.Schema({
       'SEND_BROADCAST',
       'AI_REPHRASE_BROADCAST',
       
+      // Ask a Question admin actions (additive)
+      'QUESTION_REVIEWED',
+      'QUESTION_HIDDEN',
+      'QUESTION_RESTORED',
+      'QUESTION_CLOSED',
+      'QUESTION_DELETED',
+      'QUESTION_ANSWER_HIDDEN',
+      'QUESTION_ANSWER_RESTORED',
+      'QUESTION_REPORT_UNDER_REVIEW',
+      'QUESTION_REPORT_RESOLVED',
+      'QUESTION_REPORT_DISMISSED',
+      'QUESTION_REPORT_ESCALATED',
+      'QUESTION_MODERATION_CONFIRMED',
+      'QUESTION_MODERATION_OVERTURNED',
+      'QUESTION_RESTRICTION_APPLIED',
+      'QUESTION_RESTRICTION_REMOVED',
+      'QUESTION_DATA_EXPORTED',
+
       // Other
       'UNAUTHORIZED_ACCESS_ATTEMPT'
     ]
@@ -98,7 +116,7 @@ const auditLogSchema = new mongoose.Schema({
   // Target (what the action was performed on)
   targetType: {
     type: String,
-    enum: ['USER', 'REPORT', 'CHAT', 'MESSAGE', 'BOOKING', 'ADMIN', 'SYSTEM', 'POST'],
+    enum: ['USER', 'REPORT', 'CHAT', 'MESSAGE', 'BOOKING', 'ADMIN', 'SYSTEM', 'POST', 'QUESTION', 'QUESTION_ANSWER', 'QUESTION_REPORT', 'QUESTION_MODERATION'],
     required: true
   },
   

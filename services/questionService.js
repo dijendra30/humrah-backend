@@ -30,6 +30,7 @@ const QuestionReport = require('../models/QuestionReport');
 const QuestionHide = require('../models/QuestionHide');
 const QuestionRestriction = require('../models/QuestionRestriction');
 const QuestionAuditLog = require('../models/QuestionAuditLog');
+const QuestionModerationRecord = require('../models/QuestionModerationRecord');
 const User = require('../models/User');
 const redis = require('./redisService');
 const cm = require('./contentModeration');
@@ -175,16 +176,37 @@ async function applyQuestionRestriction(userId, reason, now = new Date()) {
     { $inc: { level: 1 }, $setOnInsert: { userId } },
     { upsert: true, new: true },
   ).lean();
-  const level = bumped.level;
+  // A lifted final restriction keeps level 5; the next step stays final rather than climbing past it.
+  const level = Math.min(bumped.level, R.RESTRICTION_FINAL_LEVEL);
   const final = level >= R.RESTRICTION_FINAL_LEVEL;
   const until = final ? null : new Date(now.getTime() + R.RESTRICTION_STEPS_MS[level - 1]);
   await QuestionRestriction.updateOne({ _id: bumped._id }, {
-    $set: { restrictedUntil: until, final, restrictionReason: reason, lastAppliedAt: now },
+    $set: { level, restrictedUntil: until, final, restrictionReason: reason, lastAppliedAt: now },
     $push: { history: { $each: [{ action: 'APPLIED', level, reason, until, final, by: 'SYSTEM', at: now }], $slice: -50 } },
   });
   await audit('QUESTION_RESTRICTION_APPLIED', { targetUserId: userId, meta: { level, final, reason } });
   log('RESTRICTION_APPLIED', { user: userId, level, final });
   return { level, final, until };
+}
+
+// ── Moderation records (for admin false-positive review) ───────────────────────
+
+const SEVERITY = { ABUSE: 'HIGH', AI_FLAGGED: 'HIGH', SELF_HARM: 'HIGH', PROFANITY: 'MEDIUM', CONTACT_INFO: 'LOW', LINK: 'LOW', OFF_PLATFORM: 'LOW', NEEDS_REPHRASE: 'LOW' };
+
+/** Keeps refused text for admin review (90 days). Never fails the request that caused it. */
+async function recordRejection({ userId, contentType, text, verdict, reasonCode, questionId = null, answerId = null, category = null, tags = [], grid = null, restriction = null }) {
+  try {
+    const rec = await QuestionModerationRecord.create({
+      userId, contentType, text, verdict, reasonCode, questionId, answerId, category, tags,
+      severity: SEVERITY[reasonCode] || 'MEDIUM',
+      ...(grid ? { locationGrid: { type: 'Point', coordinates: grid } } : {}),
+      ...(restriction ? { restrictionApplied: { level: restriction.level, until: restriction.until || null, final: !!restriction.final } } : {}),
+    });
+    return rec._id;
+  } catch (err) {
+    console.error('[QUESTIONS] moderation record failed:', err && err.name);
+    return null;
+  }
 }
 
 // ── Text and input validation ──────────────────────────────────────────────────
@@ -334,7 +356,9 @@ async function createQuestion(user, body = {}, { idempotencyKey } = {}) {
   if (mod.verdict !== 'SAFE') {
     let restrictionApplied = null;
     if (mod.verdict === 'BLOCKED' && mod.abusive) restrictionApplied = await applyQuestionRestriction(user._id, mod.reasonCode);
-    await audit('QUESTION_MODERATION_REJECTED', { actorId: user._id, meta: { verdict: mod.verdict, reason: mod.reasonCode } });
+    const recordId = await recordRejection({ userId: user._id, contentType: 'QUESTION', text: t.text, verdict: mod.verdict, reasonCode: mod.reasonCode,
+      category: body.category, tags: tg.tags, grid: snapToGrid(point), restriction: restrictionApplied });
+    await audit('QUESTION_MODERATION_REJECTED', { actorId: user._id, meta: { verdict: mod.verdict, reason: mod.reasonCode, recordId } });
     log('MODERATION_REJECTED', { user: user._id, verdict: mod.verdict, reason: mod.reasonCode });
     return fail(422, 'QUESTION_MODERATION_REJECTED', mod.userMessage, {
       moderation: { verdict: mod.verdict, rephrase: mod.verdict === 'REVIEW' },
@@ -548,7 +572,8 @@ async function createAnswer(user, questionId, body = {}) {
 
   const mod = await cm.moderateUserText(t.text, { context: 'answer' });
   if (mod.verdict !== 'SAFE') {
-    await audit('ANSWER_REJECTED', { actorId: user._id, questionId: q._id, meta: { verdict: mod.verdict, reason: mod.reasonCode } });
+    const recordId = await recordRejection({ userId: user._id, contentType: 'ANSWER', text: t.text, verdict: mod.verdict, reasonCode: mod.reasonCode, questionId: q._id, category: q.category });
+    await audit('ANSWER_REJECTED', { actorId: user._id, questionId: q._id, meta: { verdict: mod.verdict, reason: mod.reasonCode, recordId } });
     log('ANSWER_REJECTED', { question: q._id, user: user._id, verdict: mod.verdict, reason: mod.reasonCode });
     return fail(422, 'QUESTION_MODERATION_REJECTED', mod.userMessage, { moderation: { verdict: mod.verdict, rephrase: mod.verdict === 'REVIEW' } });
   }
@@ -577,6 +602,13 @@ async function createAnswer(user, questionId, body = {}) {
     await Question.updateOne({ _id: q._id, answerCount: { $gt: 0 } }, { $inc: { answerCount: -1 } });   // give the slot back
     if (err && err.code === 11000) return fail(409, 'ANSWER_ALREADY_EXISTS', 'You’ve already answered this question.');
     throw err;
+  }
+  // The first answer: when (for "time to first answer" — set once, never moved).
+  if (slot.answerCount === 1 || !slot.firstAnswerAt) {
+    // The earliest answer's time, not "now": a question answered before this field existed keeps its real time.
+    const first = await QuestionAnswer.findOne({ questionId: q._id }).sort({ createdAt: 1 }).select('createdAt').lean();
+    const at = first ? new Date(first.createdAt) : new Date();
+    await Question.updateOne({ _id: q._id, firstAnswerAt: null }, { $set: { firstAnswerAt: at, timeToFirstAnswerMs: Math.max(0, at - new Date(q.createdAt)) } });
   }
   await audit('ANSWER_CREATED', { actorId: user._id, questionId: q._id, answerId: a._id, targetUserId: q.askerId });
   log('ANSWER_CREATED', { question: q._id, answer: a._id });
@@ -681,7 +713,8 @@ async function createReply(user, questionId, answerId, body = {}) {
   if (burst) return burst;
   const mod = await cm.moderateUserText(t.text, { context: 'reply' });
   if (mod.verdict !== 'SAFE') {
-    await audit('REPLY_REJECTED', { actorId: user._id, questionId: q._id, answerId: a._id, meta: { verdict: mod.verdict, reason: mod.reasonCode } });
+    const recordId = await recordRejection({ userId: user._id, contentType: 'REPLY', text: t.text, verdict: mod.verdict, reasonCode: mod.reasonCode, questionId: q._id, answerId: a._id, category: q.category });
+    await audit('REPLY_REJECTED', { actorId: user._id, questionId: q._id, answerId: a._id, meta: { verdict: mod.verdict, reason: mod.reasonCode, recordId } });
     return fail(422, 'QUESTION_MODERATION_REJECTED', mod.userMessage, { moderation: { verdict: mod.verdict, rephrase: mod.verdict === 'REVIEW' } });
   }
   const quota = await quotaCheck(user, 'reply', now);
@@ -739,7 +772,7 @@ async function reportContent(user, body = {}) {
 
   let created = true;
   try {
-    await QuestionReport.create({ reporterId: user._id, targetType, targetId, questionId: q._id, reportedUserId, reason, description: cm.sanitizeText(description) });
+    await QuestionReport.create({ reporterId: user._id, targetType, targetId, questionId: q._id, reportedUserId, category: q.category, reason, description: cm.sanitizeText(description) });
   } catch (err) {
     if (err && err.code === 11000) created = false; else throw err;
   }
@@ -747,6 +780,14 @@ async function reportContent(user, body = {}) {
     await QuestionHide.updateOne({ userId: user._id, questionId: q._id }, { $set: { reason: 'REPORTED' }, $setOnInsert: { userId: user._id, questionId: q._id } }, { upsert: true });
   }
   if (created) {
+    // Counters for the admin queue; reported content is FLAGGED until an admin reviews it.
+    const now2 = new Date();
+    const M = targetType === 'QUESTION' ? Question : targetType === 'ANSWER' ? QuestionAnswer : null;
+    if (M) {
+      await M.updateOne({ _id: targetId }, { $inc: { reportCount: 1 }, ...(M === Question ? { $set: { lastReportedAt: now2 } } : {}) });
+      await M.updateOne({ _id: targetId, moderationState: { $in: ['ALLOWED', 'REVIEWED'] } }, { $set: { moderationState: 'FLAGGED' } });
+    }
+    if (targetType !== 'QUESTION') await Question.updateOne({ _id: q._id }, { $set: { lastReportedAt: now2 } });
     await audit('QUESTION_REPORT_CREATED', { actorId: user._id, questionId: q._id, targetUserId: reportedUserId, meta: { targetType, reason } });
     log('REPORT_CREATED', { question: q._id, targetType });
   }
@@ -785,58 +826,9 @@ async function tickQuestionExpiry(now = new Date(), { maxBatches = 4 } = {}) {
   return { expired, batches };
 }
 
-// ── Admin (explicit Safety action; audited) ────────────────────────────────────
-
-async function adminLiftRestriction(admin, userId, { note = null, reset = false } = {}) {
-  if (!isId(userId)) return fail(400, 'QUESTION_INVALID_USER', 'Invalid user.');
-  const now = new Date();
-  const r = await QuestionRestriction.findOne({ userId }).lean();
-  if (!r) return fail(404, 'QUESTION_RESTRICTION_NOT_FOUND', 'No question restriction for this user.');
-  const step = { action: reset ? 'RESET' : 'LIFTED', level: reset ? 0 : r.level, by: String(admin._id), note: typeof note === 'string' ? note.slice(0, 300) : null, at: now };
-  await QuestionRestriction.updateOne({ _id: r._id }, {
-    $set: { restrictedUntil: null, final: false, ...(reset ? { level: 0 } : {}) },
-    $push: { history: { $each: [step], $slice: -50 } },
-  });
-  await audit('QUESTION_RESTRICTION_LIFTED', { actorId: admin._id, targetUserId: userId, meta: { reset: !!reset } });
-  return { success: true, status: 200, lifted: true, reset: !!reset };
-}
-
-async function adminGetRestriction(userId) {
-  if (!isId(userId)) return fail(400, 'QUESTION_INVALID_USER', 'Invalid user.');
-  const r = await QuestionRestriction.findOne({ userId }).lean();
-  return { success: true, status: 200, restriction: r ? { level: r.level, restrictedUntil: r.restrictedUntil, final: r.final, reason: r.restrictionReason, history: r.history } : null };
-}
-
-async function adminSetHidden(admin, questionId, hide, reason = null) {
-  if (!isId(questionId)) return notFound();
-  const now = new Date();
-  const q = await Question.findById(questionId).lean();
-  if (!q || q.status === 'DELETED') return notFound();
-  if (hide) {
-    if (q.status !== 'HIDDEN') {
-      await Question.updateOne({ _id: q._id, status: { $ne: 'DELETED' } }, { $set: { status: 'HIDDEN', hiddenAt: now, hiddenBy: admin._id, hiddenReason: typeof reason === 'string' ? reason.slice(0, 200) : null, statusBeforeDelete: q.status } });
-    }
-    await audit('QUESTION_HIDDEN_BY_ADMIN', { actorId: admin._id, questionId: q._id, targetUserId: q.askerId });
-  } else {
-    if (q.status === 'HIDDEN') {
-      const back = q.statusBeforeDelete && q.statusBeforeDelete !== 'HIDDEN' ? q.statusBeforeDelete : 'CLOSED';
-      await Question.updateOne({ _id: q._id, status: 'HIDDEN' }, { $set: { status: back, hiddenAt: null, hiddenBy: null, hiddenReason: null } });
-    }
-    await audit('QUESTION_UNHIDDEN_BY_ADMIN', { actorId: admin._id, questionId: q._id, targetUserId: q.askerId });
-  }
-  return { success: true, status: 200, hidden: !!hide };
-}
-
-async function adminListReports(query = {}) {
-  const status = ['OPEN', 'REVIEWED', 'ACTIONED', 'DISMISSED'].includes(query.status) ? query.status : 'OPEN';
-  const limit = Math.min(Math.max(parseInt(query.limit, 10) || 50, 1), 100);
-  const rows = await QuestionReport.find({ status }).sort({ createdAt: -1 }).limit(limit).lean();
-  return { success: true, status: 200, reports: rows };
-}
-
 module.exports = {
   getConfig, createQuestion, nearbyQuestions, getQuestion, closeQuestion, deleteQuestion,
   createAnswer, listAnswers, deleteAnswer, createReply, hideQuestion, reportContent, myRestriction,
-  tickQuestionExpiry, adminLiftRestriction, adminGetRestriction, adminSetHidden, adminListReports,
-  _internal: { snapToGrid, freshPoint, metersBetween, similarity, normalizeForDuplicate, applyQuestionRestriction, activeRestriction, effectiveStatus, checkTags, checkText },
+  tickQuestionExpiry,
+  _internal: { snapToGrid, freshPoint, metersBetween, similarity, normalizeForDuplicate, applyQuestionRestriction, activeRestriction, effectiveStatus, checkTags, checkText, audit, publicUser, questionView, PUBLIC_FIELDS },
 };

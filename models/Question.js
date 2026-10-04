@@ -35,10 +35,22 @@ const questionSchema = new mongoose.Schema({
   closedAt:  { type: Date, default: null },
   deletedAt: { type: Date, default: null },
   statusBeforeDelete: { type: String, default: null },
+  statusBeforeHide:   { type: String, default: null },        // what an admin "restore" returns it to
   hiddenAt:  { type: Date, default: null },
   hiddenBy:  { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },   // the admin
   hiddenReason: { type: String, default: null, maxlength: 200 },
   answerCount: { type: Number, default: 0, min: 0 },
+  // ── Admin / analytics (never sent to the app) ──
+  // ALLOWED      passed automated moderation (every stored question did)
+  // FLAGGED      reported at least once and not yet reviewed
+  // UNDER_REVIEW an admin is looking at a report about it
+  // REVIEWED     an admin reviewed it (kept, hidden or restored — see status)
+  moderationState: { type: String, enum: ['ALLOWED', 'FLAGGED', 'UNDER_REVIEW', 'REVIEWED'], default: 'ALLOWED' },
+  reportCount:     { type: Number, default: 0, min: 0 },
+  lastReportedAt:  { type: Date, default: null },
+  firstAnswerAt:   { type: Date, default: null },
+  timeToFirstAnswerMs: { type: Number, default: null },        // firstAnswerAt − createdAt, for sorting
+  restoredFromRecordId: { type: mongoose.Schema.Types.ObjectId, default: null },   // admin overturned an automated rejection
   // Idempotency: the client's key for this create. A retry with the same key returns this question.
   clientRequestId: { type: String, default: undefined },
   // Duplicate detection only (lowercased, punctuation-free). Never returned.
@@ -55,6 +67,15 @@ questionSchema.index({ askerId: 1, createdAt: -1 });
 questionSchema.index({ status: 1, expiresAt: 1 });
 // Idempotency: one question per (asker, client key).
 questionSchema.index({ askerId: 1, clientRequestId: 1 }, { unique: true, partialFilterExpression: { clientRequestId: { $type: 'string' } } });
+// Admin dashboard: lists, sorts and period analytics.
+questionSchema.index({ createdAt: -1 });
+questionSchema.index({ category: 1, createdAt: -1 });
+questionSchema.index({ reportCount: -1, createdAt: -1 });
+questionSchema.index({ lastReportedAt: -1 }, { partialFilterExpression: { lastReportedAt: { $type: 'date' } } });
+questionSchema.index({ timeToFirstAnswerMs: 1 }, { partialFilterExpression: { timeToFirstAnswerMs: { $type: 'number' } } });
+questionSchema.index({ moderationState: 1, createdAt: -1 });
+// Admin text search on the question.
+questionSchema.index({ text: 'text' }, { default_language: 'none' });
 
 module.exports = mongoose.model('Question', questionSchema);
 module.exports.STATUSES = STATUSES;
