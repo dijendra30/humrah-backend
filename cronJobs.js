@@ -120,6 +120,14 @@ cron.schedule('*/5 * * * *', async () => {
   } catch (err) {
     console.error('[CRON] Official Events tick error:', err.message);
   }
+  // Ask a Question: ACTIVE questions past their 24 h → EXPIRED (bounded batches, idempotent).
+  // Runs whatever QUESTIONS_ENABLED says: it only closes things. Its own try.
+  try {
+    const { tickQuestionExpiry } = require('./services/questionService');
+    await tickQuestionExpiry();
+  } catch (err) {
+    console.error('[CRON] Question expiry tick error:', err && err.name);
+  }
 });
 
 // ══════════════════════════════════════════════════════════════════════════════

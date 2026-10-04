@@ -118,6 +118,12 @@ app.use(globalLimiter);
 app.use('/api/users/upload-profile-photo-base64',      express.json({ limit: '5mb' }));
 app.use('/api/users/submit-verification-photo-base64', express.json({ limit: '5mb' }));
 app.use('/api/posts',                                  express.json({ limit: '5mb' }));
+app.use('/api/questions',                              express.json({ limit: '16kb' })); // Ask a Question: small bodies only
+app.use('/api/questions', (err, req, res, next) => {   // its body-parser errors as clean 4xx (the global handler would answer 500)
+  if (err && err.type === 'entity.too.large') return res.status(413).json({ success: false, code: 'QUESTION_PAYLOAD_TOO_LARGE', message: 'That is too long.' });
+  if (err && err.type === 'entity.parse.failed') return res.status(400).json({ success: false, code: 'QUESTION_INVALID_REQUEST', message: 'Invalid request.' });
+  return next(err);
+});
 
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
@@ -746,6 +752,9 @@ app.use('/api/official-events',   authenticate, enforceLegalAcceptance, require(
 app.use('/api/event-requests',    authenticate, enforceLegalAcceptance, require('./routes/eventRequests')); // ✅ Event Requests System
 app.use('/api/rooms',             authenticate, enforceLegalAcceptance, require('./routes/roomRoutes')); // ✅ Humrah Rooms Phase 1B
 app.use('/api/sports-plans',      authenticate, enforceLegalAcceptance, require('./routes/sportsPlanRoutes')); // Sports & Fitness Phase 1A
+// Ask a Question (Phase 2 backend). Behind QUESTIONS_ENABLED (default off): while off every user route answers 404 QUESTIONS_DISABLED.
+app.use('/api/questions',         authenticate, enforceLegalAcceptance, require('./routes/questions'));
+app.use('/api/admin/questions',   authenticate, adminOnly, require('./routes/adminQuestions'));
 
 // ✅ NEW: Live location for matchmaking — POST /api/users/matchmaking-location
 //         Separate from safety live-location. Updates liveLocation on User doc.
