@@ -127,7 +127,7 @@ exports.listTickets = async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 exports.submitConcern = async (req, res) => {
     try {
-        const {
+        let {
             reportedUserId,
             reportedUserName = '',
             concernType,
@@ -144,6 +144,20 @@ exports.submitConcern = async (req, res) => {
         }
         if (note && note.length > 500) {
             return res.status(400).json({ success: false, message: 'Note exceeds 500 characters.' });
+        }
+
+        // ── Sports session: who it is about is checked, never taken on trust ──────
+        // A concern from a Sports chat that names a person must name someone in that
+        // session (services/sportsSessionService.js, concernTarget), never the reporter;
+        // their name comes from their profile, not the request. One that names nobody
+        // is accepted as before. Other chats are unchanged.
+        if (reportedUserId && bookingContext && bookingContext.type === 'SPORTS_SESSION') {
+            const checked = await require('../services/sportsSessionService')
+                .concernTarget(req.user, bookingContext.sessionId, reportedUserId, { currentOnly: false });
+            if (!checked.success) {
+                return res.status(checked.status).json({ success: false, code: checked.code, message: checked.message });
+            }
+            reportedUserName = checked.target.name;
         }
 
         // ── BUG #2 FIX: Duplicate OPEN ticket guard ───────────────────────────

@@ -9,7 +9,7 @@
 //                    through the existing ticket flow (ticketId), once
 //
 // Kept when the owner leaves or deletes the session from their list: it is their
-// safety record, not part of the chat. Context is ids only.
+// safety record, not part of the chat. Context and target are ids only.
 // -----------------------------------------------------------------------------
 'use strict';
 
@@ -20,6 +20,13 @@ const STATES = ['PRIVATE', 'SENT_FOR_REVIEW'];
 
 const privateSafetyConcernSchema = new mongoose.Schema({
   userId:      { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  // Who it is about: one person in the session, checked by the server against the
+  // session's membership when it is saved (sportsSessionService.concernTarget). The id
+  // only — name and photo are read from the profile when the owner opens it. Null only
+  // on a concern saved before this field existed; sending one names the other person when
+  // the session is 1-to-1 and is refused otherwise (privateSafetyConcernController).
+  // Never told: a private concern reaches no one, the person it is about included.
+  targetUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   // Where it was saved. Sports sessions only, for now.
   context: {
     kind:         { type: String, enum: ['SPORTS_SESSION'], required: true },

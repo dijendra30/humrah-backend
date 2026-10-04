@@ -56,6 +56,7 @@ const planService = () => require('./sportsPlanService');
 const chat        = () => require('./sportsChatService');
 
 const sportsSocket = () => require('../sockets/sportsSocket');
+const User         = () => require('../models/User');
 const SportsHiddenMessage = require('../models/SportsHiddenMessage');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -646,6 +647,66 @@ async function getSession(user, sessionId) {
   };
 }
 
+// ── Who a safety concern is about ─────────────────────────────────────────────
+//
+// A Sports safety concern names one person in the session. The app shows the choice;
+// the server decides whether it stands, from the session's own membership records —
+// never from the app's word — so a made-up id, someone from another session, or the
+// caller themselves is refused.
+//
+//   eligible     anyone who is or was in this session other than the caller, whose
+//                account still exists: in playersJoined (the host included), a member
+//                row in any state (rows are kept when someone leaves or is removed), or
+//                kickedPlayers. Someone who has since left can still be who a concern
+//                is about — it is about what happened while they were in it.
+//   not named    (targetUserId empty) resolved only when exactly ONE other person is in
+//                the plan now — a 1-to-1 session. Nobody else: NO_CONCERN_TARGET; more
+//                than one: CONCERN_TARGET_REQUIRED. People the caller is in a block pair
+//                with are not counted, matching the participants the app lists.
+//   the caller   in the plan now ({ currentOnly }, saving from the chat), or at any time
+//                (sending a concern saved earlier, after the session ended or they left).
+// Only ids are read here; the name returned is for the Safety Team's ticket.
+const invalidTarget = () => fail(400, 'INVALID_CONCERN_TARGET', 'This person is not part of this session.');
+
+async function concernTarget(user, sessionId, targetUserId, { currentOnly = true } = {}) {
+  if (!isValidId(String(sessionId || ''))) return notFound();
+  const session = await SportsSession.findById(String(sessionId)).select('_id sportsPlanId').lean();
+  if (!session) return notFound();
+  const plan = await SportsPlan.findById(session.sportsPlanId).select('_id creatorId playersJoined kickedPlayers').lean();
+  if (!plan) return notFound();
+
+  const me = String(user._id);
+  const rows = await SportsSessionMember.find({ sessionId: session._id }).select('userId').limit(MAX_MEMBER_ROWS).lean();
+  const ever = new Set([
+    String(plan.creatorId),
+    ...(plan.playersJoined || []).map(String),
+    ...(plan.kickedPlayers || []).map(String),
+    ...rows.map(r => String(r.userId)),
+  ]);
+  if (!(currentOnly ? includesId(plan.playersJoined, me) : ever.has(me))) {
+    return fail(403, 'NOT_A_SESSION_MEMBER', 'Only people in this plan can raise a concern about it.');
+  }
+
+  let targetId;
+  if (targetUserId === undefined || targetUserId === null || targetUserId === '') {
+    const blocked = new Set((await planService()._internal.blockedCounterparts(user)).map(String));
+    const others = [...new Set((plan.playersJoined || []).map(String))].filter(id => id !== me && !blocked.has(id));
+    const found = others.length ? await User().find({ _id: { $in: others } }).select('_id').lean() : [];
+    if (found.length === 0) {
+      return fail(409, 'NO_CONCERN_TARGET', "There isn't another participant in this session to raise a concern about.");
+    }
+    if (found.length > 1) return fail(400, 'CONCERN_TARGET_REQUIRED', 'Choose who this concern is about.');
+    targetId = String(found[0]._id);
+  } else {
+    targetId = typeof targetUserId === 'string' ? targetUserId : '';
+    if (!isValidId(targetId) || targetId === me || !ever.has(targetId)) return invalidTarget();
+  }
+  const person = await User().findById(targetId).select('firstName lastName').lean();
+  if (!person) return invalidTarget();
+  const name = `${person.firstName || ''} ${person.lastName || ''}`.trim() || 'Unknown User';
+  return { success: true, session, plan, target: { userId: targetId, name } };
+}
+
 // ── No-join outcome ───────────────────────────────────────────────────────────
 //
 // Joins close when the game starts (sportsPlanService.joinPlan: startTime > now), so
@@ -743,6 +804,7 @@ module.exports = {
   removeMember,
   hideSession,
   tickNoJoin,
+  concernTarget,
   // For the chat service, tests and the reports.
   _internal: {
     ensureSession, reconcile, markJoined, sessionPhase, LIST_AFTER_CLOSE_MS, RECENT_PLAN_MS, MAX_SESSIONS,

@@ -18,24 +18,50 @@
 // claimed first with one conditional update (PRIVATE → SENT_FOR_REVIEW), so a double tap,
 // a retry or two devices create at most one ticket; if the ticket cannot be created the
 // claim is undone and the concern stays private.
+//
+// WHO IT IS ABOUT. Every concern names one person in the session (targetUserId),
+// checked here against the session's own membership (sportsSessionService.concernTarget):
+// the app's choice is never taken on trust. In a 1-to-1 session the app may leave it out
+// and the server names the other person; with nobody else in the session nothing is
+// saved (NO_CONCERN_TARGET). Sending passes the person to the existing ticket flow as its
+// reportedUserId, so the Safety Team's ticket says who the concern is about. Keeping it
+// private tells no one — the person it is about included.
 // -----------------------------------------------------------------------------
 'use strict';
 
 const PrivateSafetyConcern = require('../models/PrivateSafetyConcern');
 const SportsPlan = require('../models/SportsPlan');
+const User = require('../models/User');
 const safetyTickets = require('./safetyTicketController');
 
 const chat = () => require('../services/sportsChatService');
+const sessions = () => require('../services/sportsSessionService');
 
 const isId = v => typeof v === 'string' && /^[a-f0-9]{24}$/i.test(v);
 const notFound = res => res.status(404).json({ success: false, code: 'CONCERN_NOT_FOUND', message: 'This concern is not available.' });
 
+/** Name and photo of the people concerns are about, read from their profiles for the owner. */
+async function peopleOf(concerns) {
+  const ids = [...new Set(concerns.map(c => c.targetUserId).filter(Boolean).map(String))];
+  if (!ids.length) return new Map();
+  const users = await User.find({ _id: { $in: ids } }).select('firstName profilePhoto').lean();
+  return new Map(users.map(u => [String(u._id), u]));
+}
+
 /** What the owner sees. Never sent anywhere else. */
-function view(c) {
+function view(c, people = new Map()) {
+  const targetId = c.targetUserId ? String(c.targetUserId) : null;
+  const person = targetId ? people.get(targetId) : null;
   return {
     id:              String(c._id),
     sessionId:       c.context && c.context.sessionId ? String(c.context.sessionId) : null,
     sportsPlanId:    c.context && c.context.sportsPlanId ? String(c.context.sportsPlanId) : null,
+    // Who it is about (additive). Null only on a concern saved before targets existed.
+    target:          targetId ? {
+      userId:       targetId,
+      firstName:    (person && person.firstName) || 'Someone',
+      profilePhoto: (person && person.profilePhoto) || null,
+    } : null,
     concernType:     c.concernType,
     note:            c.note || '',
     state:           c.state,
@@ -44,6 +70,7 @@ function view(c) {
     ticketId:        c.ticketId || null,
   };
 }
+const viewOne = async c => view(c, await peopleOf([c]));
 
 /** Runs the existing ticket handler with this body and returns { status, body } instead of replying. */
 function submitThroughExistingFlow(req, body) {
@@ -59,7 +86,7 @@ function submitThroughExistingFlow(req, body) {
 
 exports.savePrivate = async (req, res) => {
   try {
-    const { sessionId, concernType } = req.body || {};
+    const { sessionId, concernType, targetUserId } = req.body || {};
     const note = (req.body && req.body.note) == null ? '' : req.body.note;
     if (!PrivateSafetyConcern.CONCERN_TYPES.includes(concernType)) {
       return res.status(400).json({ success: false, message: 'Invalid concern type.' });
@@ -74,14 +101,18 @@ exports.savePrivate = async (req, res) => {
       const e = access.error;
       return res.status(e.status).json({ success: false, code: e.code, message: e.message });
     }
+    // Who it is about: a person in this session, never the caller; checked, not trusted.
+    const who = await sessions().concernTarget(req.user, sessionId, targetUserId, { currentOnly: true });
+    if (!who.success) return res.status(who.status).json({ success: false, code: who.code, message: who.message });
     const concern = await PrivateSafetyConcern.create({
-      userId:  req.userId,
-      context: { kind: 'SPORTS_SESSION', sessionId: access.session._id, sportsPlanId: access.plan._id },
+      userId:       req.userId,
+      targetUserId: who.target.userId,
+      context:      { kind: 'SPORTS_SESSION', sessionId: access.session._id, sportsPlanId: access.plan._id },
       concernType,
-      note:    note.trim(),
+      note:         note.trim(),
     });
     console.log(`[PRIVATE_CONCERN_SAVED] concern=${concern._id} session=${access.session._id}`);   // ids only
-    return res.status(201).json({ success: true, concern: view(concern) });
+    return res.status(201).json({ success: true, concern: await viewOne(concern) });
   } catch (err) {
     console.error('[PRIVATE_CONCERN] save failed:', err && err.name);
     return res.status(500).json({ success: false, message: 'Could not save your concern.' });
@@ -97,7 +128,8 @@ exports.listPrivate = async (req, res) => {
       filter['context.sessionId'] = String(sessionId);
     }
     const rows = await PrivateSafetyConcern.find(filter).sort({ createdAt: -1 }).limit(20).lean();
-    return res.json({ success: true, concerns: rows.map(view) });
+    const people = await peopleOf(rows);
+    return res.json({ success: true, concerns: rows.map(c => view(c, people)) });
   } catch (err) {
     console.error('[PRIVATE_CONCERN] list failed:', err && err.name);
     return res.status(500).json({ success: false, message: 'Could not load your concerns.' });
@@ -110,7 +142,17 @@ exports.sendPrivate = async (req, res) => {
     if (!isId(concernId)) return notFound(res);
     const own = await PrivateSafetyConcern.findOne({ _id: concernId, userId: req.userId }).lean();
     if (!own) return notFound(res);
-    if (own.state === 'SENT_FOR_REVIEW') return res.json({ success: true, alreadySent: true, concern: view(own) });
+    if (own.state === 'SENT_FOR_REVIEW') return res.json({ success: true, alreadySent: true, concern: await viewOne(own) });
+    // A report must say who it is about. Only a concern saved before targets existed has none:
+    // it gets one by the 1-to-1 rule (exactly one other person in the session, checked by the
+    // server), recorded once; anything else is refused and the concern stays private.
+    if (!own.targetUserId) {
+      const who = await sessions().concernTarget(req.user, String(own.context.sessionId), undefined, { currentOnly: false });
+      if (!who.success) {
+        return res.status(409).json({ success: false, code: 'CONCERN_TARGET_REQUIRED', message: 'This concern does not say who it is about, so it cannot be sent. Please save a new one.' });
+      }
+      await PrivateSafetyConcern.updateOne({ _id: concernId, userId: req.userId, targetUserId: null }, { $set: { targetUserId: who.target.userId } });
+    }
 
     // The claim: exactly one request moves it out of PRIVATE.
     const claimed = await PrivateSafetyConcern.findOneAndUpdate(
@@ -120,7 +162,7 @@ exports.sendPrivate = async (req, res) => {
     ).lean();
     if (!claimed) {
       const now = await PrivateSafetyConcern.findOne({ _id: concernId, userId: req.userId }).lean();
-      return res.json({ success: true, alreadySent: true, concern: view(now || own) });
+      return res.json({ success: true, alreadySent: true, concern: await viewOne(now || own) });
     }
 
     // The same Sports context the app attaches to a concern sent straight away.
@@ -132,7 +174,14 @@ exports.sendPrivate = async (req, res) => {
       sportType:    plan ? plan.sportType : null,
       startTime:    plan && plan.startTime ? new Date(plan.startTime).toISOString() : null,
     };
-    const result = await submitThroughExistingFlow(req, { concernType: claimed.concernType, note: claimed.note || '', bookingContext });
+    // Who it is about goes to the ticket as its reportedUserId; the ticket flow checks it
+    // against the session again and takes the name from the profile.
+    const result = await submitThroughExistingFlow(req, {
+      reportedUserId: String(claimed.targetUserId),
+      concernType:    claimed.concernType,
+      note:           claimed.note || '',
+      bookingContext,
+    });
     const ticketId = result && result.status === 201 && result.body && result.body.ticketId;
     if (!ticketId) {
       // Not sent: it goes back to private, unless something else already finished it.
@@ -141,16 +190,23 @@ exports.sendPrivate = async (req, res) => {
         { $set: { state: 'PRIVATE', sentForReviewAt: null } },
       );
       console.error(`[PRIVATE_CONCERN] send failed concern=${concernId} status=${result && result.status}`);
+      // The ticket flow's one-open-report-per-person rule: say so, and which report it is.
+      if (result && result.status === 409 && result.body && result.body.duplicate) {
+        return res.status(409).json({
+          success: false, code: 'ACTIVE_REPORT_EXISTS', duplicate: true, ticketId: result.body.ticketId || null,
+          message: 'You already have an open safety report about this person. This concern is still saved privately.',
+        });
+      }
       return res.status(result && result.status >= 400 && result.status < 500 ? result.status : 502)
         .json({ success: false, message: 'Could not send your concern. It is still saved privately. Please try again.' });
     }
     await PrivateSafetyConcern.updateOne({ _id: concernId, userId: req.userId }, { $set: { ticketId } });
     console.log(`[PRIVATE_CONCERN_SENT] concern=${concernId} ticketId=${ticketId}`);   // ids only
-    return res.status(201).json({ success: true, concern: view({ ...claimed, ticketId }), ticketId });
+    return res.status(201).json({ success: true, concern: await viewOne({ ...claimed, ticketId }), ticketId });
   } catch (err) {
     console.error('[PRIVATE_CONCERN] send error:', err && err.name);
     return res.status(500).json({ success: false, message: 'Could not send your concern. Please try again.' });
   }
 };
 
-module.exports._internal = { view, submitThroughExistingFlow };
+module.exports._internal = { view, peopleOf, submitThroughExistingFlow };
