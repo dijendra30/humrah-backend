@@ -460,12 +460,21 @@ async function userHistory(userId) {
     QuestionAnswer.countDocuments({ authorId: u._id }),
     restrictionSummary(u._id),
   ]);
+  // Phase 6: the user's Replier Level summary (read-only; the ledger stays the source).
+  let reputation = null;
+  try {
+    const QR = require('../../models/QuestionReputation');
+    const rs = await QR.findOne({ userId: u._id }).lean();
+    const pts = rs ? rs.points : 0;
+    reputation = { ...require('./questionReputation').progressFor(pts), answersCounted: rs ? rs.answersCounted : 0, helpfulCount: rs ? rs.helpfulCount : 0 };
+  } catch (err) { console.error('[QUESTIONS_ADMIN] reputation summary failed:', err && err.name); }
   const s = byStatus[0] || { total: 0, active: 0, closed: 0, expired: 0, deleted: 0, hidden: 0 };
   const sum = list => list.reduce((x, y) => x + y.n, 0);
   return ok({
     user: personOf(u),
     questions: { total: s.total, active: s.active, closed: s.closed, expired: s.expired, deleted: s.deleted, hidden: s.hidden },
     answers,
+    reputation,
     moderationRejections: { total: sum(rejections), byStatus: Object.fromEntries(rejections.map(x => [x._id, x.n])) },
     reportsAgainstContent: { total: sum(reportsAgainst), byStatus: Object.fromEntries(reportsAgainst.map(x => [x._id, x.n])) },
     restriction,

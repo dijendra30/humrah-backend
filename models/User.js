@@ -519,6 +519,8 @@ const userSchema = new mongoose.Schema({
         // Ask a Question (Phase 4): the app build on this device can show and open a
         // QUESTION_ANSWERED / QUESTION_REPLY push. Only devices that say so are sent one.
         supportsQuestions: { type: Boolean, default: false },
+        // Ask a Question Phase 6: this build shows QUESTION_HELPFUL / QUESTION_LEVEL_UP pushes.
+        supportsReplierLevel: { type: Boolean, default: false },
       updatedAt: { type: Date, default: Date.now } 
     }], 
     default: [] 

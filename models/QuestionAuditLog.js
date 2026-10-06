@@ -15,6 +15,8 @@ const EVENTS = [
   'ANSWER_CREATED', 'ANSWER_REJECTED', 'ANSWER_DELETED', 'REPLY_CREATED', 'REPLY_REJECTED',
   // Phase 4 pushes (ids and counts only).
   'QUESTION_ANSWER_NOTIFIED', 'QUESTION_REPLY_NOTIFIED',
+  // Phase 6 Replier Level (ids and points only).
+  'ANSWER_MARKED_HELPFUL', 'REPUTATION_LEVEL_UP',
 ];
 
 const auditSchema = new mongoose.Schema({

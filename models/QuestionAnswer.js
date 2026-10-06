@@ -31,6 +31,9 @@ const answerSchema = new mongoose.Schema({
     toAskerAt:  { type: Date, default: null },
     toAuthorAt: { type: Date, default: null },
   },
+  // ── Phase 6: the asker's authoritative "✓ Helpful" (set once, never undone in the MVP) ──
+  helpfulAt: { type: Date, default: null },
+  helpfulBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
 }, { timestamps: true });
 
 // One active answer per person per question.

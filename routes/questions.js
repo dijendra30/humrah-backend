@@ -49,6 +49,8 @@ const body = req => (req.body && typeof req.body === 'object' && !Array.isArray(
 
 router.get('/config', handle(async (req, res) => send(res, svc.getConfig())));
 router.get('/mine/restriction', handle(async (req, res) => send(res, await svc.myRestriction(req.user))));
+// Phase 6 Replier Level: the viewer's own level, points and history (before /:questionId).
+router.get('/mine/reputation', handle(async (req, res) => send(res, await svc.myReputation(req.user, req.query || {}))));
 router.get('/nearby', handle(async (req, res) => send(res, await svc.nearbyQuestions(req.user, req.query || {}))));
 router.post('/', handle(async (req, res) => send(res, await svc.createQuestion(req.user, body(req), { idempotencyKey: req.get('Idempotency-Key') }))));
 router.post('/reports', handle(async (req, res) => send(res, await svc.reportContent(req.user, body(req)))));
@@ -60,6 +62,8 @@ router.post('/:questionId/hide', handle(async (req, res) => send(res, await svc.
 router.get('/:questionId/answers', handle(async (req, res) => send(res, await svc.listAnswers(req.user, req.params.questionId, req.query || {}))));
 router.post('/:questionId/answers', handle(async (req, res) => send(res, await svc.createAnswer(req.user, req.params.questionId, body(req)))));
 router.delete('/:questionId/answers/:answerId', handle(async (req, res) => send(res, await svc.deleteAnswer(req.user, req.params.questionId, req.params.answerId))));
+// Phase 6: the asker's authoritative "✓ Helpful" (+15 to the answer's author, once).
+router.post('/:questionId/answers/:answerId/helpful', handle(async (req, res) => send(res, await svc.markHelpful(req.user, req.params.questionId, req.params.answerId))));
 router.post('/:questionId/answers/:answerId/replies', handle(async (req, res) => send(res, await svc.createReply(req.user, req.params.questionId, req.params.answerId, body(req)))));
 
 module.exports = router;

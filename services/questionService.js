@@ -37,6 +37,9 @@ const cm = require('./contentModeration');
 const R = require('./questions/questionRules');
 // Phase 4 pushes. Lazy: loaded on the first answer or reply, after the response is decided.
 // Nothing here can fail the request: a load error is logged and the push is skipped.
+// Phase 6 Replier Level (server-authoritative points and levels).
+const reputation = () => require('./questions/questionReputation');
+
 function notifyLater(run) {
   try {
     const n = require('./questions/questionNotifications');
@@ -624,20 +627,38 @@ async function createAnswer(user, questionId, body = {}) {
   // and it cannot fail this request (it re-reads everything by id and never throws).
   const answerId = a._id;
   notifyLater(n => n.notifyAnswerCreated(answerId));
-  return { success: true, status: 201, answer: answerView(a.toObject(), { viewer: user, author: user, question: q }), answerCount: slot.answerCount };
+  // Phase 6: +10 for this valid, moderated, saved answer (once per question, ≤ +100 a day).
+  // Awaited so the app can show the points at once; it never throws and never fails the answer.
+  const R6 = reputation();
+  const award = await R6.awardAnswer({ userId: user._id, questionId: q._id, answerId: a._id });
+  const total = typeof award.points === 'number' ? award.points : null;
+  const rep = total === null ? null : {
+    awarded: award.awarded, capped: !!award.capped, first: !!award.first, levelUp: award.levelUp || null, ...R6.progressFor(total),
+  };
+  return {
+    success: true, status: 201,
+    answer: answerView(a.toObject(), { viewer: user, author: user, question: q, level: total === null ? null : R6.levelFor(total).key }),
+    answerCount: slot.answerCount,
+    ...(rep ? { reputation: rep } : {}),
+  };
 }
 
-function answerView(a, { viewer, author, question, replies = [] }) {
+function answerView(a, { viewer, author, question, replies = [], level = null }) {
+  const isAsker = same(question.askerId, viewer._id);
   return {
     id: String(a._id),
     questionId: String(a.questionId),
     text: a.text,
     createdAt: new Date(a.createdAt).toISOString(),
-    author: publicUser(author),
+    // Phase 6: the author's public Replier Level (never their points).
+    author: { ...publicUser(author), ...(level ? { replierLevel: level } : {}) },
     isMine: same(a.authorId, viewer._id),
-    canReply: effectiveStatus(question) === 'ACTIVE' && (same(question.askerId, viewer._id) || same(a.authorId, viewer._id)),
+    canReply: effectiveStatus(question) === 'ACTIVE' && (isAsker || same(a.authorId, viewer._id)),
     replyCount: a.replyCount || 0,
     replies,
+    // Phase 6: the asker's "✓ Helpful" (everyone sees it; only the asker may give it, once).
+    helpful: !!a.helpfulAt,
+    canMarkHelpful: isAsker && !a.helpfulAt && !same(a.authorId, viewer._id) && question.status !== 'HIDDEN' && question.status !== 'DELETED',
   };
 }
 function replyView(r, { viewer, author }) {
@@ -678,8 +699,11 @@ async function listAnswers(user, questionId, query = {}) {
     list.push(replyView(r, { viewer: user, author: byId.get(String(r.authorId)) }));
     repliesBy.set(String(r.answerId), list);
   }
-  const out = visible.filter(a => byId.has(String(a.authorId)))
-    .map(a => answerView(a, { viewer: user, author: byId.get(String(a.authorId)), question: q, replies: repliesBy.get(String(a._id)) || [] }));
+  const shown = visible.filter(a => byId.has(String(a.authorId)));
+  let levels = new Map();
+  try { levels = await reputation().levelsOf(shown.map(a => a.authorId)); } catch (err) { console.error('[QUESTIONS] levels failed:', err && err.name); }
+  const out = shown
+    .map(a => answerView(a, { viewer: user, author: byId.get(String(a.authorId)), question: q, replies: repliesBy.get(String(a._id)) || [], level: levels.get(String(a.authorId)) || null }));
   return { success: true, status: 200, answers: out, hasMore: answers.length > limit, nextAfter: answers.length > limit ? String(page[page.length - 1]._id) : null };
 }
 
@@ -841,7 +865,23 @@ async function tickQuestionExpiry(now = new Date(), { maxBatches = 4 } = {}) {
   return { expired, batches };
 }
 
+/** POST /api/questions/:questionId/answers/:answerId/helpful — Phase 6, the asker's "✓ Helpful". */
+async function markHelpful(user, questionId, answerId) {
+  if (!R.questionsEnabled()) return disabled();
+  return reputation().markHelpful(user, questionId, answerId, {
+    loadVisible, isBlockedPair,
+    answerView: (a, o) => answerView(a, { ...o, level: null }),
+  });
+}
+
+/** GET /api/questions/mine/reputation — Phase 6, the viewer's own Replier Level and history. */
+async function myReputation(user, query = {}) {
+  if (!R.questionsEnabled()) return disabled();
+  return reputation().myReputation(user, query, { isBlockedPair });
+}
+
 module.exports = {
+  markHelpful, myReputation,
   getConfig, createQuestion, nearbyQuestions, getQuestion, closeQuestion, deleteQuestion,
   createAnswer, listAnswers, deleteAnswer, createReply, hideQuestion, reportContent, myRestriction,
   tickQuestionExpiry,

@@ -99,10 +99,10 @@ const includesId = (list, id) => (list || []).some(x => same(x, id));
 const blockedEitherWay = (a, b) => !!a && !!b && (includesId(a.blockedUsers, b._id) || includesId(b.blockedUsers, a._id));
 
 /** Only devices whose app build declared it can open a Questions push; only real tokens. */
-function capableTokens(u) {
+function capableTokens(u, flag = 'supportsQuestions') {
   const out = [];
   for (const d of (u && u.fcmDevices) || []) {
-    if (d && d.supportsQuestions === true && typeof d.token === 'string' && d.token.trim()) out.push(d.token.trim());
+    if (d && d[flag] === true && typeof d.token === 'string' && d.token.trim()) out.push(d.token.trim());
   }
   return [...new Set(out)];
 }
@@ -114,7 +114,7 @@ const actorGone = (u, now) => !u || u.status !== 'ACTIVE' || isSuspended(u, now)
  * Why [u] gets no Questions push, or null. [actor] is who answered / replied (null for a
  * rollup: each answer's author is checked separately). [kind] 'answer' | 'reply'.
  */
-function recipientSkip(u, { actor = null, kind = 'answer', now = Date.now() } = {}) {
+function recipientSkip(u, { actor = null, kind = 'answer', now = Date.now(), capability = 'supportsQuestions' } = {}) {
   if (!u) return 'user_missing';
   if (u.status !== 'ACTIVE') return 'not_active';
   if (isSuspended(u, now)) return 'suspended';
@@ -125,7 +125,7 @@ function recipientSkip(u, { actor = null, kind = 'answer', now = Date.now() } = 
   if (actor && same(actor._id, u._id)) return 'self';
   if (actor && actorGone(actor, now)) return 'actor_not_active';
   if (actor && blockedEitherWay(u, actor)) return 'blocked';
-  if (capableTokens(u).length === 0) return 'no_capable_device';
+  if (capableTokens(u, capability).length === 0) return 'no_capable_device';
   return null;
 }
 
@@ -457,9 +457,81 @@ async function notifyReplyCreated(replyId, now = Date.now()) {
   return summary;
 }
 
+// ── Phase 6: Replier Level pushes (QUESTION_HELPFUL, QUESTION_LEVEL_UP) ────────────────
+// Same rules as the answer push (account, master switch, "Question answers", blocks), but only to
+// devices whose build declared supportsReplierLevel (a Phase 4 build has no handler for them).
+// Each is naturally once: Helpful is claimed once per answer, a level once per user, ever.
+
+const TYPE_HELPFUL = 'QUESTION_HELPFUL';
+const TYPE_LEVEL_UP = 'QUESTION_LEVEL_UP';
+const LEVEL_TITLES = { HELPFUL: 'Helpful Replier', ACTIVE: 'Active Replier', PRO: 'Pro Replier', TRUSTED: 'Trusted Replier' };
+const REPLIER_LEVEL_LINK = 'humrah://questions/replier-level';
+
+/** "⭐ Your answer was marked Helpful!" — to the answer's author, after the asker's tap. */
+async function notifyHelpful(answerId, now = Date.now()) {
+  const summary = { event: 'question_helpful_push', sent: 0, skipped: {} };
+  const skip = r => { summary.skipped[r] = (summary.skipped[r] || 0) + 1; return summary; };
+  try {
+    if (!pushEnabled()) return skip('disabled');
+    const a = await QuestionAnswer.findById(answerId).select('_id questionId authorId status helpfulBy').lean();
+    if (!a || a.status !== 'ACTIVE' || !a.helpfulBy) return skip('answer_gone');
+    summary.questionId = String(a.questionId);
+    const q = await Question.findById(a.questionId).select('askerId status').lean();
+    if (!q || q.status === 'DELETED' || q.status === 'HIDDEN') return skip('question_gone');
+    const users = await User.find({ _id: { $in: [a.authorId, q.askerId] } }).select(PUSH_USER_FIELDS).lean();
+    const author = users.find(u => same(u._id, a.authorId));
+    const asker = users.find(u => same(u._id, q.askerId));
+    const reason = recipientSkip(author, { actor: asker || null, kind: 'answer', now, capability: 'supportsReplierLevel' });
+    if (reason) return skip(reason);
+    const qid = String(q._id), aid = String(a._id);
+    const tokens = capableTokens(author, 'supportsReplierLevel');
+    const res = await fcm().sendDataFcm(author._id, tokens, {
+      type: TYPE_HELPFUL, questionId: qid, answerId: aid, recipientUserId: String(author._id),
+      notificationId: `question_helpful_${aid}`, points: '15',
+      title: '⭐ Your answer was marked Helpful!', body: '+15 points added to your Replier Level.',
+      deepLink: deepLink(qid, aid),
+    }, { quietLog: true });
+    if (res && res.delivered) summary.sent++; else skip('fcm_failed');
+  } catch (err) {
+    summary.error = err && err.name;
+    console.error('[QUESTION_PUSH] helpful push failed:', err && err.name);
+  } finally {
+    log(summary);
+  }
+  return summary;
+}
+
+/** "🎉 You reached a new Replier Level!" — the caller has already claimed this level (once, ever). */
+async function notifyLevelUp(userId, levelKey, now = Date.now()) {
+  const summary = { event: 'question_level_up_push', sent: 0, skipped: {} };
+  const skip = r => { summary.skipped[r] = (summary.skipped[r] || 0) + 1; return summary; };
+  try {
+    if (!pushEnabled()) return skip('disabled');
+    const title = LEVEL_TITLES[levelKey];
+    if (!title) return skip('no_level');
+    const u = await User.findById(userId).select(PUSH_USER_FIELDS).lean();
+    const reason = recipientSkip(u, { actor: null, kind: 'answer', now, capability: 'supportsReplierLevel' });
+    if (reason) return skip(reason);
+    const res = await fcm().sendDataFcm(u._id, capableTokens(u, 'supportsReplierLevel'), {
+      type: TYPE_LEVEL_UP, levelKey, recipientUserId: String(u._id), notificationId: `replier_level_${levelKey}`,
+      title: '🎉 You reached a new Replier Level!',
+      body: `You're now ${/^[AEIOU]/.test(title) ? 'an' : 'a'} ${title}. Your helpful answers are making a difference in the Humrah community.`,
+      deepLink: REPLIER_LEVEL_LINK,
+    }, { quietLog: true });
+    if (res && res.delivered) summary.sent++; else skip('fcm_failed');
+  } catch (err) {
+    summary.error = err && err.name;
+    console.error('[QUESTION_PUSH] level-up push failed:', err && err.name);
+  } finally {
+    log(summary);
+  }
+  return summary;
+}
+
 module.exports = {
   dispatch, settle, notifyAnswerCreated, notifyReplyCreated, flushAnswerPushes,
-  TYPE_ANSWERED, TYPE_REPLY,
+  notifyHelpful, notifyLevelUp,
+  TYPE_ANSWERED, TYPE_REPLY, TYPE_HELPFUL, TYPE_LEVEL_UP,
   _internal: {
     ANSWER_PUSH_WINDOW_MS, REPLY_PUSH_WINDOW_MS, PUSH_RETRY_MS, PUSH_STALE_MS, PREVIEW_MAX,
     pushEnabled, clip, questionPreview, firstNameOf, recipientSkip, capableTokens, answeredPayload, replyPayload,
