@@ -6,8 +6,9 @@
 //  fetchTrendingMovies()        → TMDB API → FALLBACK_MOVIES
 //  fetchNearbyTheatres()        → Google Places API v1 → fallback at user coords
 //  searchTheatres()             → Google Places Text Search v1
-//  generateSystemSessions()     → auto-seed feed, empty participants, no fakes
-//  getNearbySessions()          → strict 4-step flow per spec
+//  generateSystemSessions()     → legacy 3-slot seeding (no longer called)
+//  ensureDailySystemSession()   → THE one automatic movie per India day (3 PM IST job)
+//  getNearbySessions()          → read-only: fetch → sort → top 5 (never generates)
 //  createSession()              → user-created session + welcome chat msg
 //  joinSession()                → atomic admin assignment + chat message
 //  getSessionChat()             → member-only access
@@ -1002,6 +1003,135 @@ async function generateSystemSessions(userCtx, lat, lng) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// THE DAILY SYSTEM MOVIE
+//
+// Exactly ONE automatic Movie Hangout session per India (Asia/Kolkata) calendar
+// day, created by the 3 PM IST job (jobs/movieDailySessionJob.js). Not per user,
+// not per city, never from a Home refresh.
+//
+// Idempotent: the session carries dailyKey = today's IST date, and a partial
+// unique index on dailyKey means a second run — a repeated tick, a restart, a
+// second server instance — finds today's session (or loses the insert race with
+// E11000) and creates nothing.
+//
+// Movie: the existing TMDB pool (fetchTrendingMovies, India-first), with a poster,
+// not used by a recent daily movie. Theatre: the existing nearby-theatre lookup
+// around the launch city centre. Show time: 7 PM IST the same day.
+// ─────────────────────────────────────────────────────────────────────────────
+const DAILY_TZ            = 'Asia/Kolkata';
+const DAILY_CREATE_HOUR   = 15;   // 3:00 PM IST — when the job creates it
+const DAILY_SHOW_HOUR     = 19;   // 7:00 PM IST — the show it is for
+const DAILY_SHOW_MINUTE   = 0;
+const DAILY_LAT           = 28.6139;   // launch city centre (Delhi)
+const DAILY_LNG           = 77.2090;
+const DAILY_CITY          = 'delhi';
+
+/** { dateKey: 'YYYY-MM-DD', hour, minute } of `date` in Asia/Kolkata — never the server's zone. */
+function _indiaClock(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: DAILY_TZ, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(date).reduce((acc, p) => { acc[p.type] = p.value; return acc; }, {});
+  return {
+    dateKey: `${parts.year}-${parts.month}-${parts.day}`,
+    hour:    Number(parts.hour),
+    minute:  Number(parts.minute),
+  };
+}
+
+async function ensureDailySystemSession(opts = {}) {
+  const now           = opts.now || new Date();
+  const fetchMovies   = opts.fetchMovies   || fetchTrendingMovies;
+  const fetchTheatres = opts.fetchTheatres || fetchNearbyTheatres;
+  const { dateKey }   = _indiaClock(now);
+
+  const existing = await MovieSession.findOne({ dailyKey: dateKey }).lean();
+  if (existing) return { created: false, dailyKey: dateKey, sessionId: existing._id.toString() };
+
+  const showTime  = _buildShowTimeUTC(dateKey, DAILY_SHOW_HOUR, DAILY_SHOW_MINUTE);
+  if (now >= showTime) return { created: false, dailyKey: dateKey, reason: 'too-late' };
+  const expiresAt = new Date(showTime.getTime() +  15 * 60_000);
+  const chatExpAt = new Date(showTime.getTime() + 180 * 60_000);
+
+  const [movies, theatres] = await Promise.all([
+    fetchMovies(),
+    fetchTheatres(DAILY_LAT, DAILY_LNG),
+  ]);
+
+  // Don't repeat a recent daily movie (the ones still in the collection) or one the
+  // generator used recently in this process.
+  const recentDaily = await MovieSession.find({ dailyKey: { $type: 'string' } })
+    .select('movieId').lean();
+  const avoid   = new Set([...recentDaily.map(s => String(s.movieId)), ..._getRecentMovieIds()]);
+  const usable  = (movies || []).filter(m => m && m.id != null && m.title);
+  const posters = usable.filter(m => m.posterPath);
+  const pool    = _buildLangPriorityPool(posters.filter(m => !avoid.has(String(m.id))));
+  const movie   = pool[0]
+    || _buildLangPriorityPool([...posters])[0]
+    || _buildLangPriorityPool([...usable])[0];
+  if (!movie) return { created: false, dailyKey: dateKey, reason: 'no-movie' };
+
+  const theatre = (theatres && theatres[0]) || _buildFallbackTheatres(DAILY_LAT, DAILY_LNG)[0];
+  const lang    = _LANG_DISPLAY[movie.language] || DEFAULT_LANGUAGE;
+
+  let session;
+  try {
+    session = await MovieSession.create({
+      movieId:           movie.id.toString(),
+      movieTitle:        movie.title,
+      poster:            movie.posterPath || null,
+      language:          lang,
+      city:              DAILY_CITY,
+      theatreName:       theatre.name,
+      theatreAddress:    theatre.address || 'Nearby Cinema',
+      theatrePlaceId:    theatre.placeId || null,
+      location: {
+        type:        'Point',
+        coordinates: [parseFloat(theatre.lng), parseFloat(theatre.lat)],
+      },
+      date:              dateKey,
+      time:              `${String(DAILY_SHOW_HOUR).padStart(2, '0')}:${String(DAILY_SHOW_MINUTE).padStart(2, '0')}`,
+      showTime,
+      expiresAt,
+      chatExpiresAt:     chatExpAt,
+      createdBy:         'system',
+      participants:      [],
+      adminId:           null,
+      maxParticipants:   4,
+      isBoosted:         false,
+      isSystemGenerated: true,
+      status:            'active',
+      chatId:            null,
+      dailyKey:          dateKey,
+    });
+  } catch (err) {
+    if (err && err.code === 11000) {
+      // Another run won the race — today's movie exists; create nothing.
+      const winner = await MovieSession.findOne({ dailyKey: dateKey }).select('_id').lean();
+      return { created: false, dailyKey: dateKey, sessionId: winner?._id?.toString() || null };
+    }
+    throw err;
+  }
+
+  try {
+    const chat = await MovieChat.create({
+      sessionId:    session._id,
+      participants: [],
+      messages:     [],
+      expiresAt:    chatExpAt,
+      status:       'active',
+    });
+    await MovieSession.updateOne({ _id: session._id, chatId: null }, { $set: { chatId: chat._id } });
+  } catch (chatErr) {
+    console.warn(`[daily-movie] chat create failed: ${chatErr.message}`);
+  }
+
+  _markMovieUsed(movie.id);
+  console.log(`[daily-movie] ${dateKey}: "${movie.title}" @ "${theatre.name}" — session ${session._id}`);
+  return { created: true, dailyKey: dateKey, sessionId: session._id.toString() };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // countNearbyRealUserSessions(loc, city)
 // City-aware count of active real-user sessions. Used by STEP 2 + daily job.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1054,11 +1184,11 @@ async function getNearbyTheatres(userId, queryLat, queryLng, radius = 8000) {
 // ─────────────────────────────────────────────────────────────────────────────
 // getNearbySessions
 //
-// STRICT 4-STEP FLOW (per spec):
-//  STEP 1 — Fetch sessions from DB (within 20 km)
-//  STEP 2 — If sessions < 2 → generateSystemSessions()
-//  STEP 3 — RE-FETCH sessions from DB
-//  STEP 4 — Sort (lang → boosted → dist → time → participants) → top 5
+// READ-ONLY. The database is the source of truth: opening or refreshing Home
+// never creates a session (the daily movie is created only by the 3 PM IST job).
+//  STEP 1 — Fetch sessions from DB (within 20 km → 50 km → no-geo, as before)
+//  STEP 2 — Keep at most ONE system session: today's daily movie first
+//  STEP 3 — Sort (real users first → participants → time → language) → top 5
 // ─────────────────────────────────────────────────────────────────────────────
 async function getNearbySessions(userId, queryLat, queryLng) {
   const now = new Date();
@@ -1090,31 +1220,8 @@ async function getNearbySessions(userId, queryLat, queryLng) {
   let sessions = await _fetchSessionsFromDB(loc, baseQuery);
   console.log(`STEP 1: ${sessions.length} session(s)`);
 
-  // STEP 2 — Generate system sessions only when real-user sessions <= 1
-  // (spec: "If real user sessions <= 1 → create 3 system sessions")
   const realUserCount = sessions.filter(s => !s.isSystemGenerated).length;
   console.log(`STEP 1 detail: ${realUserCount} real-user, ${sessions.length - realUserCount} system`);
-
-  if (realUserCount < 3) {
-    console.log('STEP 2: real sessions sparse → generateSystemSessions()');
-    const genLat = loc.lat ?? userCtx?.lat ?? null;
-    const genLng = loc.lng ?? userCtx?.lng ?? null;
-
-    if (genLat !== null && genLng !== null) {
-      await generateSystemSessions(
-        { languagePreference: userLang, city: userCity },
-        genLat, genLng
-      );
-    } else {
-      console.warn('STEP 2: no coordinates — cannot generate');
-    }
-
-    // STEP 3 — re-fetch
-    sessions = await _fetchSessionsFromDB(loc, baseQuery);
-    console.log(`STEP 3: ${sessions.length} session(s) after generation`);
-  } else {
-    console.log('STEP 2: enough real sessions — skipping generation');
-  }
 
   // STEP 4 — Score, sort, cap at 5 visible
   //
@@ -1136,16 +1243,20 @@ async function getNearbySessions(userId, queryLat, queryLng) {
       formatted: _formatSession(s, userId, distM),
       score:     _scoreSession(s, now, userLang, loc.lat, loc.lng),
       isSystem:  s.isSystemGenerated || false,
+      daily:     s.dailyKey ? 1 : 0,
     };
   });
 
   // Split into buckets
   const realSessions   = scored.filter(x => !x.isSystem).sort((a, b) => b.score - a.score);
-  const systemSessions = scored.filter(x =>  x.isSystem).sort((a, b) => b.score - a.score);
+  // ONE automatic movie on Home: today's daily movie (dailyKey) wins over any older
+  // system session still active; never more than one.
+  const systemSessions = scored.filter(x =>  x.isSystem)
+    .sort((a, b) => (b.daily - a.daily) || (b.score - a.score))
+    .slice(0, 1);
 
-  // Display cap: max 5 sessions visible
-  // System generates 3 sessions (11AM, 3PM, 7PM) + up to 2 real-user sessions
-  // can stack on top → total 5. If no real-user sessions: 3 system shown.
+  // Display cap: max 5 sessions visible — real-user sessions first, then the one
+  // daily system movie.
   const MAX_VISIBLE = 5;
   const combined = [
     ...realSessions.slice(0, MAX_VISIBLE),
@@ -1356,34 +1467,58 @@ async function joinSession(userId, sessionId, io) {
     };
   }
 
-  const session = await MovieSession.findById(sessionId);
-  if (!session) return { success: false, status: 404, message: 'Session not found' };
-
-  if (session.status === 'expired' || new Date() > session.expiresAt) {
-    return { success: false, status: 400, message: 'This session has expired' };
+  if (!mongoose.isValidObjectId(sessionId)) {
+    return { success: false, status: 404, code: 'SESSION_NOT_FOUND', message: 'Session not found' };
   }
+  const session = await MovieSession.findById(sessionId);
+  if (!session) return { success: false, status: 404, code: 'SESSION_NOT_FOUND', message: 'Session not found' };
 
   const alreadyIn = session.participants.some(p => p.toString() === userId.toString());
   if (alreadyIn) {
     return { success: true, message: 'Already a member', chatId: session.chatId?.toString() || null };
   }
 
-  if (session.participants.length >= session.maxParticipants) {
-    return { success: false, status: 400, message: 'Session is full' };
+  if (session.status === 'expired' || new Date() > session.expiresAt) {
+    return { success: false, status: 400, code: 'SESSION_EXPIRED', message: 'This session has expired' };
   }
 
-  const isFirstJoin = session.participants.length === 0;
+  if (session.participants.length >= session.maxParticipants) {
+    return { success: false, status: 400, code: 'SESSION_FULL', message: 'Session is full' };
+  }
+
+  // ── Add to participants — ATOMIC: still active, not expired, not already in,
+  //    and still below capacity at the moment of the write. Two people taking
+  //    the last spot at once: one gets it, the other is told the session is full.
+  const joined = await MovieSession.findOneAndUpdate(
+    {
+      _id:          sessionId,
+      status:       'active',
+      expiresAt:    { $gt: new Date() },
+      participants: { $ne: userId },
+      $expr:        { $lt: [{ $size: '$participants' }, '$maxParticipants'] },
+    },
+    { $addToSet: { participants: userId } },
+    { new: true }
+  );
+  if (!joined) {
+    const latest = await MovieSession.findById(sessionId).select('participants maxParticipants status expiresAt chatId').lean();
+    if (latest && latest.participants.some(p => p.toString() === userId.toString())) {
+      return { success: true, message: 'Already a member', chatId: latest.chatId?.toString() || null };
+    }
+    if (!latest) return { success: false, status: 404, code: 'SESSION_NOT_FOUND', message: 'Session not found' };
+    if (latest.status === 'expired' || new Date() > latest.expiresAt) {
+      return { success: false, status: 400, code: 'SESSION_EXPIRED', message: 'This session has expired' };
+    }
+    return { success: false, status: 400, code: 'SESSION_FULL', message: 'Session is full' };
+  }
+
+  const isFirstJoin = joined.participants.length === 1;
 
   // ── Atomic admin assignment — only if no admin yet ────────────────────────
   await MovieSession.findOneAndUpdate(
     { _id: sessionId, adminId: null },
     { $set: { adminId: userId } }
   );
-
-  // ── Add to participants ───────────────────────────────────────────────────
-  await MovieSession.findByIdAndUpdate(sessionId, {
-    $addToSet: { participants: userId },
-  });
 
   // ── Fetch user for display name ───────────────────────────────────────────
   const User   = mongoose.model('User');
@@ -1818,6 +1953,10 @@ module.exports = {
   // Exported for use by expiry job
   fetchTrendingMovies,
   generateSystemSessions,
+  ensureDailySystemSession,
+  _indiaClock,
+  DAILY_CREATE_HOUR,
+  DAILY_SHOW_HOUR,
   countNearbyRealUserSessions,
   getSessionSummary,
 };

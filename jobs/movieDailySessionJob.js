@@ -1,42 +1,58 @@
 // jobs/movieDailySessionJob.js
 // ─────────────────────────────────────────────────────────────────────────────
-// DAILY CRON — three tasks, all city-aware:
+// DAILY CRON — the one automatic Movie Hangout movie per India calendar day.
 //
-// TASK 1 — 7 PM generation check  (19:00 IST = 13:30 UTC on Render)
-//   For each city that has active users:
-//     Count USER-created sessions for TOMORROW
-//     IF user sessions >= 3 → do nothing (real users filled all slots)
-//     IF user sessions < 3  → call generateSystemSessions() to fill missing slots
-//   generateSystemSessions() uses slot-fill logic: only creates sessions for
-//   slots that are still empty. Duplicate guard prevents double-creation.
+// TASK 1 — 3 PM IST daily movie
+//   At 3:00 PM Asia/Kolkata, ensureDailySystemSession() creates ONE system
+//   session for today (show 7 PM IST). Not per city, not per user.
+//   Idempotent in the database (MovieSession.dailyKey, partial unique index):
+//   a repeated tick, a restart or a second instance creates nothing more.
+//   Catch-up: if the server was down at 3:00 PM, the first tick between
+//   3:00 PM and 6:30 PM IST creates it; after that, the day is skipped.
 //
-// TASK 2 — Midnight label refresh  (00:00 IST = 18:30 UTC previous day)
+// TASK 2 — Midnight label refresh  (00:00 IST)
 //   No DB writes. Logs "Tomorrow → Today" transition.
 //   Android computes labels from showTime at runtime.
 //
-// TASK 3 — Post-8PM re-check  (20:01 IST = 14:31 UTC)
-//   After the 8 PM expiry sweep, re-check if real sessions exist for tomorrow.
-//   If not, fill missing slots.
+// The old 7 PM / post-8 PM slot-fill (three system sessions per city for the next
+// day) no longer runs, and Home no longer generates sessions on open.
 //
-// TIMEZONE: Render runs UTC. All hour checks compare against IST hour.
-//   IST hour = UTC hour + 5 (taking floor; +30min handled by minute check).
-//   7 PM IST = 13:30 UTC → h_utc===13 && m_utc>=30 && m_utc<31
+// TIMEZONE: every hour/day check is computed in Asia/Kolkata (Intl), never in
+// the server's own zone.
 // ─────────────────────────────────────────────────────────────────────────────
 'use strict';
 
 const MovieSession = require('../models/MovieSession');
-const mongoose = require('mongoose');
-const { generateSystemSessions, countNearbyRealUserSessions } = require('../services/movieSessionService');
+const { ensureDailySystemSession, _indiaClock, DAILY_CREATE_HOUR } = require('../services/movieSessionService');
 
-// Once-per-day fire guards — separate variables so TASK 3 never blocks TASK 1
-let _lastGenerationDate  = null;   // TASK 1: 7 PM IST generation
-let _lastPost8pmDate     = null;   // TASK 3: post-8 PM re-check
-let _lastMidnightDate    = null;   // TASK 2: midnight label refresh
+// Catch-up window end: 6:30 PM IST (the show is at 7 PM).
+const CATCH_UP_END_MINUTES = 18 * 60 + 30;
 
-// ─── Fallback: Delhi centre (used when no city coords available) ─────────────
-const DEFAULT_LAT = 28.6139;
-const DEFAULT_LNG = 77.2090;
-const DEFAULT_CITY = 'delhi';
+let _dailyDoneFor     = null;   // IST date whose daily movie is settled (created or found)
+let _dailyRunning     = false;
+let _lastMidnightDate = null;   // TASK 2: midnight label refresh
+
+/** True when `clock` (IST) is inside the daily-movie window: 3:00 PM ≤ t < 6:30 PM. */
+function inDailyWindow(clock) {
+  const minutes = clock.hour * 60 + clock.minute;
+  return minutes >= DAILY_CREATE_HOUR * 60 && minutes < CATCH_UP_END_MINUTES;
+}
+
+/** One tick of TASK 1. Exported for tests. */
+async function runDailyMovieTick(now = new Date(), opts = {}) {
+  const clock = _indiaClock(now);
+  if (!inDailyWindow(clock) || _dailyDoneFor === clock.dateKey || _dailyRunning) return null;
+  _dailyRunning = true;
+  try {
+    const result = await ensureDailySystemSession({ ...opts, now });
+    if (result.created || result.sessionId || result.reason === 'too-late') _dailyDoneFor = clock.dateKey;
+    console.log(`🎬 [daily-movie] ${clock.dateKey} ${result.created ? 'created' : 'no new session'}` +
+      `${result.reason ? ` (${result.reason})` : ''}`);
+    return result;
+  } finally {
+    _dailyRunning = false;
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // startMovieDailySessionJob
@@ -44,113 +60,23 @@ const DEFAULT_CITY = 'delhi';
 function startMovieDailySessionJob() {
   setInterval(async () => {
     try {
-      const now     = new Date();
-      const h_utc   = now.getUTCHours();
-      const m_utc   = now.getUTCMinutes();
+      const now   = new Date();
+      const clock = _indiaClock(now);
 
-      // IST today string for guard keys
-      const istNow  = new Date(now.getTime() + 5.5 * 3_600_000);
-      const today   = istNow.toISOString().slice(0, 10); // YYYY-MM-DD IST
+      // ── TASK 1: 3 PM IST daily movie (with catch-up until 6:30 PM IST) ────
+      await runDailyMovieTick(now);
 
-      // ── TASK 1: 7 PM IST = 13:30 UTC ──────────────────────────────────────
-      if (h_utc === 13 && m_utc === 30 && _lastGenerationDate !== today) {
-        _lastGenerationDate = today;
-        await _runDailyGeneration('7PM-IST');
+      // ── TASK 2: Midnight IST ──────────────────────────────────────────────
+      if (clock.hour === 0 && clock.minute === 0 && _lastMidnightDate !== clock.dateKey) {
+        _lastMidnightDate = clock.dateKey;
+        await _midnightRefresh(clock.dateKey);
       }
-
-      // ── TASK 2: Midnight IST = 18:30 UTC (previous calendar day) ──────────
-      if (h_utc === 18 && m_utc === 30 && _lastMidnightDate !== today) {
-        _lastMidnightDate = today;
-        await _midnightRefresh(today);
-      }
-
-      // ── TASK 3: 8:01 PM IST = 14:31 UTC (post-expiry re-check) ───────────
-      if (h_utc === 14 && m_utc === 31 && _lastPost8pmDate !== today) {
-        _lastPost8pmDate = today;
-        await _runDailyGeneration('post-8PM-IST');
-      }
-
     } catch (err) {
       console.error('[daily-session-job] error:', err.message);
     }
   }, 60_000);
 
-  console.log('✅ Movie daily session job started');
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// _runDailyGeneration(trigger)
-//
-// Spec:
-//  IF user sessions for tomorrow >= 3 → do NOTHING
-//  IF user sessions for tomorrow < 3  → fill missing slots only
-//
-// City-aware: queries per city. Falls back to Delhi if no cities found.
-// ─────────────────────────────────────────────────────────────────────────────
-async function _runDailyGeneration(trigger) {
-  console.log(`\n📅 [daily-job] ${trigger}`);
-
-  // Build tomorrow date string in IST
-  const now          = new Date();
-  const istNow       = new Date(now.getTime() + 5.5 * 3_600_000);
-  const istTomorrow  = new Date(istNow.getTime() + 24 * 3_600_000);
-  const tomorrowStr  = istTomorrow.toISOString().slice(0, 10);
-
-  // Find all cities that have active sessions or recent users
-  const cities = await MovieSession.distinct('city', {
-    status: 'active',
-    city:   { $nin: ['', null] },
-  });
-
-  if (!cities.includes(DEFAULT_CITY)) cities.push(DEFAULT_CITY);
-  console.log(`   Cities to process: ${cities.join(', ')}`);
-
-  for (const city of cities) {
-    // Count USER-created sessions for TOMORROW in this city
-    const userCount = await MovieSession.countDocuments({
-      status:            'active',
-      isSystemGenerated: false,
-      date:              tomorrowStr,
-      city,
-    });
-
-    console.log(`   [${city}] user sessions tomorrow: ${userCount}`);
-
-    // Per spec: IF user sessions >= 1 → do NOT generate system sessions
-    if (userCount >= 1) {
-      console.log(`   [${city}] ≥1 real session — skipping generation`);
-      continue;
-    }
-
-    console.log(`   [${city}] 0 real sessions — filling missing slots`);
-    let cityLat = DEFAULT_LAT;
-    let cityLng = DEFAULT_LNG;
-    try {
-      const User = mongoose.model('User');
-      const userWithLoc = await User.findOne({
-        'questionnaire.city': city,
-        last_known_lat: { $ne: null },
-        last_known_lng: { $ne: null },
-      }).select('last_known_lat last_known_lng').lean();
-      if (userWithLoc) {
-        cityLat = userWithLoc.last_known_lat;
-        cityLng = userWithLoc.last_known_lng;
-        console.log(`   [${city}] using real user coords (${cityLat}, ${cityLng})`);
-      } else {
-        console.warn(`   [${city}] no user coords found — falling back to Delhi defaults`);
-      }
-    } catch (locErr) {
-      console.warn(`   [${city}] coord lookup failed: ${locErr.message} — using Delhi defaults`);
-    }
-
-    const created = await generateSystemSessions(
-      { languagePreference: 'Hindi', city },
-      cityLat, cityLng
-    );
-    console.log(`   [${city}] ${created} slot(s) filled`);
-  }
-
-  console.log(`📅 [daily-job] ${trigger} complete\n`);
+  console.log('✅ Movie daily session job started (one movie per day at 3 PM IST)');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -168,13 +94,14 @@ async function _midnightRefresh(today) {
   if (todaySessions.length) {
     console.log(`   ${todaySessions.length} session(s) now show as "Today":`);
     todaySessions.forEach(s => {
-      const h = new Date(s.showTime).getUTCHours() + 5; // rough IST hour
-      const slot = h < 12 ? '11 AM' : h < 16 ? '3 PM' : '7 PM';
-      console.log(`     • [${s.city}] ${s.movieTitle} — ${slot}`);
+      console.log(`     • [${s.city}] ${s.movieTitle} — ${s.time}`);
     });
   } else {
     console.log('   No sessions scheduled for today.');
   }
 }
 
-module.exports = { startMovieDailySessionJob };
+/** Tests only: forget the in-process "done" marker (simulates a restart). */
+function _resetForTests() { _dailyDoneFor = null; _dailyRunning = false; }
+
+module.exports = { startMovieDailySessionJob, runDailyMovieTick, inDailyWindow, _resetForTests };

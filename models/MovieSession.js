@@ -53,6 +53,12 @@ const movieSessionSchema = new mongoose.Schema({
 
   isBoosted:         { type: Boolean, default: false },
   isSystemGenerated: { type: Boolean, default: false },
+
+  // The daily system movie: the India (Asia/Kolkata) calendar day it belongs to,
+  // 'YYYY-MM-DD'. Set ONLY on the one automatic session created each day at 3 PM IST;
+  // absent on every other session (user-created and older system sessions).
+  // The partial unique index below makes "one per day" a database guarantee.
+  dailyKey: { type: String, default: undefined },
   status:            { type: String, enum: ['active', 'expired'], default: 'active' },
 
   chatId: { type: mongoose.Schema.Types.ObjectId, ref: 'MovieChat', default: null },
@@ -78,6 +84,12 @@ movieSessionSchema.index({ createdBy: 1, status: 1 });
 movieSessionSchema.index({ city: 1, date: 1, time: 1, status: 1 });
 // Diversity guard: (city, movieId, date) — no same movie twice in one day
 movieSessionSchema.index({ city: 1, movieId: 1, date: 1, status: 1 });
+// One automatic daily movie per India calendar day. Partial: only documents that
+// HAVE a dailyKey are indexed, so existing sessions are untouched by it.
+movieSessionSchema.index(
+  { dailyKey: 1 },
+  { unique: true, partialFilterExpression: { dailyKey: { $type: 'string' } } }
+);
 
 // MongoDB TTL — auto-delete expired docs after 24 hrs (keeps collection clean)
 movieSessionSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 86400 });
