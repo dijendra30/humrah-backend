@@ -129,6 +129,28 @@ exports.getSessionChat = async (req, res) => {
   }
 };
 
+// PATCH /api/movie-session/:id/messages/:messageId — edit own text message
+exports.editMessage = async (req, res) => {
+  try {
+    const { editMovieMessage } = require('../services/movieHangoutService');
+    return send(res, await editMovieMessage(uid(req), req.params.id, req.params.messageId, req.body && req.body.text, req.app.get('io')));
+  } catch (err) {
+    console.error('[ctrl] editMessage:', err.message);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+// DELETE /api/movie-session/:id/messages/:messageId — delete own message for everyone
+exports.deleteMessage = async (req, res) => {
+  try {
+    const { deleteMovieMessage } = require('../services/movieHangoutService');
+    return send(res, await deleteMovieMessage(uid(req), req.params.id, req.params.messageId, req.app.get('io')));
+  } catch (err) {
+    console.error('[ctrl] deleteMessage:', err.message);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
 exports.getSessionSummary = async (req, res) => {
   try {
     return send(res, await svc.getSessionSummary(uid(req), req.params.id));

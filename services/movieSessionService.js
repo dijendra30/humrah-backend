@@ -1543,6 +1543,15 @@ async function joinSession(userId, sessionId, io) {
     }
   }
 
+  // The chat screen reads MovieMessage, so the join is posted there too (the legacy
+  // MovieChat copy above is kept for older readers). Never fails the join.
+  try {
+    const { postSystemMessage } = require('./movieHangoutService');
+    await postSystemMessage(sessionId, `${name} joined the hangout`, io);
+  } catch (e) {
+    console.warn('[joinSession] join message not posted:', e.message);
+  }
+
   // ── Socket event: notify creator ─────────────────────────────────────────
   try {
     const creatorStr = session.createdBy?.toString?.() || 'system';
@@ -1581,26 +1590,17 @@ async function getSessionChat(userId, sessionId, page = 1, limit = 30) {
     .limit(limit)
     .lean();
 
+  // The same per-message shape the socket sends (adds clientMessageId, editedAt,
+  // deleted and the reply's quote; a deleted message keeps only its place).
+  const { formatMovieMessage, loadReplyTargets } = require('./movieHangoutService');
+  const replyTargets = await loadReplyTargets(messages);
+
   return {
     success: true,
     chat: {
       sessionId:    session._id.toString(),
       participants: session.participants.map(p => p.toString()),
-      messages:     messages.reverse().map(m => ({
-        id:          m._id.toString(),
-        senderId:    m.senderId?.toString() || null,
-        senderName:  m.senderName,
-        senderPhoto: m.senderPhoto || null,
-        text:        m.text,
-        type:        m.type,
-        voiceUrl:    m.voiceUrl || null,
-        duration:    m.duration || 0,
-        replyTo:     m.replyTo?.toString() || null,
-        readBy:      (m.readBy || []).map(r => r.toString()),
-        reactions:   (m.reactions || []).map(r => ({ userId: r.userId?.toString(), reaction: r.reaction })),
-        isSystem:    m.type === 'system',
-        timestamp:   m.createdAt.toISOString(),
-      })),
+      messages:     messages.reverse().map(m => formatMovieMessage(m, replyTargets)),
       pinnedMessageId: session.pinnedMessageId?.toString() || null,
       expiresAt: session.chatExpiresAt.toISOString(),
       status:    session.status,
@@ -1656,7 +1656,9 @@ async function sendMessage(userId, sessionId, text, io) {
   if (!text?.trim()) return { success: false, status: 400, message: 'Message text required' };
 
   const { handleSocketMessage } = require('./movieHangoutService');
-  await handleSocketMessage(userId, sessionId, text, null, io);
+  // (userId, sessionId, text, replyTo, clientMessageId, io) — io was being passed as the
+  // clientMessageId, so REST-sent messages were never broadcast.
+  await handleSocketMessage(userId, sessionId, text, null, null, io);
 
   return { success: true, message: 'Sent' };
 }

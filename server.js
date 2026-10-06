@@ -419,6 +419,19 @@ io.on('connection', (socket) => {
   socket.on('joinMovieRoom', async (data) => {
     const sessionId = data.sessionId || data; // handle if it's sent as a plain string or object
     if (!sessionId) return;
+    // Only the session's members may listen to its room — otherwise anyone signed in could
+    // receive a hangout's messages live just by naming its id.
+    try {
+      if (!mongoose.isValidObjectId(sessionId)) return;
+      const isMember = await mongoose.model('MovieSession').exists({ _id: sessionId, participants: socket.userId });
+      if (!isMember) {
+        console.warn(`[movie-room] join refused: user ${socket.userId} is not a member of ${sessionId}`);
+        return;
+      }
+    } catch (err) {
+      console.error('[movie-room] membership check failed:', err.message);
+      return;
+    }
     const room = `movie:${sessionId}`;
     socket.join(room);
     socket.movieSessionId = sessionId;

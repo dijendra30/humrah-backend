@@ -47,6 +47,13 @@ const movieMessageSchema = new mongoose.Schema({
     type: String,
     default: null
   },
+  // Edit / delete-for-everyone, as Sports chat does it (all additive, server-written):
+  //   editedAt  set when the author edits a text message within 15 minutes.
+  //   deletedAt / deletedBy  soft delete by the author: the row stays (replies,
+  //             history order) but its text / voice URL are never returned again.
+  editedAt:  { type: Date, default: null },
+  deletedAt: { type: Date, default: null },
+  deletedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   readBy: [{ 
     type: mongoose.Schema.Types.ObjectId, 
     ref: 'User' 

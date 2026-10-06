@@ -51,6 +51,12 @@ router.get('/movie-session/:id/chat', ctrl.getSessionChat);
 // GET /api/movie-session/:id/chat/message
 router.post('/movie-session/:id/chat/message', ctrl.sendMessage);
 
+// PATCH /api/movie-session/:id/messages/:messageId  { text } — edit own text (15 min)
+router.patch('/movie-session/:id/messages/:messageId', ctrl.editMessage);
+
+// DELETE /api/movie-session/:id/messages/:messageId — delete own message for everyone
+router.delete('/movie-session/:id/messages/:messageId', ctrl.deleteMessage);
+
 // GET /api/movie-session/:id/summary
 router.get('/movie-session/:id/summary', ctrl.getSessionSummary);
 
