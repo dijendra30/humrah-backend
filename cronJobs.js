@@ -131,6 +131,21 @@ cron.schedule('*/5 * * * *', async () => {
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
+// EVERY MINUTE — Ask a Question (Phase 4): answers that arrived inside a question's
+// 2-minute push window go to the asker as one push ("3 new answers"), or none if they
+// were deleted, hidden or blocked meanwhile. A no-op while QUESTIONS_ENABLED is off or
+// QUESTION_PUSH_ENABLED=false. Its own schedule, so it cannot delay or stop any other.
+// ══════════════════════════════════════════════════════════════════════════════
+cron.schedule('* * * * *', async () => {
+  try {
+    const { flushAnswerPushes } = require('./services/questions/questionNotifications');
+    await flushAnswerPushes();
+  } catch (err) {
+    console.error('[CRON] Question answer push flush error:', err && err.name);
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
 // EVERY HOUR — general cleanup
 // ══════════════════════════════════════════════════════════════════════════════
 cron.schedule('0 * * * *', async () => {

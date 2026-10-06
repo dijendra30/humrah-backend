@@ -232,6 +232,8 @@ const userSchema = new mongoose.Schema({
     chatMessages:       { type: Boolean, default: true },
     letters:            { type: Boolean, default: true },
     replies:            { type: Boolean, default: true },
+    // Ask a Question (Phase 4): "Question answers" — answers and replies on questions.
+    questionAnswers:    { type: Boolean, default: true },
 
     // ── Safety (cannot be fully disabled) ──
     safetyAlerts:       { type: Boolean, default: true },
@@ -514,6 +516,9 @@ const userSchema = new mongoose.Schema({
         // Sports discovery (Phase 5C): the app build on this device can open a
         // "plan near you" push. Only devices that say so are sent one.
         supportsSportsDiscovery: { type: Boolean, default: false },
+        // Ask a Question (Phase 4): the app build on this device can show and open a
+        // QUESTION_ANSWERED / QUESTION_REPLY push. Only devices that say so are sent one.
+        supportsQuestions: { type: Boolean, default: false },
       updatedAt: { type: Date, default: Date.now } 
     }], 
     default: [] 

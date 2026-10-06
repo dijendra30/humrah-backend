@@ -13,6 +13,8 @@ const replySchema = new mongoose.Schema({
   authorId:   { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   text:       { type: String, required: true, maxlength: 4000 },   // 300 graphemes
   status:     { type: String, enum: ['ACTIVE', 'DELETED', 'HIDDEN'], default: 'ACTIVE', required: true },
+  // Phase 4: set once, by the one call that takes this reply into a push (sent or skipped).
+  recipientNotifiedAt: { type: Date, default: null },
 }, { timestamps: true });
 
 // The replies of answers, oldest first.

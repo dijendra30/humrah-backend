@@ -35,6 +35,14 @@ const User = require('../models/User');
 const redis = require('./redisService');
 const cm = require('./contentModeration');
 const R = require('./questions/questionRules');
+// Phase 4 pushes. Lazy: loaded on the first answer or reply, after the response is decided.
+// Nothing here can fail the request: a load error is logged and the push is skipped.
+function notifyLater(run) {
+  try {
+    const n = require('./questions/questionNotifications');
+    n.dispatch(() => run(n));
+  } catch (err) { console.error('[QUESTIONS] push dispatch failed:', err && err.name); }
+}
 
 const { ObjectId } = mongoose.Types;
 const { LIMITS } = R;
@@ -612,6 +620,10 @@ async function createAnswer(user, questionId, body = {}) {
   }
   await audit('ANSWER_CREATED', { actorId: user._id, questionId: q._id, answerId: a._id, targetUserId: q.askerId });
   log('ANSWER_CREATED', { question: q._id, answer: a._id });
+  // Phase 4: "Someone answered your question" — after the answer is saved, never awaited,
+  // and it cannot fail this request (it re-reads everything by id and never throws).
+  const answerId = a._id;
+  notifyLater(n => n.notifyAnswerCreated(answerId));
   return { success: true, status: 201, answer: answerView(a.toObject(), { viewer: user, author: user, question: q }), answerCount: slot.answerCount };
 }
 
@@ -727,6 +739,9 @@ async function createReply(user, questionId, answerId, body = {}) {
   if (!slot) return fail(409, 'REPLY_LIMIT_REACHED', 'This answer has reached its reply limit.');
   const r = await QuestionReply.create({ questionId: q._id, answerId: a._id, authorId: user._id, text: t.text });
   await audit('REPLY_CREATED', { actorId: user._id, questionId: q._id, answerId: a._id });
+  // Phase 4: the other side of this thread gets a push — after the reply is saved, never awaited.
+  const replyId = r._id;
+  notifyLater(n => n.notifyReplyCreated(replyId));
   return { success: true, status: 201, reply: replyView(r.toObject(), { viewer: user, author: user }) };
 }
 

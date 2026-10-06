@@ -55,6 +55,15 @@ const questionSchema = new mongoose.Schema({
   clientRequestId: { type: String, default: undefined },
   // Duplicate detection only (lowercased, punctuation-free). Never returned.
   normalizedText: { type: String, select: false },
+  // Phase 4 — "Someone answered your question" pushes to the asker (services/questions/
+  // questionNotifications.js). At most one push per question per window; answers that
+  // arrive inside it wait here and the every-minute tick sends them as one ("3 new
+  // answers"). Never sent to the app.
+  answerPush: {
+    lastSentAt:   { type: Date, default: null },
+    pendingCount: { type: Number, default: 0 },
+    pendingSince: { type: Date, default: null },   // when the first waiting answer was queued
+  },
 }, { timestamps: true });
 
 // Discovery: nearby + ACTIVE + not expired ($geoNear on locationGrid).
@@ -76,6 +85,8 @@ questionSchema.index({ timeToFirstAnswerMs: 1 }, { partialFilterExpression: { ti
 questionSchema.index({ moderationState: 1, createdAt: -1 });
 // Admin text search on the question.
 questionSchema.index({ text: 'text' }, { default_language: 'none' });
+// Phase 4: the answer-push tick — only questions with answers waiting to be announced.
+questionSchema.index({ 'answerPush.lastSentAt': 1 }, { partialFilterExpression: { 'answerPush.pendingCount': { $gt: 0 } } });
 
 module.exports = mongoose.model('Question', questionSchema);
 module.exports.STATUSES = STATUSES;

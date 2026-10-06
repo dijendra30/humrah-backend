@@ -200,7 +200,7 @@ exports.updateNotifications = async (req, res) => {
       'pushNotifications', 'sound', 'vibration', 'badge', 'previewContent',
       'companionRequests', 'companionAccepted', 'companionRejected', 'friendRequests',
       'movieHangout', 'surpriseActivity', 'randomBooking', 'officialEvents', 'nearbyActivities',
-      'chatMessages', 'letters', 'replies',
+      'chatMessages', 'letters', 'replies', 'questionAnswers',
       'safetyAlerts', 'emergencyAlerts', 'accountSecurity', 'verification',
       'announcements', 'updates', 'promotions', 'featureReleases', 'maintenance',
       'tips', 'recommendations', 'weeklySummary', 'premiumOffers',
@@ -247,7 +247,7 @@ exports.updateNotifications = async (req, res) => {
       pushNotifications: true, sound: true, vibration: true, badge: true, previewContent: true,
       companionRequests: true, companionAccepted: true, companionRejected: true, friendRequests: true,
       movieHangout: true, surpriseActivity: true, randomBooking: true, officialEvents: true, nearbyActivities: true,
-      chatMessages: true, letters: true, replies: true,
+      chatMessages: true, letters: true, replies: true, questionAnswers: true,
       safetyAlerts: true, emergencyAlerts: true, accountSecurity: true, verification: true,
       announcements: true, updates: true, promotions: true, featureReleases: true, maintenance: true,
       tips: true, recommendations: true, weeklySummary: true, premiumOffers: true,
@@ -419,7 +419,7 @@ exports.getNotifications = async (req, res) => {
       // Activities
       movieHangout: true, surpriseActivity: true, randomBooking: true, officialEvents: true, nearbyActivities: true,
       // Messages
-      chatMessages: true, letters: true, replies: true,
+      chatMessages: true, letters: true, replies: true, questionAnswers: true,
       // Safety
       safetyAlerts: true, emergencyAlerts: true, accountSecurity: true, verification: true,
       // Broadcasts
