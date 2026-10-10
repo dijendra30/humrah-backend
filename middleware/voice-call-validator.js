@@ -127,6 +127,15 @@ async function validateCallEligibility(callerId, receiverId, bookingId) {
     });
   }
   
+  // ==================== 7b. RELEASE THE CALLER'S OWN LEFTOVER CALLS ====================
+  // The caller's own device is starting a call, which the app never does while it holds a
+  // live one. Any CONNECTING/CONNECTED call still naming the caller is a leftover from a
+  // crash or dropped connection — release it before the busy checks so calling back works.
+  // Only once every check above has passed.
+  if (errors.length === 0) {
+    await VoiceCall.releaseLeftoverCallsOf(callerId);
+  }
+
   // ==================== 8. VALIDATE RECEIVER NOT ON ANOTHER CALL ====================
   // ✅ FIXED: Don't use res.status() here - just push errors
   const receiverOnCall = await VoiceCall.isUserOnCall(receiverId);

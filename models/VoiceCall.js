@@ -195,52 +195,57 @@ voiceCallSchema.methods.fail = async function(reason) {
   return this.save();
 };
 
+// ==================== STALE-CALL RULES ====================
+// A call's age alone never decides whether it is still live. Each active state has its own
+// limit, measured from when that state began:
+//   RINGING     initiatedAt + 2 min  — the receiver can only accept within 30 s (canBeAccepted).
+//   CONNECTING  acceptedAt  + 2 min  — both apps PATCH CONNECTED as soon as they join Agora.
+//   CONNECTED   initiatedAt + 35 min — the caller's Agora token is minted at initiation and
+//               lives 30 min (TOKEN_EXPIRATION_TIME in routes/voice-call.js), so by then Agora
+//               has dropped them from the channel and only an abandoned record is left.
+//               If TOKEN_EXPIRATION_TIME changes, change CONNECTED_STALE_MS with it.
+const ACTIVE_STATUSES     = ['RINGING', 'CONNECTING', 'CONNECTED'];
+const RINGING_STALE_MS    = 2 * 60 * 1000;
+const CONNECTING_STALE_MS = 2 * 60 * 1000;
+const CONNECTED_STALE_MS  = 35 * 60 * 1000;
+
+// Matches only active calls that are stale for their own state. It is the filter of the
+// cleanup write itself, so a call that changed state in the meantime no longer matches and
+// is left untouched.
+function staleActiveCallFilter(now = Date.now()) {
+  const connectingCutoff = new Date(now - CONNECTING_STALE_MS);
+  return {
+    $or: [
+      { status: 'RINGING', initiatedAt: { $lt: new Date(now - RINGING_STALE_MS) } },
+      { status: 'CONNECTING', $or: [
+        { acceptedAt: { $lt: connectingCutoff } },
+        { acceptedAt: null, initiatedAt: { $lt: connectingCutoff } }
+      ] },
+      { status: 'CONNECTED', initiatedAt: { $lt: new Date(now - CONNECTED_STALE_MS) } }
+    ]
+  };
+}
+
 // ==================== STATIC METHODS ====================
 
 voiceCallSchema.statics.isUserOnCall = async function(userId) {
   console.log(`\n🔍 Checking if user ${userId} is on call...`);
 
-  const STALE_THRESHOLD = 2 * 60 * 1000; // 2 minutes
-  const staleTime = new Date(Date.now() - STALE_THRESHOLD);
+  const participant = { $or: [{ callerId: userId }, { receiverId: userId }] };
 
-  const potentialCalls = await this.find({
-    $or: [{ callerId: userId }, { receiverId: userId }],
-    status: { $in: ['RINGING', 'CONNECTING', 'CONNECTED'] }
-  }).select('_id status initiatedAt acceptedAt connectedAt');
+  await this.updateMany(
+    { $and: [participant, staleActiveCallFilter()] },
+    { $set: { status: 'ENDED', endedAt: new Date(), endReason: 'auto_timeout' } }
+  );
 
-  if (potentialCalls.length === 0) {
-    console.log(`   ✅ User is NOT on any call`);
-    return false;
-  }
-
-  let hasActiveCall = false;
-  const now = new Date();
-
-  for (const call of potentialCalls) {
-    const isStale = call.initiatedAt < staleTime;
-    if (isStale) {
-      await this.updateOne(
-        { _id: call._id },
-        { $set: { status: 'ENDED', endedAt: new Date(), endReason: 'auto_timeout' } }
-      );
-    } else {
-      hasActiveCall = true;
-    }
-  }
-
+  const hasActiveCall = !!(await this.exists({ ...participant, status: { $in: ACTIVE_STATUSES } }));
+  if (!hasActiveCall) console.log(`   ✅ User is NOT on any call`);
   return hasActiveCall;
 };
 
 voiceCallSchema.statics.getUserActiveCall = async function(userId) {
-  const STALE_THRESHOLD = 2 * 60 * 1000;
-  const staleTime = new Date(Date.now() - STALE_THRESHOLD);
-
   await this.updateMany(
-    {
-      $or: [{ callerId: userId }, { receiverId: userId }],
-      status: { $in: ['RINGING', 'CONNECTING', 'CONNECTED'] },
-      initiatedAt: { $lt: staleTime }
-    },
+    { $and: [{ $or: [{ callerId: userId }, { receiverId: userId }] }, staleActiveCallFilter()] },
     { $set: { status: 'ENDED', endedAt: new Date(), endReason: 'auto_timeout' } }
   );
 
@@ -248,6 +253,22 @@ voiceCallSchema.statics.getUserActiveCall = async function(userId) {
     $or: [{ callerId: userId }, { receiverId: userId }],
     status: { $in: ['RINGING', 'CONNECTING', 'CONNECTED'] }
   });
+};
+
+// Called when this user's own device starts a new call. The app never sends /initiate while
+// it holds a live call (VoiceCallActivity reopens the active call screen instead), so a
+// CONNECTING/CONNECTED call still naming this user is left over from a crash or dropped
+// connection whose /end never arrived. Conditional on status, so a call that has already
+// ended is never rewritten.
+voiceCallSchema.statics.releaseLeftoverCallsOf = async function(userId) {
+  const result = await this.updateMany(
+    { $or: [{ callerId: userId }, { receiverId: userId }], status: { $in: ['CONNECTING', 'CONNECTED'] } },
+    { $set: { status: 'ENDED', endedAt: new Date(), endReason: 'stale_cleanup' } }
+  );
+  if (result.modifiedCount > 0) {
+    console.log(`🧹 Released ${result.modifiedCount} leftover call(s) of user ${userId}`);
+  }
+  return result.modifiedCount;
 };
 
 voiceCallSchema.statics.countRecentAttempts = async function(callerId, bookingId, hours = 1) {
@@ -289,11 +310,10 @@ voiceCallSchema.statics.expireConnectedCalls = async function() {
   return result.modifiedCount;
 };
 
-voiceCallSchema.statics.cleanupAllStaleCalls = async function(thresholdMinutes = 2) {
-  const staleTime = new Date(Date.now() - thresholdMinutes * 60 * 1000);
+voiceCallSchema.statics.cleanupAllStaleCalls = async function() {
   console.log('🧹 Running global stale call cleanup...');
   const result = await this.updateMany(
-    { status: { $in: ['RINGING', 'CONNECTING', 'CONNECTED'] }, initiatedAt: { $lt: staleTime } },
+    staleActiveCallFilter(),
     { $set: { status: 'ENDED', endedAt: new Date(), endReason: 'stale_cleanup' } }
   );
   console.log(`✅ Cleaned up ${result.modifiedCount} stale calls`);
