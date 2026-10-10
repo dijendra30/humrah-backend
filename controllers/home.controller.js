@@ -291,6 +291,9 @@ exports.getNearbyUsers = async (req, res) => {
 // to BOTH functions until that consolidation happens.
 // =============================================================================
 exports.getPeopleNearby = async (req, res) => {
+  // Opt-in discovery mode (new Home + See all; see getPeopleDiscovery below). Without
+  // `discovery=1` this endpoint behaves exactly as before, for older app builds.
+  if (req.query && (req.query.discovery === '1' || req.query.discovery === 'true')) return getPeopleDiscovery(req, res);
   try {
     const now = new Date();
     const MAX_KM = getRadiusKm();
@@ -423,3 +426,223 @@ exports.getPeopleNearby = async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };
+
+// =============================================================================
+// GET /api/home/people-nearby?discovery=1&page=1&limit=20&seed=123
+// =============================================================================
+//
+// OPT-IN discovery mode for the new Home's People Near You (Home shows the first
+// five; See all pages through the rest). Without `discovery=1` the endpoint above
+// behaves exactly as before, so older app builds are unaffected; /api/home/nearby
+// (the published app) is not touched at all.
+//
+// Matching first, never empty just because nobody shares an interest. One ranked
+// list, in these pools (each user appears once, in the first pool they qualify for):
+//
+//   1. NEARBY_COMPANION  Companions with a REAL distance inside the existing radius
+//                        (2 km at night, 5 km by day) — at most two.
+//   2. NEARBY_MATCH      Members inside the radius with a real shared signal.
+//   3. NEARBY_GENERAL    Other Members inside the radius (no claimed match).
+//   4. INDIA_MATCH       Members elsewhere (beyond the radius / unknown location) with
+//                        a real shared signal.
+//   5. INDIA_GENERAL     Other Members elsewhere.
+//   6. MORE_COMPANION    Any further Companions — never presented as nearby unless
+//                        they really are inside the radius.
+//
+// Real signals only: the DISTINCT shared items of hangout preferences / interests /
+// hobbies (both users' own profile data), and the same active mood today. The
+// generic compatibilityScore is NOT used as evidence (its energy + distance parts make
+// everyone score > 0).
+//
+// Inside a pool: relevance tier first, then a blended priority — opposite gender (a
+// preference, never a filter; both genders must be known Man/Woman), distance band and
+// profile completeness — then a controlled shuffle only among exact ties. The shuffle is
+// seeded by the client's `seed`, so pages of one browsing session never reorder; a new
+// seed (pull-to-refresh) may reshuffle ties only. Gender is never sent to the client.
+//
+// Same safety rules as the endpoint above: ACTIVE accounts with a photo, blocked in
+// either direction excluded, self excluded. No coordinates leave the server; people
+// beyond the radius get a coarse label ("In your city", "In Mumbai", "Across India").
+// The India-wide pool is a bounded query on the existing { status, userType, _id }
+// index (newest accounts first), never the whole user collection.
+// =============================================================================
+const DISCOVERY_PAGE_MAX = 50;
+const DISCOVERY_BROAD_LIMIT = 400;
+
+function _norm(v) { return String(v || '').trim().toLowerCase(); }
+function _interestSet(u) {
+  const q = u.questionnaire || {};
+  return new Set([...(q.hangoutPreferences || []), ...(q.interests || []), ...(q.hobbies || []),
+    ...(u.interests || []), ...(u.hobbies || [])].map(_norm).filter(Boolean));
+}
+function _binaryGender(g) {
+  const v = _norm(g);
+  if (v === 'man' || v === 'male' || v === 'm') return 'M';
+  if (v === 'woman' || v === 'female' || v === 'f') return 'F';
+  return null;
+}
+function _cityOf(u) { return _norm((u.liveLocation && u.liveLocation.city) || (u.questionnaire && u.questionnaire.city) || u.city); }
+function _titleCase(s) { return s.replace(/\b\w/g, c => c.toUpperCase()); }
+// Deterministic PRNG for the controlled shuffle (mulberry32).
+function _rng(seed) {
+  let a = seed >>> 0;
+  return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+}
+function _hash(str) { let h = 2166136261; for (const ch of String(str)) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); } return h >>> 0; }
+
+/**
+ * Pure ranking (exported for tests): candidates already carry the fields below.
+ *   { user, isCompanion, nearby (bool), distBand (0..3), shared (int), sameMood (bool),
+ *     preferred (bool), completeness (0..2) }
+ */
+function rankDiscovery(candidates, seed) {
+  const rand = _rng(seed);
+  const tierOf = c => (c.shared >= 3 || (c.shared >= 1 && c.sameMood)) ? 3 : (c.shared === 2 || c.sameMood) ? 2 : (c.shared === 1 ? 1 : 0);
+  // Blended priority within a tier: one distance band ≈ the gender preference.
+  const prio = c => (c.preferred ? 2 : 0) + (3 - c.distBand) * 2 + c.completeness;
+  const ordered = list => {
+    const groups = new Map();
+    for (const c of list) {
+      const k = `${tierOf(c)}|${prio(c)}`;
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(c);
+    }
+    const keys = [...groups.keys()].sort((a, b) => {
+      const [ta, pa] = a.split('|').map(Number); const [tb, pb] = b.split('|').map(Number);
+      return (tb - ta) || (pb - pa);
+    });
+    const out = [];
+    for (const k of keys) {
+      // Stable base order, then a seeded Fisher–Yates among exact ties only.
+      const g = groups.get(k).sort((x, y) => String(x.user._id).localeCompare(String(y.user._id)));
+      for (let i = g.length - 1; i > 0; i--) { const j = Math.floor(rand() * (i + 1)); [g[i], g[j]] = [g[j], g[i]]; }
+      out.push(...g);
+    }
+    return out;
+  };
+  const seen = new Set();
+  const unique = candidates.filter(c => { const id = String(c.user._id); if (seen.has(id)) return false; seen.add(id); return true; });
+
+  const nearbyCompanions = ordered(unique.filter(c => c.isCompanion && c.nearby));
+  const pool = (name, list) => list.map(c => ({ ...c, pool: name, tier: tierOf(c) }));
+  const p1 = pool('NEARBY_COMPANION', nearbyCompanions.slice(0, 2));
+  const members = unique.filter(c => !c.isCompanion);
+  const p2 = pool('NEARBY_MATCH', ordered(members.filter(c => c.nearby && tierOf(c) > 0)));
+  const p3 = pool('NEARBY_GENERAL', ordered(members.filter(c => c.nearby && tierOf(c) === 0)));
+  const p4 = pool('INDIA_MATCH', ordered(members.filter(c => !c.nearby && tierOf(c) > 0)));
+  const p5 = pool('INDIA_GENERAL', ordered(members.filter(c => !c.nearby && tierOf(c) === 0)));
+  const p6 = pool('MORE_COMPANION', [
+    ...nearbyCompanions.slice(2),
+    ...ordered(unique.filter(c => c.isCompanion && !c.nearby)),
+  ]);
+  return [...p1, ...p2, ...p3, ...p4, ...p5, ...p6];
+}
+
+async function getPeopleDiscovery(req, res) {
+  try {
+    const now = new Date();
+    const MAX_KM = getRadiusKm();
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(DISCOVERY_PAGE_MAX, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    const seed = Number.isFinite(Number(req.query.seed)) && req.query.seed !== '' && req.query.seed != null
+      ? (Number(req.query.seed) >>> 0) : (Math.floor(Math.random() * 2 ** 31) >>> 0);
+
+    const me = await User.findById(req.userId)
+      .select('last_known_lat last_known_lng questionnaire blockedUsers status liveLocation interests hobbies city')
+      .lean();
+    if (!me) return res.status(404).json({ success: false, message: 'User not found' });
+
+    // Exclusions: blocked both ways, plus self — exactly as above.
+    const blockedIds = (me.blockedUsers || []).map(id => id.toString());
+    const usersWhoBlockedMe = await User.find({ blockedUsers: req.userId }, { _id: 1 }).lean();
+    blockedIds.push(...usersWhoBlockedMe.map(u => u._id.toString()));
+    blockedIds.push(req.userId.toString());
+
+    const myMTM = await MatchingTodayMood.findOne({ userId: req.userId, visible: true, expiresAt: { $gt: now } }).lean();
+    me._mtm = myMTM;
+
+    const select = 'firstName lastName profilePhoto verified photoVerificationStatus isPremium userType ratingStats last_known_lat last_known_lng questionnaire liveLocation tagline bio interests hobbies vibeWords availableTimes languagePreference language price city state availability comfortZones profileCompletion';
+    const base = { _id: { $nin: blockedIds }, status: 'ACTIVE', profilePhoto: { $ne: null } };
+
+    // Local candidates: the same radius / city query as the endpoint above.
+    const userLat = me.liveLocation?.lat ?? me.last_known_lat ?? null;
+    const userLng = me.liveLocation?.lng ?? me.last_known_lng ?? null;
+    const myCity = _cityOf(me) || null;
+    let local = [];
+    if (userLat !== null && userLng !== null) {
+      const dLat = MAX_KM / 111.0;
+      const dLng = MAX_KM / (111.0 * Math.cos(userLat * Math.PI / 180));
+      const or = [
+        { 'liveLocation.coordinates': { $geoWithin: { $centerSphere: [[userLng, userLat], MAX_KM / 6378.1] } } },
+        { last_known_lat: { $gte: userLat - dLat, $lte: userLat + dLat }, last_known_lng: { $gte: userLng - dLng, $lte: userLng + dLng } },
+      ];
+      if (myCity) {
+        const t = _titleCase(myCity);
+        or.push({ 'liveLocation.city': { $in: [myCity, t, myCity.toUpperCase()] } }, { 'questionnaire.city': { $in: [myCity, t, myCity.toUpperCase()] } });
+      }
+      local = await User.find({ ...base, $or: or }).select(select).limit(300).lean();
+    } else if (myCity) {
+      const t = _titleCase(myCity);
+      local = await User.find({ ...base, $or: [{ 'liveLocation.city': { $in: [myCity, t, myCity.toUpperCase()] } }, { 'questionnaire.city': { $in: [myCity, t, myCity.toUpperCase()] } }] })
+        .select(select).limit(300).lean();
+    }
+
+    // Broader India: bounded, on the { status, userType, _id } index, newest first.
+    const localIds = local.map(u => u._id);
+    const broad = await User.find({ ...base, _id: { $nin: [...blockedIds, ...localIds.map(String)] }, userType: { $in: ['MEMBER', 'COMPANION'] } })
+      .select(select).sort({ _id: -1 }).limit(DISCOVERY_BROAD_LIMIT).lean();
+
+    const all = [...local, ...broad];
+    const moods = await MatchingTodayMood.find({ userId: { $in: all.map(u => u._id) }, visible: true, expiresAt: { $gt: now } }).lean();
+    const moodBy = new Map(moods.map(d => [d.userId.toString(), d]));
+
+    const mine = _interestSet(me);
+    const myGender = _binaryGender(me.questionnaire && me.questionnaire.gender);
+    const candidates = all.map(u => {
+      u._mtm = moodBy.get(u._id.toString()) || null;
+      const cLat = u.liveLocation?.lat ?? u.last_known_lat ?? null;
+      const cLng = u.liveLocation?.lng ?? u.last_known_lng ?? null;
+      const distKm = (userLat !== null && userLng !== null && cLat !== null && cLng !== null) ? haversineKm(userLat, userLng, cLat, cLng) : null;
+      const nearby = distKm !== null && distKm <= MAX_KM;
+      const theirs = _interestSet(u);
+      let shared = 0;
+      const sharedItems = [];
+      for (const i of theirs) if (mine.has(i)) { shared++; if (sharedItems.length < 3) sharedItems.push(i); }
+      const sameMood = !!(myMTM && myMTM.mood && u._mtm && u._mtm.mood && u._mtm.mood === myMTM.mood);
+      const theirGender = _binaryGender(u.questionnaire && u.questionnaire.gender);
+      const city = _cityOf(u);
+      const distBand = nearby ? (distKm <= 1 ? 0 : distKm <= 3 ? 1 : 2) : (myCity && city === myCity ? 2 : 3);
+      const pc = Number(u.profileCompletion) || 0;
+      const locationLabel = nearby ? (distKm < 1 ? '< 1 km away' : `${distKm.toFixed(1)} km away`)
+        : (myCity && city === myCity ? 'In your city' : city ? `In ${_titleCase(city)}` : 'Across India');
+      return {
+        user: u, distKm: nearby ? distKm : null, isCompanion: u.userType === 'COMPANION', nearby, distBand, shared, sharedItems, sameMood,
+        preferred: !!(myGender && theirGender && myGender !== theirGender),
+        completeness: pc >= 80 ? 2 : pc >= 50 ? 1 : 0, locationLabel,
+      };
+    });
+
+    const ranked = rankDiscovery(candidates, (seed ^ _hash(req.userId)) >>> 0);
+    const start = (page - 1) * limit;
+    const slice = ranked.slice(start, start + limit);
+    const users = slice.map(c => {
+      const f = formatUser(c.user, me, MAX_KM, c.nearby ? c.distKm : 9999);
+      // Distance only for people genuinely inside the radius; everyone else a coarse label.
+      f.distanceLabel = c.locationLabel;
+      f.conversationInterests = c.user.questionnaire?.conversationInterests || null;
+      f.discoveryPool = c.pool;
+      f.isNearby = c.nearby;
+      f.locationLabel = c.locationLabel;
+      f.sharedInterestCount = c.shared;          // distinct, verified on both profiles
+      f.sameMood = c.sameMood;
+      return f;
+    });
+    res.json({ success: true, users, page, limit, seed, total: ranked.length, hasMore: start + limit < ranked.length });
+  } catch (err) {
+    console.error('[PeopleDiscovery]', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+}
+
+exports.getPeopleDiscovery = getPeopleDiscovery;
+exports._rankDiscovery = rankDiscovery;
