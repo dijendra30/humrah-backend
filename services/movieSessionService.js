@@ -1006,17 +1006,19 @@ async function generateSystemSessions(userCtx, lat, lng) {
 // THE DAILY SYSTEM MOVIE
 //
 // Exactly ONE automatic Movie Hangout session per India (Asia/Kolkata) calendar
-// day, created by the 3 PM IST job (jobs/movieDailySessionJob.js). Not per user,
-// not per city, never from a Home refresh.
+// day. The 3 PM IST job (jobs/movieDailySessionJob.js) creates the movie for the
+// NEXT calendar day: generated 10 Oct 15:00 IST → dailyKey '2026-10-11', show
+// 11 Oct 7 PM IST. The generation date and the movie's date are different; the
+// dailyKey is always the MOVIE's (target) date. Not per user, not per city,
+// never from a Home refresh.
 //
-// Idempotent: the session carries dailyKey = today's IST date, and a partial
-// unique index on dailyKey means a second run — a repeated tick, a restart, a
-// second server instance — finds today's session (or loses the insert race with
-// E11000) and creates nothing.
+// Idempotent: a partial unique index on dailyKey means a second run — a repeated
+// tick, a restart, a second server instance — finds the target date's session
+// (or loses the insert race with E11000) and creates nothing.
 //
 // Movie: the existing TMDB pool (fetchTrendingMovies, India-first), with a poster,
 // not used by a recent daily movie. Theatre: the existing nearby-theatre lookup
-// around the launch city centre. Show time: 7 PM IST the same day.
+// around the launch city centre. Show time: 7 PM IST on the target date.
 // ─────────────────────────────────────────────────────────────────────────────
 const DAILY_TZ            = 'Asia/Kolkata';
 const DAILY_CREATE_HOUR   = 15;   // 3:00 PM IST — when the job creates it
@@ -1039,11 +1041,22 @@ function _indiaClock(date = new Date()) {
   };
 }
 
+/**
+ * 'YYYY-MM-DD' + 1 calendar day. Pure calendar arithmetic on a date-only value (no
+ * clock, no time zone), so it can never shift the date near midnight IST or UTC.
+ */
+function _nextDateKey(dateKey) {
+  const [y, m, d] = dateKey.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10);
+}
+
 async function ensureDailySystemSession(opts = {}) {
   const now           = opts.now || new Date();
   const fetchMovies   = opts.fetchMovies   || fetchTrendingMovies;
   const fetchTheatres = opts.fetchTheatres || fetchNearbyTheatres;
-  const { dateKey }   = _indiaClock(now);
+  // Generated today (India date), for TOMORROW: the dailyKey is the movie's own date.
+  const generationDate = _indiaClock(now).dateKey;
+  const dateKey        = _nextDateKey(generationDate);
 
   const existing = await MovieSession.findOne({ dailyKey: dateKey }).lean();
   if (existing) return { created: false, dailyKey: dateKey, sessionId: existing._id.toString() };
@@ -1244,19 +1257,23 @@ async function getNearbySessions(userId, queryLat, queryLng) {
       score:     _scoreSession(s, now, userLang, loc.lat, loc.lng),
       isSystem:  s.isSystemGenerated || false,
       daily:     s.dailyKey ? 1 : 0,
+      showMs:    new Date(s.showTime).getTime(),
     };
   });
 
   // Split into buckets
   const realSessions   = scored.filter(x => !x.isSystem).sort((a, b) => b.score - a.score);
-  // ONE automatic movie on Home: today's daily movie (dailyKey) wins over any older
-  // system session still active; never more than one.
-  const systemSessions = scored.filter(x =>  x.isSystem)
-    .sort((a, b) => (b.daily - a.daily) || (b.score - a.score))
-    .slice(0, 1);
+  // The automatic movies on Home: the daily movies (dailyKey — one per date, so from
+  // 3 PM to today's show both today's and the newly generated tomorrow's), soonest
+  // first. An older non-daily system session is shown only when no daily movie is,
+  // and then only one.
+  const systemAll      = scored.filter(x => x.isSystem);
+  const dailyMovies    = systemAll.filter(x => x.daily).sort((a, b) => a.showMs - b.showMs);
+  const legacySystem   = systemAll.filter(x => !x.daily).sort((a, b) => b.score - a.score);
+  const systemSessions = dailyMovies.length ? dailyMovies.slice(0, 2) : legacySystem.slice(0, 1);
 
-  // Display cap: max 5 sessions visible — real-user sessions first, then the one
-  // daily system movie.
+  // Display cap: max 5 sessions visible — real-user sessions first, then the daily
+  // system movie(s).
   const MAX_VISIBLE = 5;
   const combined = [
     ...realSessions.slice(0, MAX_VISIBLE),
@@ -1957,6 +1974,7 @@ module.exports = {
   generateSystemSessions,
   ensureDailySystemSession,
   _indiaClock,
+  _nextDateKey,
   DAILY_CREATE_HOUR,
   DAILY_SHOW_HOUR,
   countNearbyRealUserSessions,

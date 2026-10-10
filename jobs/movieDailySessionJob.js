@@ -4,11 +4,13 @@
 //
 // TASK 1 — 3 PM IST daily movie
 //   At 3:00 PM Asia/Kolkata, ensureDailySystemSession() creates ONE system
-//   session for today (show 7 PM IST). Not per city, not per user.
+//   session for TOMORROW (dailyKey = tomorrow's date, show 7 PM IST tomorrow).
+//   Not per city, not per user.
 //   Idempotent in the database (MovieSession.dailyKey, partial unique index):
 //   a repeated tick, a restart or a second instance creates nothing more.
 //   Catch-up: if the server was down at 3:00 PM, the first tick between
-//   3:00 PM and 6:30 PM IST creates it; after that, the day is skipped.
+//   3:00 PM and 6:30 PM IST creates it (still for tomorrow); after that, that
+//   day's generation is skipped (existing policy, unchanged).
 //
 // TASK 2 — Midnight label refresh  (00:00 IST)
 //   No DB writes. Logs "Tomorrow → Today" transition.
