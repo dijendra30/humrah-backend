@@ -338,10 +338,20 @@ router.patch('/status/:callId', authenticate, async (req, res) => {
     if (!isParticipant) return res.status(403).json({ success: false, error: 'UNAUTHORIZED' });
 
     if (status === 'CONNECTED' && call.status === 'CONNECTING') {
-      call.status      = 'CONNECTED';
-      call.connectedAt = new Date();
-      await call.save();
-      console.log('Call ' + callId + ' marked CONNECTED');
+      // Conditional on the call still being CONNECTING, so a hang-up or cleanup that lands
+      // after the read above is never undone.
+      const updated = await VoiceCall.findOneAndUpdate(
+        { _id: call._id, status: 'CONNECTING' },
+        { $set: { status: 'CONNECTED', connectedAt: new Date() } },
+        { new: true }
+      );
+      if (updated) {
+        call.status = updated.status;
+        console.log('Call ' + callId + ' marked CONNECTED');
+      } else {
+        const current = await VoiceCall.findById(call._id).select('status');
+        if (current) call.status = current.status;
+      }
     }
 
     res.json({ success: true, status: call.status });
