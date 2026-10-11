@@ -4,6 +4,7 @@
  * Import and call initSessionSocket(io) from your server.js.
  */
 const jwt = require("jsonwebtoken");
+const { verifySocketSession, tagSocket } = require("../utils/sessionGuard");
 
 function verifySocketToken(token) {
   if (!token) throw new Error("No token");
@@ -18,10 +19,13 @@ function verifySocketToken(token) {
 function initSessionSocket(io) {
   const ns = io.of("/gaming");
 
-  ns.use((socket, next) => {
+  ns.use(async (socket, next) => {
     try {
       const raw   = socket.handshake.auth?.token || "";
       const token = raw.startsWith("Bearer ") ? raw.slice(7) : raw;
+      // Session rules (tokenVersion + the account's single active phone) — utils/sessionGuard.js.
+      const { decoded } = await verifySocketSession(token, require("../models/User"));
+      tagSocket(socket, decoded);
       socket.data.user = verifySocketToken(token);
       next();
     } catch (e) { next(new Error("Auth failed: " + e.message)); }

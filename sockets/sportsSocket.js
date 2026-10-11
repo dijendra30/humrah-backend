@@ -67,6 +67,7 @@ const mongoose = require('mongoose');
 // works once something else has registered the schema, and this file is loaded by
 // server.js before the sports routes are mounted.
 const User          = require('../models/User');
+const { sessionRejection, tagSocket, SESSION_FIELDS } = require('../utils/sessionGuard');
 const SportsPlan    = require('../models/SportsPlan');
 const SportsSession = require('../models/SportsSession');
 const SportsHiddenMessage = require('../models/SportsHiddenMessage');
@@ -127,13 +128,15 @@ async function authenticateSocket(socket, next) {
     }
 
     const user = await User.findById(decoded.userId)
-      .select('status tokenVersion suspensionInfo banInfo')
+      .select(`status tokenVersion suspensionInfo banInfo ${SESSION_FIELDS}`)
       .lean();
     if (!user) return next(new Error('Authentication error: User not found'));
 
-    if ((decoded.tv ?? 0) !== (user.tokenVersion ?? 0)) {
-      return next(new Error('Authentication error: Session expired'));
-    }
+    // tokenVersion + the account's single active phone session (utils/sessionGuard.js).
+    const rejection = sessionRejection(decoded, user);
+    if (rejection === 'SESSION_REPLACED') return next(new Error('Authentication error: Session replaced'));
+    if (rejection) return next(new Error('Authentication error: Session expired'));
+    tagSocket(socket, decoded);
     if (user.status && user.status !== 'ACTIVE') {
       return next(new Error('Authentication error: Account not active'));
     }

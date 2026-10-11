@@ -89,7 +89,8 @@ const voiceCallSchema = new mongoose.Schema({
       'system_error',
       'auto_expired',
       'auto_timeout',
-      'stale_cleanup'
+      'stale_cleanup',
+      'session_replaced'   // the account signed in on another phone (services/sessionTakeover.js)
     ],
     default: null
   },
@@ -227,6 +228,8 @@ function staleActiveCallFilter(now = Date.now()) {
 }
 
 // ==================== STATIC METHODS ====================
+
+voiceCallSchema.statics.staleActiveCallFilter = staleActiveCallFilter;
 
 voiceCallSchema.statics.isUserOnCall = async function(userId) {
   console.log(`\n🔍 Checking if user ${userId} is on call...`);

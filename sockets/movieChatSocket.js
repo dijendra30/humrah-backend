@@ -22,6 +22,7 @@
 'use strict';
 
 const jwt = require('jsonwebtoken');
+const { verifySocketSession, tagSocket } = require('../utils/sessionGuard');
 
 function verifyToken(token) {
   if (!token) throw new Error('No token');
@@ -37,9 +38,12 @@ function initMovieChatSocket(io) {
   const ns = io.of('/movie-chat');
 
   // ── Auth middleware ──────────────────────────────────────────────────────────
-  ns.use((socket, next) => {
+  ns.use(async (socket, next) => {
     try {
       const raw = socket.handshake.auth?.token || '';
+      // Session rules (tokenVersion + the account's single active phone) — utils/sessionGuard.js.
+      const { decoded } = await verifySocketSession(raw, require('../models/User'));
+      tagSocket(socket, decoded);
       socket.data.user = verifyToken(raw);
       next();
     } catch (e) {

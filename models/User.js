@@ -196,6 +196,16 @@ const userSchema = new mongoose.Schema({
     select: true
   },
 
+  // =============================================
+  // ACTIVE APP SESSION -- one signed-in phone per account
+  // =============================================
+  // Every app login writes a fresh server-generated id here and puts the same id in
+  // the JWT ("sid"). A token whose sid is not the current one belongs to a phone that
+  // has since been replaced (or logged out) and is rejected. See utils/sessionGuard.js.
+  // Hidden from queries by default so it never leaks into user payloads.
+  activeSessionId:        { type: String, default: null, select: false },
+  activeSessionStartedAt: { type: Date,   default: null, select: false },
+
   acceptedTermsVersion:    { type: String,  default: null },
   acceptedPrivacyVersion:  { type: String,  default: null },
   lastLegalAcceptanceDate: { type: Date,    default: null },

@@ -11,6 +11,7 @@ const helmet = require('helmet');
 const mongoSanitize = require('express-mongo-sanitize');
 const hpp = require('hpp');
 const { globalLimiter } = require('./middleware/rateLimitMiddleware');
+const { verifySocketSession, tagSocket } = require('./utils/sessionGuard');
 
 dotenv.config();
 
@@ -154,38 +155,27 @@ const userInfo     = new Map();
 // =============================================
 // SOCKET AUTHENTICATION MIDDLEWARE
 // =============================================
-io.use((socket, next) => {
+io.use(async (socket, next) => {
   try {
     let token = socket.handshake.auth?.token;
     if (!token) token = socket.handshake.query?.token;
     if (!token) token = socket.handshake.headers?.authorization?.replace('Bearer ', '');
 
-    if (!token) return next(new Error('Authentication error: No token provided'));
-
-    const JWT_SECRET = process.env.JWT_SECRET;
-    if (!JWT_SECRET) return next(new Error('Authentication error: Server misconfiguration'));
-
-    const decoded = jwt.verify(token, JWT_SECRET);
+    // Same rules as REST (tokenVersion + the account's single active phone session),
+    // so a replaced phone cannot reconnect. See utils/sessionGuard.js.
+    const { decoded, user } = await verifySocketSession(token, mongoose.model('User'), 'firstName lastName profilePhoto');
     socket.userId   = decoded.userId;
     socket.userRole = decoded.role || 'USER';
+    tagSocket(socket, decoded);
 
-    const User = mongoose.model('User');
-    User.findById(decoded.userId)
-      .select('firstName lastName profilePhoto')
-      .then(user => {
-        if (user) {
-          socket.userName  = `${user.firstName} ${user.lastName || ''}`.trim();
-          socket.userPhoto = user.profilePhoto;
-          userInfo.set(socket.userId, { name: socket.userName, photo: socket.userPhoto });
-        }
-      })
-      .catch(err => { console.error('Error fetching user info:', err); socket.userName = 'User'; });
+    socket.userName  = `${user.firstName || ''} ${user.lastName || ''}`.trim() || 'User';
+    socket.userPhoto = user.profilePhoto;
+    userInfo.set(socket.userId, { name: socket.userName, photo: socket.userPhoto });
 
     next();
   } catch (err) {
-    if (err.name === 'TokenExpiredError') return next(new Error('Authentication error: Token expired'));
-    if (err.name === 'JsonWebTokenError')  return next(new Error('Authentication error: Invalid token'));
-    return next(new Error('Authentication error: ' + err.message));
+    const msg = err && err.message ? err.message : String(err);
+    return next(msg.startsWith('Authentication error') ? err : new Error('Authentication error: ' + msg));
   }
 });
 

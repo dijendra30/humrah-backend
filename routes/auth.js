@@ -22,6 +22,7 @@ const LegalVersion = require('../models/LegalVersion');
 const { sendWelcomeEmail } = require('../config/email');
 const { isStrongPassword } = require('../utils/passwordValidator');
 const { sendOtp, verifyOtp } = require('../services/otpService');
+const { startAppSession, endAppSession, retireOldSessions } = require('../services/sessionTakeover');
 const {
   sendOtpLimiter,
   verifyOtpLimiter,
@@ -92,12 +93,29 @@ if (!JWT_SECRET) {
 //   POST /api/auth/refresh verifies the refresh token, checks tokenVersion,
 //   and issues a new 24h access token. Android calls /refresh when it gets 401.
 // =============================================
-const generateToken = (userId, role, tokenVersion = 0) => {
+const generateToken = (userId, role, tokenVersion = 0, sid = null) => {
   return jwt.sign(
-    { userId, role, tv: tokenVersion },
+    sid ? { userId, role, tv: tokenVersion, sid } : { userId, role, tv: tokenVersion },
     JWT_SECRET,
     { expiresIn: '7d' }
   );
+};
+
+// One signed-in phone per account: every app login starts a new session (the previous
+// phone's token stops working), winds the old phone down — its calls end, its sockets are
+// disconnected — and returns a token bound to the new session. Cleanup problems never
+// fail the login. See services/sessionTakeover.js and utils/sessionGuard.js.
+const issueAppSessionToken = async (req, user, role) => {
+  const sid = await startAppSession(user._id);
+  try {
+    const { callsEnded, socketsDisconnected } = await retireOldSessions(req.app.get('io'), user._id);
+    if (callsEnded || socketsDisconnected) {
+      console.log(`[SESSION] new phone session for ${user._id}: ended ${callsEnded} call(s), disconnected ${socketsDisconnected} socket(s)`);
+    }
+  } catch (err) {
+    console.error('[SESSION] cleanup after login failed:', err.message);
+  }
+  return generateToken(user._id, role, user.tokenVersion ?? 0, sid);
 };
 
 
@@ -341,7 +359,7 @@ router.post('/register', registerLimiter, async (req, res) => {
     await acceptance.save();
 
     // Generate token
-    const token = generateToken(user._id, user.role || 'USER');
+    const token = await issueAppSessionToken(req, user, user.role || 'USER');
 
     // Send welcome email if verified
     if (emailVerified) {
@@ -522,7 +540,7 @@ router.post('/login', loginLimiter, async (req, res) => {
     // Generate token (includes role + tokenVersion for revocation support)
     if (user.ensureGuidelinesMigration) await user.ensureGuidelinesMigration();
 
-    const token = generateToken(user._id, userRole, user.tokenVersion ?? 0);
+    const token = await issueAppSessionToken(req, user, userRole);
 
     console.log(`✅ Login successful: ${user.email} (${userRole})`);
 
@@ -719,7 +737,7 @@ router.post('/google-auth', publicApiLimiter, async (req, res) => {
 
       if (user.ensureGuidelinesMigration) await user.ensureGuidelinesMigration();
 
-      const token = generateToken(user._id, user.role || 'USER', user.tokenVersion ?? 0);
+      const token = await issueAppSessionToken(req, user, user.role || 'USER');
       console.log(`✅ Google login success: ${user.email}`);
 
       return res.status(200).json({
@@ -742,7 +760,7 @@ router.post('/google-auth', publicApiLimiter, async (req, res) => {
 
       if (user.ensureGuidelinesMigration) await user.ensureGuidelinesMigration();
 
-      const token = generateToken(user._id, user.role || 'USER', user.tokenVersion ?? 0);
+      const token = await issueAppSessionToken(req, user, user.role || 'USER');
 
       console.log(`ℹ️ Google register: existing account ${user.email} → returning isNewUser=false`);
 
@@ -796,7 +814,7 @@ router.post('/google-auth', publicApiLimiter, async (req, res) => {
 
     await newUser.save();
 
-    const token = generateToken(newUser._id, 'USER', newUser.tokenVersion ?? 0);
+    const token = await issueAppSessionToken(req, newUser, 'USER');
 
     console.log(`✅ Google register: new user created ${newUser.email}`);
 
@@ -1224,7 +1242,7 @@ router.post('/facebook-auth', publicApiLimiter, async (req, res) => {
 
       if (user.ensureGuidelinesMigration) await user.ensureGuidelinesMigration();
 
-      const token = generateToken(user._id, user.role || 'USER', user.tokenVersion ?? 0);
+      const token = await issueAppSessionToken(req, user, user.role || 'USER');
       console.log(`✅ Facebook login success: ${user.email}`);
 
       return res.status(200).json({
@@ -1245,7 +1263,7 @@ router.post('/facebook-auth', publicApiLimiter, async (req, res) => {
 
       if (user.ensureGuidelinesMigration) await user.ensureGuidelinesMigration();
 
-      const token = generateToken(user._id, user.role || 'USER', user.tokenVersion ?? 0);
+      const token = await issueAppSessionToken(req, user, user.role || 'USER');
       console.log(`ℹ️ Facebook register: existing account ${user.email} → isNewUser=false`);
 
       return res.status(200).json({
@@ -1289,7 +1307,7 @@ router.post('/facebook-auth', publicApiLimiter, async (req, res) => {
 
     await newUser.save();
 
-    const token = generateToken(newUser._id, 'USER', newUser.tokenVersion ?? 0);
+    const token = await issueAppSessionToken(req, newUser, 'USER');
     console.log(`✅ Facebook register: new user created ${newUser.email}`);
 
     return res.status(201).json({
@@ -1306,6 +1324,28 @@ router.post('/facebook-auth', publicApiLimiter, async (req, res) => {
       success: false,
       message: 'Server error during Facebook authentication'
     });
+  }
+});
+
+// =============================================
+// LOGOUT (this phone)
+// =============================================
+
+/**
+ * @route   POST /api/auth/logout
+ * @desc    Ends this phone's session: its token stops working, its sockets are
+ *          disconnected and its push tokens are dropped. Only the session this token
+ *          belongs to — a newer session on another phone is left alone.
+ * @access  Private
+ */
+router.post('/logout', authenticate, async (req, res) => {
+  try {
+    const sid = req.auth && req.auth.sid;
+    const ended = await endAppSession(req.app.get('io'), req.user._id, sid);
+    return res.json({ success: true, sessionEnded: ended });
+  } catch (error) {
+    console.error('logout error:', error);
+    return res.status(500).json({ success: false, message: 'Server error during logout' });
   }
 });
 

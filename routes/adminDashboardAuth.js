@@ -115,8 +115,10 @@ router.post('/otp/verify', async (req, res) => {
     }
 
     const JWT_SECRET = process.env.JWT_SECRET;
+    // scope: the web dashboard is its own session — signing in on a phone (one phone per
+    // account, utils/sessionGuard.js) does not sign the dashboard out, and vice versa.
     const token = jwt.sign(
-      { userId: user._id, role: user.role, tv: user.tokenVersion || 0 },
+      { userId: user._id, role: user.role, tv: user.tokenVersion || 0, scope: 'admin-dashboard' },
       JWT_SECRET,
       { expiresIn: '24h' }
     );

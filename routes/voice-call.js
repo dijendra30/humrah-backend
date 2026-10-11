@@ -9,8 +9,10 @@
 
 const express = require('express');
 const router = express.Router();
+const mongoose = require('mongoose');
 const { RtcTokenBuilder, RtcRole } = require('agora-access-token');
 const VoiceCall = require('../models/VoiceCall');
+const VoiceCallReservation = require('../models/VoiceCallReservation');
 const User = require('../models/User');
 const admin = require('../config/firebase');
 const {
@@ -114,11 +116,34 @@ router.post('/initiate', authenticate, validateCallInitiation, async (req, res) 
       });
     }
 
+    // Reserve both people atomically. The validator's busy checks read, then this request
+    // writes — two simultaneous calls could both pass them. A reservation insert cannot:
+    // exactly one claim per person succeeds. Claiming in sorted id order makes crossing
+    // calls (A→B while B→A) resolve to exactly one winner instead of both or neither.
+    const callObjectId = new mongoose.Types.ObjectId();
+    const claimed = [];
+    for (const uid of [String(callerId), String(receiverId)].sort()) {
+      if (await VoiceCallReservation.claim(uid, callObjectId)) { claimed.push(uid); continue; }
+      await Promise.all(claimed.map(u => VoiceCallReservation.release(u, callObjectId)));
+      const callerIsBusy = uid === String(callerId);
+      return res.status(400).json({
+        success: false,
+        error:   callerIsBusy ? 'CALLER_BUSY' : 'RECEIVER_BUSY',
+        message: callerIsBusy ? 'You are already on a call' : 'User is currently on another call'
+      });
+    }
+
     const voiceCall = new VoiceCall({
+      _id: callObjectId,
       callerId, receiverId, bookingId, channelName,
       callerAgoraUid: callerUid, status: 'RINGING', initiatedAt: new Date()
     });
-    await voiceCall.save();
+    try {
+      await voiceCall.save();
+    } catch (err) {
+      await Promise.all(claimed.map(u => VoiceCallReservation.release(u, callObjectId)));
+      throw err;
+    }
 
     const callIdStr = voiceCall._id.toString();
     console.log('Call ' + callIdStr + ': ' + caller.firstName + ' -> ' + receiver.firstName);
@@ -215,8 +240,16 @@ router.post('/accept/:callId', authenticate, async (req, res) => {
       return res.status(500).json({ success: false, error: 'TOKEN_GENERATION_FAILED', message: err.message });
     }
 
-    call.receiverAgoraUid = receiverUid;
-    await call.accept();
+    // Conditional: only a call that is still RINGING and inside the 30 s answer window
+    // becomes CONNECTING — a cancel or timeout that landed after the read wins.
+    const accepted = await VoiceCall.findOneAndUpdate(
+      { _id: call._id, receiverId: call.receiverId, status: 'RINGING', initiatedAt: { $gte: new Date(Date.now() - 30 * 1000) } },
+      { $set: { status: 'CONNECTING', acceptedAt: new Date(), receiverAgoraUid: receiverUid } },
+      { new: true }
+    );
+    if (!accepted)
+      return res.status(400).json({ success: false, error: 'CALL_EXPIRED', message: 'Call can no longer be accepted' });
+    call.status = accepted.status;
 
     const io        = req.app.get('io');
     const callIdStr = call._id.toString();
@@ -259,7 +292,13 @@ router.post('/reject/:callId', authenticate, async (req, res) => {
     if (call.status !== 'RINGING')
       return res.status(400).json({ success: false, error: 'INVALID_STATE' });
 
-    await call.decline();
+    // Conditional: never turns a call that has moved on (accepted, cancelled) into DECLINED.
+    const declined = await VoiceCall.updateOne(
+      { _id: call._id, status: 'RINGING' },
+      { $set: { status: 'DECLINED', endedAt: new Date(), endReason: 'receiver_declined' } }
+    );
+    if (!declined.modifiedCount)
+      return res.status(400).json({ success: false, error: 'INVALID_STATE' });
     console.log('Call ' + callId + ' rejected');
 
     const io        = req.app.get('io');
@@ -292,7 +331,29 @@ router.post('/end/:callId', authenticate, validateCallEnd, async (req, res) => {
     const call    = req.voiceCall;
     const { reason = 'user_ended' } = req.body;
 
-    await call.end(reason);
+    // Same rule as before: an unknown reason is a failed request (it used to fail the save).
+    if (!VoiceCall.schema.path('endReason').enumValues.includes(reason)) {
+      return res.status(500).json({ success: false, error: 'CALL_END_FAILED' });
+    }
+
+    // Conditional: only a call that is still active ends here, so when both people hang up
+    // at once exactly one request ends it and notifies; the other gets CALL_NOT_ACTIVE.
+    // Duration is computed from the stored connectedAt at the moment of the write.
+    const endedAt = new Date();
+    const ended = await VoiceCall.findOneAndUpdate(
+      { _id: call._id, status: { $in: ['RINGING', 'CONNECTING', 'CONNECTED'] } },
+      [{ $set: {
+        status:    'ENDED',
+        endedAt:   endedAt,
+        endReason: reason,
+        duration:  { $cond: [{ $ifNull: ['$connectedAt', false] },
+                             { $floor: { $divide: [{ $subtract: [endedAt, '$connectedAt'] }, 1000] } },
+                             null] }
+      } }],
+      { new: true }
+    );
+    if (!ended)
+      return res.status(400).json({ success: false, error: 'CALL_NOT_ACTIVE', message: 'This call is not active' });
     console.log('Call ' + call._id + ' ended by ' + userId + ' (' + reason + ')');
 
     const otherUserId = call.callerId.toString() === userId.toString()
@@ -301,7 +362,7 @@ router.post('/end/:callId', authenticate, validateCallEnd, async (req, res) => {
 
     const io        = req.app.get('io');
     const callIdStr = call._id.toString();
-    const duration  = call.duration || 0;
+    const duration  = ended.duration || 0;
 
     if (io) {
       io.to('user:' + otherUserId).emit('voice-call-ended', { callId: callIdStr, reason, duration });

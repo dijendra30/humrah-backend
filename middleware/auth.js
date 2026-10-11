@@ -2,6 +2,7 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const AuditLog = require('../models/AuditLog');
+const { sessionRejection, SESSION_FIELDS } = require('../utils/sessionGuard');
 
 // =============================================
 // AUTHENTICATION MIDDLEWARE
@@ -32,29 +33,38 @@ const authenticate = async (req, res, next) => {
     }
     const decoded = jwt.verify(token, JWT_SECRET);
 
-    // Fetch user from database (CRITICAL: get fresh data including role)
-    const user = await User.findById(decoded.userId).select('-password');
+    // Fetch user from database (CRITICAL: get fresh data including role).
+    // The session fields come from a separate lean read so req.user stays exactly as
+    // before (they never reach responses that return req.user).
+    const [user, session] = await Promise.all([
+      User.findById(decoded.userId).select('-password'),
+      User.findById(decoded.userId).select(`tokenVersion ${SESSION_FIELDS}`).lean()
+    ]);
 
-    if (!user) {
+    if (!user || !session) {
       return res.status(401).json({
         success: false,
         message: 'User not found'
       });
     }
 
-    // ✅ TOKEN VERSION CHECK — rejects revoked tokens instantly.
-    // payload.tv is the tokenVersion at issue time.
-    // db.tokenVersion is the current value (incremented on logout-all / password change).
-    // Mismatch = token was issued before the last revocation event → reject.
-    // Existing users have no tv in their old tokens → treat as 0 (backward-compatible).
-    const payloadTv = decoded.tv ?? 0;
-    const dbTv      = user.tokenVersion   ?? 0;
-    if (payloadTv !== dbTv) {
+    // ✅ SESSION CHECK — tokenVersion (logout-all / password change) and the account's
+    // single active phone session. See utils/sessionGuard.js.
+    const rejection = sessionRejection(decoded, session);
+    if (rejection === 'SESSION_REPLACED') {
+      return res.status(401).json({
+        success: false,
+        code: 'SESSION_REPLACED',
+        message: 'You were signed out because your account was used to sign in on another phone.'
+      });
+    }
+    if (rejection) {
       return res.status(401).json({
         success: false,
         message: 'Session expired. Please login again.'
       });
     }
+    req.auth = { sid: decoded.sid || null, scope: decoded.scope || null };
 
     // Check if account is locked (if method exists)
     if (user.isLocked && user.isLocked()) {
