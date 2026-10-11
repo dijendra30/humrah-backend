@@ -128,6 +128,10 @@ app.use('/api/questions', (err, req, res, next) => {   // its body-parser errors
 
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
+app.use('/api/voice-call', (err, req, res, next) => {   // calls: a malformed JSON body is a 400 (the global handler would answer 500)
+  if (err && err.type === 'entity.parse.failed') return res.status(400).json({ success: false, error: 'INVALID_REQUEST', message: 'Invalid request body' });
+  return next(err);
+});
 
 app.set('io', io);
 

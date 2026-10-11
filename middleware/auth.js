@@ -64,7 +64,7 @@ const authenticate = async (req, res, next) => {
         message: 'Session expired. Please login again.'
       });
     }
-    req.auth = { sid: decoded.sid || null, scope: decoded.scope || null };
+    req.auth = { sid: decoded.sid || null, scope: decoded.scope || null, tv: decoded.tv ?? 0, iat: decoded.iat || 0 };
 
     // Check if account is locked (if method exists)
     if (user.isLocked && user.isLocked()) {

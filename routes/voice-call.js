@@ -13,6 +13,7 @@ const mongoose = require('mongoose');
 const { RtcTokenBuilder, RtcRole } = require('agora-access-token');
 const VoiceCall = require('../models/VoiceCall');
 const VoiceCallReservation = require('../models/VoiceCallReservation');
+const { sessionRejection, SESSION_FIELDS } = require('../utils/sessionGuard');
 const User = require('../models/User');
 const admin = require('../config/firebase');
 const {
@@ -95,6 +96,15 @@ async function sendFcm(userId, tokens, data, notificationPayload = null) {
 
 // ==================== ROUTES ====================
 
+// A malformed :callId is a call that does not exist: 404 CALL_NOT_FOUND (the answer for an
+// unknown id) instead of a 500 from the ObjectId cast. Runs after the mount-level auth.
+router.param('callId', (req, res, next, callId) => {
+  if (!mongoose.isValidObjectId(callId)) {
+    return res.status(404).json({ success: false, error: 'CALL_NOT_FOUND', message: 'Call not found' });
+  }
+  next();
+});
+
 /**
  * POST /api/voice-call/initiate
  */
@@ -143,6 +153,26 @@ router.post('/initiate', authenticate, validateCallInitiation, async (req, res) 
     } catch (err) {
       await Promise.all(claimed.map(u => VoiceCallReservation.release(u, callObjectId)));
       throw err;
+    }
+
+    // One phone per account: if this phone was replaced while the call was being set up,
+    // the takeover's cleanup may already have run without seeing this call. Re-check now
+    // that the row exists — either the takeover finds the call, or this check finds the
+    // takeover — and never ring anyone from a signed-out phone.
+    if (req.auth) {
+      const session = await User.findById(callerId).select(`tokenVersion ${SESSION_FIELDS}`).lean();
+      if (!session || sessionRejection(req.auth, session)) {
+        await VoiceCall.updateOne(
+          { _id: callObjectId, status: 'RINGING' },
+          { $set: { status: 'ENDED', endedAt: new Date(), endReason: 'session_replaced' } }
+        );
+        await Promise.all(claimed.map(u => VoiceCallReservation.release(u, callObjectId)));
+        return res.status(401).json({
+          success: false,
+          code: 'SESSION_REPLACED',
+          message: 'You were signed out because your account was used to sign in on another phone.'
+        });
+      }
     }
 
     const callIdStr = voiceCall._id.toString();

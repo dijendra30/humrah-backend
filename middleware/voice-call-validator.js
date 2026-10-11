@@ -1,6 +1,7 @@
 // middleware/voice-call-validator.js - FIXED VERSION
 // ✅ NO CALL LIMITS - Users can call anytime until chat expires
 // ✅ Calls auto-end after 30 minutes
+const mongoose = require('mongoose');
 const RandomBooking = require('../models/RandomBooking');
 const VoiceCall = require('../models/VoiceCall');
 const User = require('../models/User');
@@ -184,24 +185,25 @@ async function validateCallEligibility(callerId, receiverId, bookingId) {
 async function validateCallInitiation(req, res, next) {
   try {
     const callerId = req.userId;
-    const { receiverId, bookingId } = req.body;
-    
-    console.log('=================================');
-    console.log('📞 CALL VALIDATION');
-    console.log('=================================');
-    console.log('Caller ID:', callerId.toString());
-    console.log('Receiver ID:', receiverId.toString());
-    console.log('Booking ID:', bookingId.toString());
-    
-    // Validate request body
-    if (!receiverId || !bookingId) {
+    const { receiverId, bookingId } = req.body || {};
+
+    // Validate request body — before anything reads it (a missing or malformed id used to
+    // crash the logging below and answer 500).
+    if (!receiverId || !bookingId || !mongoose.isValidObjectId(receiverId) || !mongoose.isValidObjectId(bookingId)) {
       return res.status(400).json({
         success: false,
         error: 'INVALID_REQUEST',
         message: 'receiverId and bookingId are required'
       });
     }
-    
+
+    console.log('=================================');
+    console.log('📞 CALL VALIDATION');
+    console.log('=================================');
+    console.log('Caller ID:', callerId.toString());
+    console.log('Receiver ID:', receiverId.toString());
+    console.log('Booking ID:', bookingId.toString());
+
     // ✅ Self-call check
     if (callerId.toString() === receiverId.toString()) {
       return res.status(400).json({
