@@ -13,6 +13,7 @@ const MatchingTodayMood = require('../models/MatchingTodayMood');
 const { upload, uploadBuffer, uploadBase64, deleteImage } = require('../config/cloudinary');
 const { canonicalizeTopics } = require('../utils/roomTopicConfig');
 const crypto = require('crypto');
+const mongoose = require('mongoose');
 const ModerationLog = require('../models/ModerationLog');
 const ModerationCache = require('../models/ModerationCache');
 const { checkWithOpenAI, checkWithLlamaGuard, moderateQuestionnaireSync, applyStrikesAndEnforce, buildModerationResponse, buildAutoCleanSuccessResponse } = require('../middleware/moderation');
@@ -185,23 +186,67 @@ needsGuidelinesAcceptance=${updatedUser.needsGuidelinesAcceptance !== undefined 
   }
 });
 
+// ── GET /:id response allow-lists ───────────────────────────────────────────────
+// Never serialize the whole User document here: it holds account, payment, biometric,
+// location and verification secrets. Anything not listed below is never returned.
+//
+// Someone ELSE's profile → user.getPublicProfile(), the same explicit projection
+// GET /api/profile/:userId already serves (name, photo, verification badge, city-level
+// questionnaire answers; no email, date of birth, payment, coordinates or embeddings).
+//
+// Your OWN profile → the fields of the Android User model, because the app caches this
+// response as the signed-in user (GuidelinesEnforcer → TokenManager.saveUser). Even here:
+// no UPI id, no bank account, no precise coordinates, no face embedding, no OTPs, no
+// password, tokens or session data.
+const OWNER_PROFILE_FIELDS = [
+  '_id', 'firstName', 'lastName', 'email', 'role', 'userType', 'profilePhoto', 'profilePhotoPublicId',
+  'emailVerified', 'acceptedTermsVersion', 'acceptedPrivacyVersion', 'lastLegalAcceptanceDate',
+  'requiresLegalReacceptance', 'photoVerificationStatus', 'verificationStatus', 'photoRejectionReason',
+  'photoVerifiedAt', 'verificationPhoto', 'verificationPhotoSubmittedAt', 'questionnaire', 'isPremium',
+  'verified', 'lastActive', 'createdAt', 'profileCompleteness', 'profileCompletion',
+  'profileCompletionBreakdown', 'missingFields', 'acceptedCommunityVersion', 'communityAcceptedAt',
+  'guidelinesAccepted', 'guidelinesVersion', 'adminPermissions', 'suspensionInfo', 'hostActive',
+  'profileEditStats'
+];
+const OWNER_PAYMENT_FIELDS  = ['upiStatus', 'upiVerifiedAt', 'upiLastUpdated', 'totalEarnings', 'pendingPayout', 'completedPayouts', 'lastPayoutDate'];
+const OWNER_LOCATION_FIELDS = ['area', 'district', 'city', 'state', 'country', 'displayName', 'updatedAt'];
+
+const pickFields = (source, fields) => {
+  const out = {};
+  if (!source) return out;
+  for (const f of fields) if (source[f] !== undefined) out[f] = source[f];
+  return out;
+};
+
+const needsGuidelines = (user) => !user.guidelinesAccepted || user.guidelinesVersion !== "1.0";
+
+function ownProfileView(user) {
+  const doc = user.toObject();
+  const view = pickFields(doc, OWNER_PROFILE_FIELDS);
+  if (doc.paymentInfo)  view.paymentInfo  = pickFields(doc.paymentInfo, OWNER_PAYMENT_FIELDS);
+  if (doc.liveLocation) view.liveLocation = pickFields(doc.liveLocation, OWNER_LOCATION_FIELDS);
+  view.needsGuidelinesAcceptance = needsGuidelines(user);
+  return view;
+}
+
 router.get('/:id', authenticate, async (req, res) => {
   try {
-    // Exclude GPS, legacy dailyMood, fcmTokens, blockedUsers from public profile
-    const user = await User.findById(req.params.id)
-      .select('-password -last_known_lat -last_known_lng -fcmTokens -blockedUsers -dailyMood -moodRequestsSent');
+    // A malformed id is a user that does not exist (it used to fail the ObjectId cast with a 500).
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+    const user = await User.findById(req.params.id);
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
-    
+
+    const isOwnProfile = String(user._id) === String(req.userId);
     console.log(`[GUIDELINES]
 userId=${user._id}
 guidelinesAccepted=${user.guidelinesAccepted || false}
 guidelinesVersion=${user.guidelinesVersion || null}
 acceptedCommunityVersion=${user.acceptedCommunityVersion || null}
-needsGuidelinesAcceptance=${user.needsGuidelinesAcceptance !== undefined ? user.needsGuidelinesAcceptance : (!user.guidelinesAccepted || user.guidelinesVersion !== "1.0")}`);
-    const userObj = user.toObject();
-    userObj.needsGuidelinesAcceptance = !user.guidelinesAccepted || user.guidelinesVersion !== "1.0";
+needsGuidelinesAcceptance=${needsGuidelines(user)}`);
 
-    res.json({ success: true, user: userObj });
+    res.json({ success: true, user: isOwnProfile ? ownProfileView(user) : user.getPublicProfile() });
   } catch (error) {
     console.error('Get user error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
