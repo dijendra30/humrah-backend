@@ -132,6 +132,10 @@ app.use('/api/voice-call', (err, req, res, next) => {   // calls: a malformed JS
   if (err && err.type === 'entity.parse.failed') return res.status(400).json({ success: false, error: 'INVALID_REQUEST', message: 'Invalid request body' });
   return next(err);
 });
+app.use('/api/quick-connect', (err, req, res, next) => {   // Quick Connect: same clean 400 for a malformed JSON body
+  if (err && err.type === 'entity.parse.failed') return res.status(400).json({ success: false, code: 'INVALID_REQUEST', message: 'Invalid request.' });
+  return next(err);
+});
 
 app.set('io', io);
 
@@ -762,6 +766,8 @@ app.use('/api/sports-plans',      authenticate, enforceLegalAcceptance, require(
 // Ask a Question (Phase 2 backend). Behind QUESTIONS_ENABLED (default off): while off every user route answers 404 QUESTIONS_DISABLED.
 app.use('/api/questions',         authenticate, enforceLegalAcceptance, require('./routes/questions'));
 app.use('/api/admin/questions',   authenticate, adminOnly, require('./routes/adminQuestions'));
+// Quick Connect (Phase 4 backend foundation). Behind QUICK_CONNECT_ENABLED (default off): while off every route answers 404 QUICK_CONNECT_DISABLED.
+app.use('/api/quick-connect',     authenticate, enforceLegalAcceptance, require('./routes/quickConnect'));
 
 // ✅ NEW: Live location for matchmaking — POST /api/users/matchmaking-location
 //         Separate from safety live-location. Updates liveLocation on User doc.
