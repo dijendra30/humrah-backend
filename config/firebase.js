@@ -40,10 +40,9 @@ if (!admin.apps.length) {
         .replace('-----END PRIVATE KEY-----', '\n-----END PRIVATE KEY-----\n');
     }
     
-    // Debug log (first and last 50 chars only)
+    // Format check only — never log any part of the key itself.
     console.log('🔐 Firebase Private Key Check:');
-    console.log('   Starts with:', privateKey.substring(0, 50));
-    console.log('   Ends with:', privateKey.substring(privateKey.length - 50));
+    console.log('   PEM header/footer present:', privateKey.includes('-----BEGIN PRIVATE KEY-----') && privateKey.includes('-----END PRIVATE KEY-----'));
     console.log('   Contains newlines:', privateKey.includes('\n'));
     console.log('   Total length:', privateKey.length);
 
