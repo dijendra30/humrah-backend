@@ -75,6 +75,15 @@ async function retireOldSessions(io, userId) {
     await sendCallEndedPush(otherId, payload);
   }
 
+  // Quick Connect: the old phone must not stay in a Quick Connect call or search either.
+  // Ends the account's open sessions (session_replaced), releases their reservations and
+  // tells the other person. Separate from the Agora loop above, so it cannot affect it.
+  try {
+    result.quickConnectEnded = await require('./quickConnect/lifecycle').endSessionsForUser(userId, 'session_replaced');
+  } catch (err) {
+    console.error('[SESSION] Quick Connect cleanup failed:', err && err.name);
+  }
+
   if (io) result.socketsDisconnected = await disconnectStaleSockets(io, userId);
   return result;
 }

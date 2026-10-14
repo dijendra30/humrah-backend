@@ -648,6 +648,13 @@ initHumrahRoomSocket(io);
 // Sports & Fitness (Phase 1A) — its own /sports namespace. Touches no other namespace.
 const { initSportsSocket }        = require('./sockets/sportsSocket');
 initSportsSocket(io);
+// Quick Connect (Phase 5) — its own /quick-connect namespace plus the lifecycle sweeper. Refuses
+// connections while QUICK_CONNECT_ENABLED is off; the sweeper always runs so open sessions get cleaned up.
+try {
+  require('./sockets/quickConnectSocket').initQuickConnectSocket(io);
+} catch (err) {
+  console.error('[QUICK_CONNECT] socket not initialised:', err && err.name);
+}
 
 const authRoutes             = require('./routes/auth');
 const userRoutes             = require('./routes/users');

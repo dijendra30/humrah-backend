@@ -15,6 +15,9 @@
 //                                   never logged, never returned
 //   QUICK_CONNECT_TURN_URIS         optional comma-separated turn: URIs
 //   QUICK_CONNECT_TURN_TTL_SECONDS  optional credential lifetime, 60..600 (default 600)
+//   QUICK_CONNECT_MATCH_FALLBACK_MS optional, shared-interest wait before broadening (default 20000)
+//   QUICK_CONNECT_SEARCH_TIMEOUT_MS optional, open search lifetime (default 120000)
+//   QUICK_CONNECT_SWEEP_INTERVAL_MS optional, lifecycle sweeper period (default 10000)
 //
 // None of these is in server.js's REQUIRED_ENV_VARS on purpose: a missing value
 // must switch Quick Connect off, not stop the whole app from starting.
@@ -83,6 +86,20 @@ function turnTtlSeconds() {
   return Math.min(MAX_TTL_SECONDS, Math.max(MIN_TTL_SECONDS, Number(v)));
 }
 
+/** Bounded integer from env, or the default when missing/malformed. */
+function boundedMs(name, def, min, max) {
+  const v = raw(name).trim();
+  if (!/^\d+$/.test(v)) return def;
+  return Math.min(max, Math.max(min, Number(v)));
+}
+
+/** Phase 5: how long a search waits for a shared-interest match before broadening (5–120 s). */
+const matchFallbackMs = () => boundedMs('QUICK_CONNECT_MATCH_FALLBACK_MS', 20000, 5000, 120000);
+/** Phase 5: how long a search may stay open before it is cancelled (60–600 s). */
+const searchTimeoutMs = () => boundedMs('QUICK_CONNECT_SEARCH_TIMEOUT_MS', 120000, 60000, 600000);
+/** Phase 5: lifecycle sweeper period (5–60 s). Time limits are enforced within one period. */
+const sweepIntervalMs = () => boundedMs('QUICK_CONNECT_SWEEP_INTERVAL_MS', 10000, 5000, 60000);
+
 /** TURN settings, or null when any part is unusable (credential minting then refuses). */
 function turnConfig() {
   const secret = turnSecret();
@@ -97,6 +114,9 @@ module.exports = {
   betaUserIds,
   turnConfig,
   turnTtlSeconds,
+  matchFallbackMs,
+  searchTimeoutMs,
+  sweepIntervalMs,
   CONSENT_VERSION_PATTERN,
   DEFAULT_TURN_URIS,
   MIN_SECRET_LENGTH,

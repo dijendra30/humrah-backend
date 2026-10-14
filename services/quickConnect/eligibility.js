@@ -136,4 +136,4 @@ async function evaluateEligibility(userId, opts = {}) {
   return result(reasons, accepted);
 }
 
-module.exports = { evaluateEligibility, ageFromDateOfBirth, parseDateOfBirth, ADULT_AGE };
+module.exports = { evaluateEligibility, ageFromDateOfBirth, parseDateOfBirth, ADULT_AGE, accountRestricted, USER_FIELDS };

@@ -26,18 +26,22 @@ const QuickConnectSession = require('../../models/QuickConnectSession');
 const config = require('./config');
 
 const QC = VoiceCallReservation.QC_KIND;
-const STATUS_FOR_REASON = { cancelled: 'CANCELLED', setup_failed: 'FAILED', system_error: 'FAILED' };
+const STATUS_FOR_REASON = {
+  cancelled: 'CANCELLED', declined: 'CANCELLED', proposal_timeout: 'CANCELLED',
+  setup_failed: 'FAILED', setup_timeout: 'FAILED', system_error: 'FAILED'
+};
 
 async function releaseHolds(session) {
   await Promise.all(session.participants.map(uid => VoiceCallReservation.release(uid, session._id)));
 }
 
 /**
- * Reserves two users and creates an ACCEPTED session ending at most MAX_DURATION from now.
- * Resolves { ok: true, session } or { ok: false, code } with code
+ * Reserves two users and creates a session ending at most MAX_DURATION from now.
+ * initialStatus 'PROPOSED' (Phase 5 matching) waits for both to accept; 'ACCEPTED' is the
+ * Phase 4 behaviour. Resolves { ok: true, session } or { ok: false, code } with code
  *   QUICK_CONNECT_DISABLED | INVALID_PARTICIPANTS | BUSY (busyUserId names who).
  */
-async function createSession(userA, userB, { now = Date.now() } = {}) {
+async function createSession(userA, userB, { now = Date.now(), initialStatus = 'ACCEPTED', matchType = null, sharedInterestCount = null } = {}) {
   if (!config.isEnabled()) return { ok: false, code: 'QUICK_CONNECT_DISABLED' };
   const ids = [String(userA).toLowerCase(), String(userB).toLowerCase()];
   if (!ids.every(id => mongoose.isValidObjectId(id) && /^[0-9a-f]{24}$/i.test(id)) || ids[0] === ids[1]) {
@@ -54,12 +58,17 @@ async function createSession(userA, userB, { now = Date.now() } = {}) {
   }
 
   try {
+    const proposed = initialStatus === 'PROPOSED';
     const session = await QuickConnectSession.create({
       _id: sessionId,
       participants: ids,
-      status: 'ACCEPTED',
-      acceptedAt: new Date(now),
-      endsAt: new Date(now + QuickConnectSession.MAX_DURATION_MS)
+      status: proposed ? 'PROPOSED' : 'ACCEPTED',
+      proposedAt: proposed ? new Date(now) : null,
+      acceptedAt: proposed ? null : new Date(now),
+      lastSeenAt: proposed ? undefined : [new Date(now), new Date(now)],
+      endsAt: new Date(now + QuickConnectSession.MAX_DURATION_MS),   // recomputed on acceptance
+      matchType,
+      sharedInterestCount
     });
     return { ok: true, session };
   } catch (err) {
@@ -71,20 +80,28 @@ async function createSession(userA, userB, { now = Date.now() } = {}) {
 /**
  * Ends an active session (conditional: never rewrites one that already ended) and
  * releases both holds. Holds are released even when the session had already ended,
- * so a retry always cleans up. Resolves { ended: boolean }.
+ * so a retry always cleans up. A PROPOSED session always becomes CANCELLED.
+ * Resolves { ended: boolean, session } (session = the ended row, or the existing one).
  */
-async function endSession(sessionId, reason = 'hangup', { endedBy = null } = {}) {
+async function endSession(sessionId, reason = 'hangup', { endedBy = null, onlyIf = null } = {}) {
   if (!mongoose.isValidObjectId(sessionId)) return { ended: false };
   if (!QuickConnectSession.END_REASONS.includes(reason)) throw new Error('unknown end reason');
   const status = STATUS_FOR_REASON[reason] || 'ENDED';
+  // onlyIf (Phase 5): an extra condition that must still hold at the moment of the write,
+  // e.g. "still past its deadline" — so a session that moved on meanwhile is left alone.
+  const filter = { _id: sessionId, status: { $in: QuickConnectSession.ACTIVE_STATUSES } };
   const updated = await QuickConnectSession.findOneAndUpdate(
-    { _id: sessionId, status: { $in: QuickConnectSession.ACTIVE_STATUSES } },
-    { $set: { status, endReason: reason, endedAt: new Date(), endedBy } },
+    onlyIf ? { $and: [filter, onlyIf] } : filter,
+    [{ $set: {
+      status: { $cond: [{ $eq: ['$status', 'PROPOSED'] }, 'CANCELLED', status] },
+      endReason: reason, endedAt: new Date(), endedBy
+    } }],
     { new: true }
   ).lean();
-  const session = updated || await QuickConnectSession.findById(sessionId).select('participants').lean();
-  if (session) await releaseHolds(session);
-  return { ended: !!updated };
+  const session = updated || await QuickConnectSession.findById(sessionId).select('participants status endReason connectedAt endedAt').lean();
+  // Release only a session that is over — never one still active because onlyIf no longer held.
+  if (session && (updated || !QuickConnectSession.ACTIVE_STATUSES.includes(session.status))) await releaseHolds(session);
+  return { ended: !!updated, session: session || null };
 }
 
 /** Ends sessions that are stale by their own rules and releases their holds. Returns how many. */
@@ -105,14 +122,15 @@ async function sweepStaleSessions({ now = Date.now(), limit = 100 } = {}) {
 }
 
 /**
- * The active, non-stale session `sessionId` if `userId` is one of its participants,
- * otherwise null. Used to decide who may receive TURN credentials.
+ * The ACCEPTED/CONNECTING/CONNECTED, non-stale session `sessionId` if `userId` is one of its
+ * participants, otherwise null. Decides who may receive TURN credentials — never a PROPOSED
+ * session (nobody has agreed to talk yet).
  */
 async function findActiveSessionFor(sessionId, userId, { now = Date.now() } = {}) {
   if (!mongoose.isValidObjectId(sessionId) || !mongoose.isValidObjectId(userId)) return null;
   return QuickConnectSession.findOne({
     $and: [
-      { _id: sessionId, participants: userId, status: { $in: QuickConnectSession.ACTIVE_STATUSES } },
+      { _id: sessionId, participants: userId, status: { $in: QuickConnectSession.MEDIA_STATUSES } },
       { $nor: [QuickConnectSession.staleActiveFilter(now)] }
     ]
   }).select('_id participants status endsAt').lean();
