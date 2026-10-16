@@ -16,7 +16,10 @@
 // Order: shared interests first (most shared, then longest waiting). Without a shared
 // interest a pair is allowed only once either side has waited past the fallback delay
 // (QUICK_CONNECT_MATCH_FALLBACK_MS, default 20 s). Blocks in either direction exclude a
-// pair. Interests come from the user's own questionnaire answers on the server — never
+// pair, and so does a recent skip by either of the two (QuickConnectPairExclusion, written
+// by lifecycle.declineMatch BEFORE the holds are released; checked in the candidate query
+// and again in pairUp after both rows are claimed, so no concurrent matcher can miss it).
+// Interests come from the user's own questionnaire answers on the server — never
 // from the client — and only shared labels are ever shown to the other person.
 //
 // Single-instance assumption: the broadened-matching pass runs inside the sweeper of the
@@ -29,6 +32,7 @@ const crypto = require('crypto');
 const User = require('../../models/User');
 const QuickConnectSearch = require('../../models/QuickConnectSearch');
 const QuickConnectSession = require('../../models/QuickConnectSession');
+const PairExclusion = require('../../models/QuickConnectPairExclusion');
 const config = require('./config');
 const sessions = require('./sessions');
 const { evaluateEligibility } = require('./eligibility');
@@ -70,6 +74,35 @@ function normalizeInterests(questionnaire) {
 
 async function blockedEitherWay(a, b) {
   return !!(await User.exists({ $or: [{ _id: a, blockedUsers: b }, { _id: b, blockedUsers: a }] }));
+}
+
+/**
+ * Records that `a` and `b` must not be matched with each other until now + the configured
+ * exclusion. Symmetric (one row per unordered pair); a repeat only ever extends it.
+ */
+async function excludeSkippedPair(a, b, { now = Date.now() } = {}) {
+  const ids = [String(a).toLowerCase(), String(b).toLowerCase()].sort();
+  const write = () => PairExclusion.updateOne(
+    { _id: PairExclusion.pairKey(a, b) },
+    { $max: { expiresAt: new Date(now + config.skipExclusionMs()) },
+      $setOnInsert: { users: ids, reason: 'declined', createdAt: new Date(now) } },
+    { upsert: true }
+  );
+  try { await write(); } catch (err) {
+    if (!err || err.code !== 11000) throw err;
+    await write();                 // two skips of the same pair at once: the row exists now, update it
+  }
+}
+
+/** True while an unexpired exclusion exists for the pair (either order). */
+async function pairExcluded(a, b, now = Date.now()) {
+  return !!(await PairExclusion.exists({ _id: PairExclusion.pairKey(a, b), expiresAt: { $gt: new Date(now) } }));
+}
+
+/** Everyone `userId` currently must not be matched with. */
+async function excludedPartners(userId, now = Date.now()) {
+  const rows = await PairExclusion.find({ users: userId, expiresAt: { $gt: new Date(now) } }).select('users').limit(5000).lean();
+  return rows.flatMap(r => r.users).filter(u => String(u) !== String(userId));
 }
 
 async function revert(userId, token) {
@@ -121,6 +154,10 @@ async function pairUp(me, cand, now) {
     await revert(me._id, token); await revert(cand._id, token);
     return null;
   }
+  if (await pairExcluded(me._id, cand._id, now)) {     // one skipped the other recently
+    await revert(me._id, token); await revert(cand._id, token);
+    return null;
+  }
 
   const shared = me.interests.filter(i => cand.interests.includes(i));
   const created = await sessions.createSession(me._id, cand._id, {
@@ -157,11 +194,12 @@ async function tryMatch(userId, { now = Date.now() } = {}) {
   if (!config.isEnabled()) return null;
   const me = await QuickConnectSearch.findOne({ _id: userId, status: 'SEARCHING' }).lean();
   if (!me) return null;
-  const [mine, blockers] = await Promise.all([
+  const [mine, blockers, skipped] = await Promise.all([
     User.findById(userId).select('blockedUsers').lean(),
-    User.find({ blockedUsers: me._id }).select('_id').limit(5000).lean()
+    User.find({ blockedUsers: me._id }).select('_id').limit(5000).lean(),
+    excludedPartners(me._id, now)
   ]);
-  const exclude = [me._id, ...((mine && mine.blockedUsers) || []), ...blockers.map(b => b._id)];
+  const exclude = [me._id, ...((mine && mine.blockedUsers) || []), ...blockers.map(b => b._id), ...skipped];
   const broadened = new Date(me.broadenAt).getTime() <= now;
   const candidates = await QuickConnectSearch.aggregate([
     { $match: { status: 'SEARCHING', _id: { $nin: exclude } } },
@@ -262,5 +300,6 @@ async function searchOf(userId, now = Date.now()) {
 
 module.exports = {
   normalizeInterests, normalizeLabel, startSearch, cancelSearch, tryMatch, matchTick, clearAllSearches, searchOf,
-  _internal: { pairUp }
+  excludeSkippedPair, pairExcluded,
+  _internal: { pairUp, excludedPartners }
 };

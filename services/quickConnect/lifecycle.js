@@ -4,6 +4,7 @@
 //
 //   PROPOSED --both accept--> ACCEPTED --first offer--> CONNECTING --connected--> CONNECTED
 //   PROPOSED --decline / 15 s timeout / blocked / moderation / switched off--> CANCELLED
+//            (a decline also keeps the two from being matched again for a while)
 //   ACCEPTED|CONNECTING|CONNECTED --hangup, heartbeat timeout, 30 min, moderation,
 //                                   block, phone takeover, switched off--> ENDED
 //   ACCEPTED|CONNECTING not CONNECTED within 2 min --> FAILED (setup_timeout)
@@ -111,9 +112,17 @@ async function acceptMatch(userId, sessionId, { auth = null, now = Date.now() } 
   return { ok: true, state: 'accepted' };
 }
 
-async function declineMatch(userId, sessionId) {
+async function declineMatch(userId, sessionId, { now = Date.now() } = {}) {
   const { session, error } = await participantSession(sessionId, userId, ['PROPOSED']);
   if (error) return error === 'SESSION_ENDED' ? { ok: true, alreadyEnded: true } : fail(error);
+  // Skip: the two are not matched again for a while. Written BEFORE the session ends —
+  // ending releases the holds, and only then can either of them search again — so every
+  // later match attempt sees it. A failed write never blocks the decline itself.
+  try {
+    await matching.excludeSkippedPair(session.participants[0], session.participants[1], { now });
+  } catch (err) {
+    console.error('[quick-connect] skip exclusion write failed:', err && err.name);
+  }
   await finishSession(session._id, 'declined', { endedBy: userId, onlyIf: { status: 'PROPOSED' } });
   return { ok: true };
 }

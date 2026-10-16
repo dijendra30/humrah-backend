@@ -18,6 +18,9 @@
 //   QUICK_CONNECT_MATCH_FALLBACK_MS optional, shared-interest wait before broadening (default 20000)
 //   QUICK_CONNECT_SEARCH_TIMEOUT_MS optional, open search lifetime (default 120000)
 //   QUICK_CONNECT_SWEEP_INTERVAL_MS optional, lifecycle sweeper period (default 10000)
+//   QUICK_CONNECT_SKIP_EXCLUSION_MS optional, how long two people are not matched again after
+//                                   one skipped the other (default 1800000 = 30 min, 1 min..24 h;
+//                                   cannot be switched off)
 //
 // None of these is in server.js's REQUIRED_ENV_VARS on purpose: a missing value
 // must switch Quick Connect off, not stop the whole app from starting.
@@ -99,6 +102,8 @@ const matchFallbackMs = () => boundedMs('QUICK_CONNECT_MATCH_FALLBACK_MS', 20000
 const searchTimeoutMs = () => boundedMs('QUICK_CONNECT_SEARCH_TIMEOUT_MS', 120000, 60000, 600000);
 /** Phase 5: lifecycle sweeper period (5–60 s). Time limits are enforced within one period. */
 const sweepIntervalMs = () => boundedMs('QUICK_CONNECT_SWEEP_INTERVAL_MS', 10000, 5000, 60000);
+/** After a skip (decline), how long the two people are not matched again (1 min – 24 h). */
+const skipExclusionMs = () => boundedMs('QUICK_CONNECT_SKIP_EXCLUSION_MS', 30 * 60 * 1000, 60 * 1000, 24 * 60 * 60 * 1000);
 
 /** TURN settings, or null when any part is unusable (credential minting then refuses). */
 function turnConfig() {
@@ -117,6 +122,7 @@ module.exports = {
   matchFallbackMs,
   searchTimeoutMs,
   sweepIntervalMs,
+  skipExclusionMs,
   CONSENT_VERSION_PATTERN,
   DEFAULT_TURN_URIS,
   MIN_SECRET_LENGTH,
