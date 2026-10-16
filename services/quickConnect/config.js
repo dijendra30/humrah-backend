@@ -8,9 +8,12 @@
 //                                   missing / empty / anything else = OFF
 //   QUICK_CONNECT_CONSENT_VERSION   the consent version users must have accepted;
 //                                   missing or malformed = nobody satisfies consent
-//   QUICK_CONNECT_BETA_USER_IDS     comma-separated user ids an operator has
-//                                   personally checked (age assurance for the
-//                                   closed beta); empty = nobody passes
+//   QUICK_CONNECT_BETA_USER_IDS     optional beta restriction: comma-separated user ids.
+//                                   UNSET or empty = no beta restriction (every user who
+//                                   passes ALL other eligibility checks may use Quick
+//                                   Connect). Set = only these ids. Set but with no valid
+//                                   id (typo) = NOBODY passes (fails closed, never opens).
+//                                   The list never grants anything by itself.
 //   TURN_SHARED_SECRET              coturn static-auth-secret; validated on use,
 //                                   never logged, never returned
 //   QUICK_CONNECT_TURN_URIS         optional comma-separated turn: URIs
@@ -54,6 +57,16 @@ function requiredConsentVersion() {
 }
 
 /** Set of valid ObjectId strings; malformed entries are ignored (never widen access). */
+/**
+ * The optional beta restriction. { restricted: false } only when the variable is unset or
+ * blank; otherwise { restricted: true, ids } — and an all-malformed list leaves ids empty,
+ * so nobody passes rather than everybody.
+ */
+function betaRestriction() {
+  if (raw('QUICK_CONNECT_BETA_USER_IDS').trim() === '') return { restricted: false, ids: new Set() };
+  return { restricted: true, ids: betaUserIds() };
+}
+
 function betaUserIds() {
   const ids = new Set();
   for (const part of raw('QUICK_CONNECT_BETA_USER_IDS').split(',')) {
@@ -117,6 +130,7 @@ module.exports = {
   isEnabled,
   requiredConsentVersion,
   betaUserIds,
+  betaRestriction,
   turnConfig,
   turnTtlSeconds,
   matchFallbackMs,

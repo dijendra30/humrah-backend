@@ -7,9 +7,12 @@
 //   POST /consent             { version }  accept the current Quick Connect consent
 //   POST /turn-credentials    { sessionId } short-lived TURN credentials, only for a
 //                             participant of an active Quick Connect session
+//   POST /report              { sessionId, reason, details?, block? } report the other
+//                             person of my session (and optionally block them); ends the
+//                             session if still open. Works while switched off.
 //
-// KILL SWITCH: QUICK_CONNECT_ENABLED (default off). While off, every route answers
-// 404 QUICK_CONNECT_DISABLED (the Ask a Question convention) and nothing is issued.
+// KILL SWITCH: QUICK_CONNECT_ENABLED (default off). While off, every route except /report
+// answers 404 QUICK_CONNECT_DISABLED (the Ask a Question convention) and nothing is issued.
 // Ending/cleaning up sessions is server-side and keeps working while off.
 //
 // The caller is always req.user: no body field can name a user. Responses carry no
@@ -25,6 +28,7 @@ const { evaluateEligibility } = require('../services/quickConnect/eligibility');
 const sessions = require('../services/quickConnect/sessions');
 const { mintTurnCredentials } = require('../services/quickConnect/turnCredentials');
 const QuickConnectConsent = require('../models/QuickConnectConsent');
+const reports = require('../services/quickConnect/reports');
 const { DASHBOARD_SCOPE } = require('../utils/sessionGuard');
 
 const router = express.Router();
@@ -38,7 +42,9 @@ const STATUS_FOR_CODE = {
   NOT_IN_BETA: 403,
   VERIFICATION_REQUIRED: 403,
   CONSENT_REQUIRED: 403,
-  BUSY: 409
+  BUSY: 409,
+  SESSION_NOT_FOUND: 404,
+  REPORT_WINDOW_CLOSED: 410
 };
 const MESSAGE_FOR_CODE = {
   QUICK_CONNECT_DISABLED: 'Quick Connect is not available.',
@@ -49,7 +55,9 @@ const MESSAGE_FOR_CODE = {
   NOT_IN_BETA: 'Quick Connect is not available for your account yet.',
   VERIFICATION_REQUIRED: 'Complete verification to use Quick Connect.',
   CONSENT_REQUIRED: 'Please review and accept the Quick Connect terms.',
-  BUSY: 'You are already in a call.'
+  BUSY: 'You are already in a call.',
+  SESSION_NOT_FOUND: 'This call could not be found.',
+  REPORT_WINDOW_CLOSED: 'This call is too old to report here. Please contact support.'
 };
 
 const fail = (res, code, extra = {}) =>
@@ -78,7 +86,7 @@ const perUser = (max, windowMs = 60 * 1000) => rateLimit({
 
 router.use((req, res, next) => {
   if (!req.user || !req.user._id) return res.status(401).json({ success: false, code: 'UNAUTHENTICATED', message: 'Authentication required.' });
-  if (!config.isEnabled()) return fail(res, 'QUICK_CONNECT_DISABLED');
+  if (!config.isEnabled() && req.path !== '/report') return fail(res, 'QUICK_CONNECT_DISABLED');   // safety reports always work
   res.set('Cache-Control', 'no-store');
   return next();
 });
@@ -153,6 +161,13 @@ router.post('/turn-credentials', perUser(20), handle(async (req, res) => {
     ttlSeconds: c.ttlSeconds,
     expiresAt: c.expiresAt
   });
+}));
+
+router.post('/report', perUser(10), handle(async (req, res) => {
+  if (req.auth && req.auth.scope === DASHBOARD_SCOPE) return fail(res, 'SESSION_NOT_ALLOWED');
+  const r = await reports.reportPeer(req.user._id, req.body);
+  if (!r.ok) return r.code === 'INVALID_REQUEST' ? invalid(res) : fail(res, r.code);
+  return res.status(r.alreadyReported ? 200 : 201).json({ success: true, alreadyReported: r.alreadyReported, blocked: r.blocked, ended: r.ended });
 }));
 
 module.exports = router;

@@ -12,7 +12,7 @@
 //                            or account deletion requested
 //   SESSION_NOT_ALLOWED      admin-dashboard token (Quick Connect is phone-only)
 //   AGE_NOT_ASSURED          date of birth missing/invalid/under 18, or no adult attestation
-//   NOT_IN_BETA              not on QUICK_CONNECT_BETA_USER_IDS
+//   NOT_IN_BETA              a beta restriction is configured and the user is not on it
 //   VERIFICATION_REQUIRED    verification not approved by an admin
 //   CONSENT_REQUIRED         current consent version not accepted (or none configured)
 //   BUSY                     in an Agora call or another Quick Connect session
@@ -119,7 +119,8 @@ async function evaluateEligibility(userId, opts = {}) {
   const q = user.questionnaire || {};
   const age = ageFromDateOfBirth(q.dateOfBirth, now);
   if (age === null || age < ADULT_AGE || q.isAdultConfirmed !== true) reasons.push('AGE_NOT_ASSURED');
-  if (!config.betaUserIds().has(String(user._id))) reasons.push('NOT_IN_BETA');
+  const beta = config.betaRestriction();
+  if (beta.restricted && !beta.ids.has(String(user._id))) reasons.push('NOT_IN_BETA');
   if (user.verificationStatus !== 'approved') reasons.push('VERIFICATION_REQUIRED');
 
   const accepted = !!requiredVersion &&
