@@ -44,7 +44,7 @@ const IST_OFFSET_MS = 330 * 60 * 1000;
 const USER_FIELDS = [
   'status', 'suspensionInfo', 'banInfo', 'moderationFlags.restrictedUntil',
   'deletionRequestedAt', 'questionnaire.dateOfBirth', 'questionnaire.isAdultConfirmed',
-  'verificationStatus'
+  'photoVerificationStatus'
 ].join(' ');
 
 /**
@@ -121,7 +121,12 @@ async function evaluateEligibility(userId, opts = {}) {
   if (age === null || age < ADULT_AGE || q.isAdultConfirmed !== true) reasons.push('AGE_NOT_ASSURED');
   const beta = config.betaRestriction();
   if (beta.restricted && !beta.ids.has(String(user._id))) reasons.push('NOT_IN_BETA');
-  if (user.verificationStatus !== 'approved') reasons.push('VERIFICATION_REQUIRED');
+  // Photo verification is authoritative in photoVerificationStatus: EVERY approve/reject path
+  // writes it (admin dashboard, the verification review queue, the legacy admin route) and the
+  // rest of Humrah reads it (User.isFullyVerified, badges, Random Booking, events).
+  // verificationStatus is a mirror that only the admin dashboard updates — reading it blocked
+  // users approved through the review queue. Users cannot set this field themselves.
+  if (user.photoVerificationStatus !== 'approved') reasons.push('VERIFICATION_REQUIRED');
 
   const accepted = !!requiredVersion &&
     !!(await QuickConnectConsent.exists({ userId: user._id, version: requiredVersion }));

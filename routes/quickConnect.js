@@ -69,6 +69,8 @@ const fail = (res, code, extra = {}) =>
   res.status(STATUS_FOR_CODE[code] || 400).json({ success: false, code, message: MESSAGE_FOR_CODE[code] || 'Invalid request.', ...extra });
 const invalid = res => res.status(400).json({ success: false, code: 'INVALID_REQUEST', message: 'Invalid request.' });
 const isPlainBody = b => b && typeof b === 'object' && !Array.isArray(b);
+/** photoVerificationStatus (authoritative) → the app's words: unverified | pending | approved | rejected. */
+const verificationState = s => (s === 'approved' || s === 'pending' || s === 'rejected') ? s : 'unverified';
 
 const handle = fn => async (req, res) => {
   try {
@@ -102,13 +104,13 @@ router.get('/status', perUser(60), handle(async (req, res) => {
   const e = await evaluateEligibility(req.user._id, { auth: req.auth });
   if (e.code === 'QUICK_CONNECT_DISABLED' || e.code === 'ACCOUNT_INVALID') return fail(res, e.code);
   const [me, busy, waitlisted] = await Promise.all([
-    User.findById(req.user._id).select('verificationStatus').lean(),
+    User.findById(req.user._id).select('photoVerificationStatus').lean(),
     capacity.isFull(),
     waitlist.isWaiting(req.user._id)
   ]);
   return res.json({
     success: true, enabled: true, eligible: e.eligible, reasons: e.reasons, consent: e.consent,
-    verification: (me && me.verificationStatus) || 'unverified',   // the caller's own state only
+    verification: verificationState(me && me.photoVerificationStatus),   // the caller's own state only
     busy,                                                            // all capacity slots taken
     waitlisted
   });
