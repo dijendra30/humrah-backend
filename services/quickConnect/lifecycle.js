@@ -39,6 +39,8 @@ const config = require('./config');
 const sessions = require('./sessions');
 const matching = require('./matching');
 const notify = require('./notify');
+const capacity = require('./capacity');
+const waitlist = require('./waitlist');
 const { evaluateEligibility, accountRestricted } = require('./eligibility');
 
 const S = QuickConnectSession;
@@ -198,12 +200,15 @@ async function endWhere(filter, reason, onlyIf, counters, key) {
 /** One sweep. Safe to run any time, any number of times. Returns counters. */
 async function sweep({ now = Date.now() } = {}) {
   const c = { featureDisabled: 0, proposalTimeout: 0, setupTimeout: 0, maxDuration: 0, heartbeatTimeout: 0,
-    moderation: 0, blocked: 0, stale: 0, searchesCleared: 0, searchesExpired: 0, pairingFreed: 0, matched: 0 };
+    moderation: 0, blocked: 0, stale: 0, searchesCleared: 0, searchesExpired: 0, pairingFreed: 0, matched: 0,
+    slotsReconciled: 0, waitlistNotified: 0, waitlistRemoved: 0, waitlistExpired: 0, waitlistPushFailed: 0 };
 
   if (!config.isEnabled()) {
     const open = await S.find({ status: { $in: S.ACTIVE_STATUSES } }).select('_id').limit(500).lean();
     for (const s of open) if ((await finishSession(s._id, 'feature_disabled')).ended) c.featureDisabled++;
     c.searchesCleared = await matching.clearAllSearches('unavailable');
+    c.slotsReconciled = await capacity.reconcile({ now });
+    Object.assign(c, await waitlist.notifyTick({ now }));      // switched off: only expires old entries
     return c;
   }
 
@@ -241,7 +246,9 @@ async function sweep({ now = Date.now() } = {}) {
   }
 
   c.stale = await sessions.sweepStaleSessions({ now });   // Phase 4 catch-all
+  c.slotsReconciled = await capacity.reconcile({ now });  // capacity left behind by a crash
   Object.assign(c, await matching.matchTick({ now }));
+  Object.assign(c, await waitlist.notifyTick({ now }));   // "Notify me": only as many as free slots
   return c;
 }
 

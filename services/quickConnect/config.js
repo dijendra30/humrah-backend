@@ -21,6 +21,10 @@
 //   QUICK_CONNECT_MATCH_FALLBACK_MS optional, shared-interest wait before broadening (default 20000)
 //   QUICK_CONNECT_SEARCH_TIMEOUT_MS optional, open search lifetime (default 120000)
 //   QUICK_CONNECT_SWEEP_INTERVAL_MS optional, lifecycle sweeper period (default 10000)
+//   QUICK_CONNECT_MAX_ACTIVE_CALLS  optional, most open sessions at once (default 10 = the
+//                                   measured TURN baseline; 1..500). Raise only after a load test.
+//   QUICK_CONNECT_WAITLIST_TTL_MS   optional, how long a "Notify me" request lasts (default 2 h,
+//                                   10 min..24 h)
 //   QUICK_CONNECT_SKIP_EXCLUSION_MS optional, how long two people are not matched again after
 //                                   one skipped the other (default 1800000 = 30 min, 1 min..24 h;
 //                                   cannot be switched off)
@@ -115,6 +119,10 @@ const matchFallbackMs = () => boundedMs('QUICK_CONNECT_MATCH_FALLBACK_MS', 20000
 const searchTimeoutMs = () => boundedMs('QUICK_CONNECT_SEARCH_TIMEOUT_MS', 120000, 60000, 600000);
 /** Phase 5: lifecycle sweeper period (5–60 s). Time limits are enforced within one period. */
 const sweepIntervalMs = () => boundedMs('QUICK_CONNECT_SWEEP_INTERVAL_MS', 10000, 5000, 60000);
+/** Most open Quick Connect sessions at once (capacity slots). Default = the validated baseline. */
+const maxActiveCalls = () => boundedMs('QUICK_CONNECT_MAX_ACTIVE_CALLS', 10, 1, 500);
+/** How long a "Notify me" request stays in the queue (10 min – 24 h). */
+const waitlistTtlMs = () => boundedMs('QUICK_CONNECT_WAITLIST_TTL_MS', 2 * 60 * 60 * 1000, 10 * 60 * 1000, 24 * 60 * 60 * 1000);
 /** After a skip (decline), how long the two people are not matched again (1 min – 24 h). */
 const skipExclusionMs = () => boundedMs('QUICK_CONNECT_SKIP_EXCLUSION_MS', 30 * 60 * 1000, 60 * 1000, 24 * 60 * 60 * 1000);
 
@@ -137,6 +145,8 @@ module.exports = {
   searchTimeoutMs,
   sweepIntervalMs,
   skipExclusionMs,
+  maxActiveCalls,
+  waitlistTtlMs,
   CONSENT_VERSION_PATTERN,
   DEFAULT_TURN_URIS,
   MIN_SECRET_LENGTH,

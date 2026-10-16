@@ -7,6 +7,8 @@
 //   POST /consent             { version }  accept the current Quick Connect consent
 //   POST /turn-credentials    { sessionId } short-lived TURN credentials, only for a
 //                             participant of an active Quick Connect session
+//   POST   /waitlist          { fcmToken? } "Notify me" when Quick Connect may have room
+//   DELETE /waitlist          cancel it (works while switched off)
 //   POST /report              { sessionId, reason, details?, block? } report the other
 //                             person of my session (and optionally block them); ends the
 //                             session if still open. Works while switched off.
@@ -29,6 +31,9 @@ const sessions = require('../services/quickConnect/sessions');
 const { mintTurnCredentials } = require('../services/quickConnect/turnCredentials');
 const QuickConnectConsent = require('../models/QuickConnectConsent');
 const reports = require('../services/quickConnect/reports');
+const capacity = require('../services/quickConnect/capacity');
+const waitlist = require('../services/quickConnect/waitlist');
+const User = require('../models/User');
 const { DASHBOARD_SCOPE } = require('../utils/sessionGuard');
 
 const router = express.Router();
@@ -86,7 +91,8 @@ const perUser = (max, windowMs = 60 * 1000) => rateLimit({
 
 router.use((req, res, next) => {
   if (!req.user || !req.user._id) return res.status(401).json({ success: false, code: 'UNAUTHENTICATED', message: 'Authentication required.' });
-  if (!config.isEnabled() && req.path !== '/report') return fail(res, 'QUICK_CONNECT_DISABLED');   // safety reports always work
+  const cleanup = req.path === '/report' || (req.path === '/waitlist' && req.method === 'DELETE');
+  if (!config.isEnabled() && !cleanup) return fail(res, 'QUICK_CONNECT_DISABLED');   // reports and cancels always work
   res.set('Cache-Control', 'no-store');
   return next();
 });
@@ -95,7 +101,17 @@ router.use((req, res, next) => {
 router.get('/status', perUser(60), handle(async (req, res) => {
   const e = await evaluateEligibility(req.user._id, { auth: req.auth });
   if (e.code === 'QUICK_CONNECT_DISABLED' || e.code === 'ACCOUNT_INVALID') return fail(res, e.code);
-  return res.json({ success: true, enabled: true, eligible: e.eligible, reasons: e.reasons, consent: e.consent });
+  const [me, busy, waitlisted] = await Promise.all([
+    User.findById(req.user._id).select('verificationStatus').lean(),
+    capacity.isFull(),
+    waitlist.isWaiting(req.user._id)
+  ]);
+  return res.json({
+    success: true, enabled: true, eligible: e.eligible, reasons: e.reasons, consent: e.consent,
+    verification: (me && me.verificationStatus) || 'unverified',   // the caller's own state only
+    busy,                                                            // all capacity slots taken
+    waitlisted
+  });
 }));
 
 // POST /consent { version } — records acceptance of the CURRENT version for req.user.
@@ -161,6 +177,21 @@ router.post('/turn-credentials', perUser(20), handle(async (req, res) => {
     ttlSeconds: c.ttlSeconds,
     expiresAt: c.expiresAt
   });
+}));
+
+router.post('/waitlist', perUser(10), handle(async (req, res) => {
+  if (req.auth && req.auth.scope === DASHBOARD_SCOPE) return fail(res, 'SESSION_NOT_ALLOWED');
+  const body = req.body === undefined ? {} : req.body;
+  if (!isPlainBody(body)) return invalid(res);
+  if (body.fcmToken !== undefined && body.fcmToken !== null && typeof body.fcmToken !== 'string') return invalid(res);
+  const r = await waitlist.join(req.user._id, { fcmToken: body.fcmToken, auth: req.auth });
+  if (!r.ok) return fail(res, r.code);
+  return res.status(r.alreadyWaiting ? 200 : 201).json({ success: true, waiting: true, push: r.push });
+}));
+
+router.delete('/waitlist', perUser(20), handle(async (req, res) => {
+  const r = await waitlist.leave(req.user._id);
+  return res.json({ success: true, removed: r.removed });
 }));
 
 router.post('/report', perUser(10), handle(async (req, res) => {

@@ -37,6 +37,8 @@ const config = require('./config');
 const sessions = require('./sessions');
 const { evaluateEligibility } = require('./eligibility');
 const notify = require('./notify');
+const capacity = require('./capacity');
+const waitlist = require('./waitlist');
 
 const INTEREST_FIELDS = ['interests', 'hobbies', 'conversationInterests', 'humrahRoomInterests'];
 const MAX_INTERESTS = 60;
@@ -166,6 +168,10 @@ async function pairUp(me, cand, now) {
     sharedInterestCount: shared.length
   });
   if (!created.ok) {
+    if (created.code === 'CAPACITY_REACHED') {           // full: both are told (busy screen, Notify me)
+      await drop(me._id, token, 'capacity'); await drop(cand._id, token, 'capacity');
+      return 'SELF_GONE';
+    }
     if (created.code === 'BUSY') {
       const busy = String(created.busyUserId);
       for (const row of [me, cand]) {
@@ -219,13 +225,14 @@ async function tryMatch(userId, { now = Date.now() } = {}) {
 /**
  * Starts a search for the AUTHENTICATED user. Resolves
  *   { ok: true, state: 'searching' | 'proposed', alreadySearching?, sessionId? }
- *   { ok: false, code }   (QUICK_CONNECT_DISABLED, an eligibility code, ...)
+ *   { ok: false, code }   (QUICK_CONNECT_DISABLED, an eligibility code, QUICK_CONNECT_CAPACITY_REACHED)
  */
 async function startSearch(userId, { auth = null, now = Date.now() } = {}) {
   if (!config.isEnabled()) return { ok: false, code: 'QUICK_CONNECT_DISABLED' };
   if (await QuickConnectSearch.exists({ _id: userId })) return { ok: true, state: 'searching', alreadySearching: true };
   const e = await evaluateEligibility(userId, { auth, now });
   if (!e.eligible) return { ok: false, code: e.code };
+  if (await capacity.isFull()) return { ok: false, code: 'QUICK_CONNECT_CAPACITY_REACHED' };
 
   const user = await User.findById(userId).select('questionnaire.interests questionnaire.hobbies questionnaire.conversationInterests questionnaire.humrahRoomInterests').lean();
   try {
@@ -240,6 +247,7 @@ async function startSearch(userId, { auth = null, now = Date.now() } = {}) {
     if (err && err.code === 11000) return { ok: true, state: 'searching', alreadySearching: true };
     throw err;
   }
+  await waitlist.removeOnSearch(userId);
   // Simultaneous starts can all back off from each other (each matcher yields when its own
   // row was claimed). Retry a couple of times with jitter; the sweeper's pass catches the rest.
   let session = await tryMatch(userId, { now });

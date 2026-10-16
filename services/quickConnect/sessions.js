@@ -24,6 +24,7 @@ const mongoose = require('mongoose');
 const VoiceCallReservation = require('../../models/VoiceCallReservation');
 const QuickConnectSession = require('../../models/QuickConnectSession');
 const config = require('./config');
+const capacity = require('./capacity');
 
 const QC = VoiceCallReservation.QC_KIND;
 const STATUS_FOR_REASON = {
@@ -39,7 +40,8 @@ async function releaseHolds(session) {
  * Reserves two users and creates a session ending at most MAX_DURATION from now.
  * initialStatus 'PROPOSED' (Phase 5 matching) waits for both to accept; 'ACCEPTED' is the
  * Phase 4 behaviour. Resolves { ok: true, session } or { ok: false, code } with code
- *   QUICK_CONNECT_DISABLED | INVALID_PARTICIPANTS | BUSY (busyUserId names who).
+ *   QUICK_CONNECT_DISABLED | INVALID_PARTICIPANTS | BUSY (busyUserId names who) |
+ *   CAPACITY_REACHED (all capacity slots are taken; nothing is held).
  */
 async function createSession(userA, userB, { now = Date.now(), initialStatus = 'ACCEPTED', matchType = null, sharedInterestCount = null } = {}) {
   if (!config.isEnabled()) return { ok: false, code: 'QUICK_CONNECT_DISABLED' };
@@ -55,6 +57,11 @@ async function createSession(userA, userB, { now = Date.now(), initialStatus = '
     if (await VoiceCallReservation.claim(uid, sessionId, QC)) { claimed.push(uid); continue; }
     await Promise.all(claimed.map(u => VoiceCallReservation.release(u, sessionId)));
     return { ok: false, code: 'BUSY', busyUserId: uid };
+  }
+  // Capacity: one slot per open session (services/quickConnect/capacity.js). Full → no session.
+  if (!(await capacity.claim(sessionId, { now }))) {
+    await Promise.all(claimed.map(u => VoiceCallReservation.release(u, sessionId)));
+    return { ok: false, code: 'CAPACITY_REACHED' };
   }
 
   try {
@@ -73,6 +80,7 @@ async function createSession(userA, userB, { now = Date.now(), initialStatus = '
     return { ok: true, session };
   } catch (err) {
     await Promise.all(claimed.map(u => VoiceCallReservation.release(u, sessionId)));
+    await capacity.release(sessionId);
     throw err;
   }
 }
@@ -100,7 +108,10 @@ async function endSession(sessionId, reason = 'hangup', { endedBy = null, onlyIf
   ).lean();
   const session = updated || await QuickConnectSession.findById(sessionId).select('participants status endReason connectedAt endedAt').lean();
   // Release only a session that is over — never one still active because onlyIf no longer held.
-  if (session && (updated || !QuickConnectSession.ACTIVE_STATUSES.includes(session.status))) await releaseHolds(session);
+  if (session && (updated || !QuickConnectSession.ACTIVE_STATUSES.includes(session.status))) {
+    await releaseHolds(session);
+    await capacity.release(session._id);
+  }
   return { ended: !!updated, session: session || null };
 }
 
@@ -117,6 +128,7 @@ async function sweepStaleSessions({ now = Date.now(), limit = 100 } = {}) {
     );
     if (res.modifiedCount > 0) ended++;
     await releaseHolds(s);
+    await capacity.release(s._id);
   }
   return ended;
 }
