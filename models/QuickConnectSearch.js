@@ -24,7 +24,8 @@ const searchSchema = new mongoose.Schema({
   broadenAt:    { type: Date, required: true },     // after this, any eligible user may match
   expiresAt:    { type: Date, required: true },     // search timeout (and TTL garbage collection)
   pairingToken: { type: String, default: null },
-  pairingAt:    { type: Date, default: null }
+  pairingAt:    { type: Date, default: null },
+  discoveryAt:  { type: Date, default: null }       // Smart Discovery invitations were sent (once per search)
 }, { versionKey: false, collection: 'quickconnectsearches' });
 
 searchSchema.index({ status: 1, startedAt: 1 });

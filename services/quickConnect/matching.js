@@ -128,6 +128,13 @@ async function announceProposal(session, shared) {
   const base = { sessionId: String(session._id), expiresAt, matchType: session.matchType, sharedInterests: shared.slice(0, MAX_SHARED_SHOWN) };
   notify.toUser(a, 'qc_match_proposed', { ...base, peer: cardB });
   notify.toUser(b, 'qc_match_proposed', { ...base, peer: cardA });
+  // Both are matched now: their other open Smart Discovery invitations are obsolete.
+  try {
+    const discovery = require('./discovery');
+    for (const p of [a, b]) { await discovery.cancelForInviter(p); await discovery.cancelForRecipient(p); }
+  } catch (err) {
+    console.error('[quick-connect] invite cleanup failed:', err && err.name);
+  }
 }
 
 /**

@@ -26,6 +26,16 @@
 // either account is restricted (suspended, banned, moderation-restricted, deletion
 // requested) or one has blocked the other. No moderation code is changed.
 //
+// Safety eligibility (Phase 1, 19 Oct 2026): the same pass also ends a session when either
+// participant no longer meets a SAFETY requirement Quick Connect is built on: photo
+// verification no longer approved (photo changed, rejected, revoked), the 18+ check no longer
+// passes (date of birth or adult confirmation changed), or no Quick Connect consent at all
+// (withdrawn). The reason is 'moderation', so the other person learns nothing about why.
+// Deliberately NOT ended mid-call: a new consent VERSION (it applies to the next search) and
+// the optional beta allow-list (an operator control, not a safety rule). Ending releases both
+// holds and the capacity slot like every other end, and later signaling, heartbeats and TURN
+// requests for the session are refused, so a client cannot keep it alive.
+//
 // Single-instance assumption: one sweeper per process, with an overlap guard. Writes are
 // conditional, so a second instance would duplicate work, not corrupt state.
 // -----------------------------------------------------------------------------
@@ -41,7 +51,9 @@ const matching = require('./matching');
 const notify = require('./notify');
 const capacity = require('./capacity');
 const waitlist = require('./waitlist');
-const { evaluateEligibility, accountRestricted } = require('./eligibility');
+const QuickConnectConsent = require('../../models/QuickConnectConsent');
+const { evaluateEligibility, accountRestricted, ageFromDateOfBirth, ADULT_AGE } = require('./eligibility');
+const discovery = () => require('./discovery');
 
 const S = QuickConnectSession;
 const isId = v => typeof v === 'string' && /^[0-9a-fA-F]{24}$/.test(v) && mongoose.isValidObjectId(v);
@@ -167,6 +179,34 @@ async function hangup(userId, sessionId) {
   return { ok: true, alreadyEnded: !r.ended };
 }
 
+/**
+ * The user cancelled their search. A proposal created for them in the same moment (they have
+ * not accepted it) is withdrawn too, so a cancelled search never turns into a match card.
+ * The other person sees an ordinary skip and keeps searching. Open Smart Discovery
+ * invitations of this search are cancelled.
+ */
+async function cancelSearchAndProposals(userId) {
+  const r = await matching.cancelSearch(userId);
+  const proposals = await S.find({ participants: userId, status: 'PROPOSED', acceptedBy: { $ne: userId } }).select('_id').lean();
+  let withdrawn = 0;
+  for (const p of proposals) {
+    if ((await finishSession(p._id, 'declined', { endedBy: userId, onlyIf: { status: 'PROPOSED', acceptedBy: { $ne: userId } } })).ended) withdrawn++;
+  }
+  try { await discovery().cancelForInviter(userId); } catch (err) {
+    console.error('[quick-connect] invite cancel failed:', err && err.name);
+  }
+  return { ...r, proposalsWithdrawn: withdrawn };
+}
+
+/** True when the user no longer meets a safety requirement of an open session (see header). */
+function safetyIneligible(user, hasConsent, now) {
+  if (user.photoVerificationStatus !== 'approved') return true;
+  const q = user.questionnaire || {};
+  const age = ageFromDateOfBirth(q.dateOfBirth, now);
+  if (age === null || age < ADULT_AGE || q.isAdultConfirmed !== true) return true;
+  return !hasConsent;
+}
+
 /** Ends every open session of a user (phone takeover, etc.) and removes their search. */
 async function endSessionsForUser(userId, reason) {
   await QuickConnectSearch.deleteOne({ _id: userId });
@@ -200,8 +240,9 @@ async function endWhere(filter, reason, onlyIf, counters, key) {
 /** One sweep. Safe to run any time, any number of times. Returns counters. */
 async function sweep({ now = Date.now() } = {}) {
   const c = { featureDisabled: 0, proposalTimeout: 0, setupTimeout: 0, maxDuration: 0, heartbeatTimeout: 0,
-    moderation: 0, blocked: 0, stale: 0, searchesCleared: 0, searchesExpired: 0, pairingFreed: 0, matched: 0,
-    slotsReconciled: 0, waitlistNotified: 0, waitlistRemoved: 0, waitlistExpired: 0, waitlistPushFailed: 0 };
+    moderation: 0, blocked: 0, ineligible: 0, stale: 0, searchesCleared: 0, searchesExpired: 0, pairingFreed: 0, matched: 0,
+    slotsReconciled: 0, waitlistNotified: 0, waitlistRemoved: 0, waitlistExpired: 0, waitlistPushFailed: 0,
+    invitesSent: 0, invitesExpired: 0, invitesCancelled: 0 };
 
   if (!config.isEnabled()) {
     const open = await S.find({ status: { $in: S.ACTIVE_STATUSES } }).select('_id').limit(500).lean();
@@ -209,6 +250,7 @@ async function sweep({ now = Date.now() } = {}) {
     c.searchesCleared = await matching.clearAllSearches('unavailable');
     c.slotsReconciled = await capacity.reconcile({ now });
     Object.assign(c, await waitlist.notifyTick({ now }));      // switched off: only expires old entries
+    Object.assign(c, await discovery().tick({ now }));        // switched off: cancels open invitations
     return c;
   }
 
@@ -227,13 +269,18 @@ async function sweep({ now = Date.now() } = {}) {
   const hb = { status: { $in: S.MEDIA_STATUSES }, lastSeenAt: { $elemMatch: { $lte: hbCut } } };
   await endWhere(hb, 'disconnect_timeout', hb, c, 'heartbeatTimeout');
 
-  // Moderation and blocks: re-read both participants of every open session.
+  // Moderation, blocks and safety eligibility: re-read both participants of every open session.
   const open = await S.find({ status: { $in: S.ACTIVE_STATUSES } }).select('_id participants').limit(500).lean();
   if (open.length) {
     const userIds = [...new Set(open.flatMap(s => s.participants.map(String)))];
-    const users = await User.find({ _id: { $in: userIds } })
-      .select('status suspensionInfo banInfo moderationFlags.restrictedUntil deletionRequestedAt blockedUsers').lean();
+    const [users, consenting] = await Promise.all([
+      User.find({ _id: { $in: userIds } })
+        .select('status suspensionInfo banInfo moderationFlags.restrictedUntil deletionRequestedAt blockedUsers ' +
+          'photoVerificationStatus questionnaire.dateOfBirth questionnaire.isAdultConfirmed').lean(),
+      QuickConnectConsent.distinct('userId', { userId: { $in: userIds } })
+    ]);
     const byId = new Map(users.map(u => [String(u._id), u]));
+    const hasConsent = new Set(consenting.map(String));
     for (const s of open) {
       const [a, b] = s.participants.map(String);
       const ua = byId.get(a), ub = byId.get(b);
@@ -241,6 +288,8 @@ async function sweep({ now = Date.now() } = {}) {
         if ((await finishSession(s._id, 'moderation')).ended) c.moderation++;
       } else if ((ua.blockedUsers || []).map(String).includes(b) || (ub.blockedUsers || []).map(String).includes(a)) {
         if ((await finishSession(s._id, 'blocked')).ended) c.blocked++;
+      } else if (safetyIneligible(ua, hasConsent.has(a), now) || safetyIneligible(ub, hasConsent.has(b), now)) {
+        if ((await finishSession(s._id, 'moderation')).ended) c.ineligible++;
       }
     }
   }
@@ -249,6 +298,7 @@ async function sweep({ now = Date.now() } = {}) {
   c.slotsReconciled = await capacity.reconcile({ now });  // capacity left behind by a crash
   Object.assign(c, await matching.matchTick({ now }));
   Object.assign(c, await waitlist.notifyTick({ now }));   // "Notify me": only as many as free slots
+  Object.assign(c, await discovery().tick({ now }));      // Smart Discovery invitations (no-op unless enabled)
   return c;
 }
 
@@ -285,6 +335,7 @@ function stopSweeper() { if (timer) { clearInterval(timer); timer = null; } }
 
 module.exports = {
   acceptMatch, declineMatch, markConnecting, markConnected, heartbeat, hangup,
-  finishSession, endSessionsForUser, currentState, sweep, sweepOnce, startSweeper, stopSweeper,
+  finishSession, endSessionsForUser, cancelSearchAndProposals, currentState, sweep, sweepOnce, startSweeper, stopSweeper,
+  _internal: { safetyIneligible },
   lastSweep: () => lastCounters
 };

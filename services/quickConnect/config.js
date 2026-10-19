@@ -28,6 +28,16 @@
 //   QUICK_CONNECT_SKIP_EXCLUSION_MS optional, how long two people are not matched again after
 //                                   one skipped the other (default 1800000 = 30 min, 1 min..24 h;
 //                                   cannot be switched off)
+//   QUICK_CONNECT_SMART_DISCOVERY_ENABLED  exactly "true" enables Smart Discovery invitations
+//                                   (services/quickConnect/discovery.js); anything else = OFF.
+//                                   Needs QUICK_CONNECT_ENABLED too. Only opted-in users are invited.
+//   QUICK_CONNECT_SMART_DISCOVERY_DELAY_MS optional, how long a search runs without a match
+//                                   before invitations go out (default 30000, 10 s..90 s)
+//   QUICK_CONNECT_INVITE_TTL_MS     optional, how long an invitation can be accepted
+//                                   (default 60000, 20 s..3 min)
+//   QUICK_CONNECT_INVITES_PER_SEARCH optional, most invitations one search sends (default 3, 1..10)
+//   QUICK_CONNECT_INVITE_COOLDOWN_MS optional, least time between two invitations to the same
+//                                   person (default 1800000 = 30 min, 5 min..24 h)
 //
 // None of these is in server.js's REQUIRED_ENV_VARS on purpose: a missing value
 // must switch Quick Connect off, not stop the whole app from starting.
@@ -126,6 +136,17 @@ const waitlistTtlMs = () => boundedMs('QUICK_CONNECT_WAITLIST_TTL_MS', 2 * 60 * 
 /** After a skip (decline), how long the two people are not matched again (1 min – 24 h). */
 const skipExclusionMs = () => boundedMs('QUICK_CONNECT_SKIP_EXCLUSION_MS', 30 * 60 * 1000, 60 * 1000, 24 * 60 * 60 * 1000);
 
+/** Smart Discovery invitations: off unless exactly "true" (and Quick Connect itself is on). */
+const smartDiscoveryEnabled = () => isEnabled() && raw('QUICK_CONNECT_SMART_DISCOVERY_ENABLED').trim().toLowerCase() === 'true';
+/** How long a search runs without a match before invitations are sent (10–90 s). */
+const smartDiscoveryDelayMs = () => boundedMs('QUICK_CONNECT_SMART_DISCOVERY_DELAY_MS', 30000, 10000, 90000);
+/** How long an invitation can be accepted (20 s – 3 min). */
+const inviteTtlMs = () => boundedMs('QUICK_CONNECT_INVITE_TTL_MS', 60000, 20000, 180000);
+/** Most invitations a single search sends (1–10). */
+const invitesPerSearch = () => boundedMs('QUICK_CONNECT_INVITES_PER_SEARCH', 3, 1, 10);
+/** Least time between two invitations to the same person (5 min – 24 h). */
+const inviteCooldownMs = () => boundedMs('QUICK_CONNECT_INVITE_COOLDOWN_MS', 30 * 60 * 1000, 5 * 60 * 1000, 24 * 60 * 60 * 1000);
+
 /** TURN settings, or null when any part is unusable (credential minting then refuses). */
 function turnConfig() {
   const secret = turnSecret();
@@ -147,6 +168,11 @@ module.exports = {
   skipExclusionMs,
   maxActiveCalls,
   waitlistTtlMs,
+  smartDiscoveryEnabled,
+  smartDiscoveryDelayMs,
+  inviteTtlMs,
+  invitesPerSearch,
+  inviteCooldownMs,
   CONSENT_VERSION_PATTERN,
   DEFAULT_TURN_URIS,
   MIN_SECRET_LENGTH,

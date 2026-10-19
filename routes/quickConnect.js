@@ -12,6 +12,14 @@
 //   POST /report              { sessionId, reason, details?, block? } report the other
 //                             person of my session (and optionally block them); ends the
 //                             session if still open. Works while switched off.
+//   DELETE /consent           withdraw my Quick Connect consent: ends my search, proposal or
+//                             call at once and removes Notify me, the Smart Discovery opt-in
+//                             and open invitations. Works while switched off.
+//   PUT  /preferences         { smartDiscovery: boolean, fcmToken? } Smart Discovery opt-in
+//                             (on: eligible users only; off: always, also while switched off)
+//   GET  /invites/:id         my own invitation's state (no data about who sent it)
+//   POST /invites/:id/decline decline my invitation (idempotent; works while switched off)
+//   Accepting an invitation is the socket event qc_invite_accept (so the match can reach me).
 //
 // KILL SWITCH: QUICK_CONNECT_ENABLED (default off). While off, every route except /report
 // answers 404 QUICK_CONNECT_DISABLED (the Ask a Question convention) and nothing is issued.
@@ -34,6 +42,8 @@ const reports = require('../services/quickConnect/reports');
 const capacity = require('../services/quickConnect/capacity');
 const waitlist = require('../services/quickConnect/waitlist');
 const User = require('../models/User');
+const discovery = require('../services/quickConnect/discovery');
+const consentService = require('../services/quickConnect/consent');
 const { DASHBOARD_SCOPE } = require('../utils/sessionGuard');
 
 const router = express.Router();
@@ -49,7 +59,8 @@ const STATUS_FOR_CODE = {
   CONSENT_REQUIRED: 403,
   BUSY: 409,
   SESSION_NOT_FOUND: 404,
-  REPORT_WINDOW_CLOSED: 410
+  REPORT_WINDOW_CLOSED: 410,
+  INVITE_NOT_FOUND: 404
 };
 const MESSAGE_FOR_CODE = {
   QUICK_CONNECT_DISABLED: 'Quick Connect is not available.',
@@ -62,7 +73,8 @@ const MESSAGE_FOR_CODE = {
   CONSENT_REQUIRED: 'Please review and accept the Quick Connect terms.',
   BUSY: 'You are already in a call.',
   SESSION_NOT_FOUND: 'This call could not be found.',
-  REPORT_WINDOW_CLOSED: 'This call is too old to report here. Please contact support.'
+  REPORT_WINDOW_CLOSED: 'This call is too old to report here. Please contact support.',
+  INVITE_NOT_FOUND: 'This invitation could not be found.'
 };
 
 const fail = (res, code, extra = {}) =>
@@ -93,7 +105,11 @@ const perUser = (max, windowMs = 60 * 1000) => rateLimit({
 
 router.use((req, res, next) => {
   if (!req.user || !req.user._id) return res.status(401).json({ success: false, code: 'UNAUTHENTICATED', message: 'Authentication required.' });
-  const cleanup = req.path === '/report' || (req.path === '/waitlist' && req.method === 'DELETE');
+  // Ending and opting out always work, also while switched off.
+  const cleanup = req.path === '/report' || (req.path === '/waitlist' && req.method === 'DELETE') ||
+    (req.path === '/consent' && req.method === 'DELETE') ||
+    (req.path === '/preferences' && req.method === 'PUT' && req.body && req.body.smartDiscovery === false) ||
+    (req.method === 'POST' && /^\/invites\/[^/]+\/decline$/.test(req.path));
   if (!config.isEnabled() && !cleanup) return fail(res, 'QUICK_CONNECT_DISABLED');   // reports and cancels always work
   res.set('Cache-Control', 'no-store');
   return next();
@@ -103,16 +119,18 @@ router.use((req, res, next) => {
 router.get('/status', perUser(60), handle(async (req, res) => {
   const e = await evaluateEligibility(req.user._id, { auth: req.auth });
   if (e.code === 'QUICK_CONNECT_DISABLED' || e.code === 'ACCOUNT_INVALID') return fail(res, e.code);
-  const [me, busy, waitlisted] = await Promise.all([
+  const [me, busy, waitlisted, pref] = await Promise.all([
     User.findById(req.user._id).select('photoVerificationStatus').lean(),
     capacity.isFull(),
-    waitlist.isWaiting(req.user._id)
+    waitlist.isWaiting(req.user._id),
+    discovery.getPreference(req.user._id)
   ]);
   return res.json({
     success: true, enabled: true, eligible: e.eligible, reasons: e.reasons, consent: e.consent,
     verification: verificationState(me && me.photoVerificationStatus),   // the caller's own state only
     busy,                                                            // all capacity slots taken
-    waitlisted
+    waitlisted,
+    smartDiscovery: { available: config.smartDiscoveryEnabled(), optedIn: pref.optedIn, push: pref.push }
   });
 }));
 
@@ -150,6 +168,37 @@ router.post('/consent', perUser(10), handle(async (req, res) => {
     alreadyAccepted: !created,
     consent: { version: record.version, acceptedAt: new Date(record.acceptedAt).toISOString() }
   });
+}));
+
+// DELETE /consent — withdraw consent. Takes effect at once (see services/quickConnect/consent.js).
+router.delete('/consent', perUser(10), handle(async (req, res) => {
+  const r = await consentService.withdraw(req.user._id);
+  return res.json({ success: true, withdrawn: r.withdrawn, ended: r.ended });
+}));
+
+// PUT /preferences { smartDiscovery, fcmToken? } — the Smart Discovery opt-in.
+router.put('/preferences', perUser(10), handle(async (req, res) => {
+  if (req.auth && req.auth.scope === DASHBOARD_SCOPE) return fail(res, 'SESSION_NOT_ALLOWED');
+  const body = req.body;
+  if (!isPlainBody(body) || typeof body.smartDiscovery !== 'boolean') return invalid(res);
+  if (body.fcmToken !== undefined && body.fcmToken !== null && typeof body.fcmToken !== 'string') return invalid(res);
+  const r = await discovery.setPreference(req.user._id, { smartDiscovery: body.smartDiscovery, fcmToken: body.fcmToken, auth: req.auth });
+  if (!r.ok) return fail(res, r.code);
+  return res.json({ success: true, smartDiscovery: { available: config.smartDiscoveryEnabled(), optedIn: r.optedIn, push: r.push } });
+}));
+
+// GET /invites/:id — the recipient's own invitation; anyone else gets 404.
+router.get('/invites/:id', perUser(30), handle(async (req, res) => {
+  const r = await discovery.getInvite(req.user._id, req.params.id);
+  if (!r.ok) return r.code === 'INVALID_REQUEST' ? invalid(res) : fail(res, r.code);
+  return res.json({ success: true, invite: r.invite });
+}));
+
+// POST /invites/:id/decline — idempotent.
+router.post('/invites/:id/decline', perUser(20), handle(async (req, res) => {
+  const r = await discovery.declineInvite(req.user._id, req.params.id);
+  if (!r.ok) return r.code === 'INVALID_REQUEST' ? invalid(res) : fail(res, r.code);
+  return res.json({ success: true, alreadyAnswered: r.alreadyAnswered });
 }));
 
 // POST /turn-credentials { sessionId } — only for a participant of an ACTIVE session.

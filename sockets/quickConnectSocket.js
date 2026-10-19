@@ -14,7 +14,10 @@
 //
 // client → server (every event answers through its ack: { ok: true, ... } | { ok: false, code })
 //   qc_search_start   {}                          start searching (eligibility re-checked)
-//   qc_search_cancel  {}                          stop searching
+//   qc_search_cancel  {}                          stop searching (also withdraws a proposal made in the
+//                                                 same moment that I have not accepted, and my invitations)
+//   qc_invite_accept  { inviteId }                accept a Smart Discovery invitation addressed to ME:
+//                                                 re-checked, then an ordinary proposal both must accept
 //   qc_status         {}                          my current state (for reconnects)
 //   qc_match_accept   { sessionId }               PROPOSED: I agree
 //   qc_match_decline  { sessionId }               PROPOSED: I decline
@@ -32,6 +35,12 @@
 //   qc_peer_status    { sessionId, state: accepted | connected | disconnected | online }
 //   qc_offer / qc_answer / qc_ice_candidate   the other participant's signaling, { sessionId, sdp|candidate }
 //   qc_session_ended  { sessionId, reason, durationSeconds, byPeer }
+//   qc_invite         { inviteId, expiresAt, sharedInterests[] }   an invitation for me (no data about who)
+//   qc_invite_cancelled { inviteId }               that invitation is gone
+//   qc_discovery      { invited }                  my search invited this many people (no identities)
+//
+// A participant whose last socket drops is reported to the other as 'disconnected' only if
+// they are still gone DISCONNECT_NOTICE_MS later, so a quick reconnect shows nothing.
 //
 // Signaling: the relay target is ALWAYS the session's other participant, read from the
 // database; the session must be ACCEPTED/CONNECTING/CONNECTED, not past endsAt, and the
@@ -49,19 +58,22 @@ const config = require('../services/quickConnect/config');
 const notify = require('../services/quickConnect/notify');
 const matching = require('../services/quickConnect/matching');
 const lifecycle = require('../services/quickConnect/lifecycle');
+const discovery = require('../services/quickConnect/discovery');
 const { accountRestricted } = require('../services/quickConnect/eligibility');
 
 const NAMESPACE = '/quick-connect';
 const MAX_SDP = 16 * 1024;
 const MAX_CANDIDATE = 1024;
 const MAX_MID = 64;
+const DISCONNECT_NOTICE_MS = 3000;
 
 // events per window, per socket
 const LIMITS = {
   qc_search_start: [6, 60e3], qc_search_cancel: [20, 60e3], qc_status: [30, 60e3],
   qc_match_accept: [10, 60e3], qc_match_decline: [10, 60e3],
   qc_call_connecting: [10, 60e3], qc_call_connected: [10, 60e3], qc_heartbeat: [12, 60e3],
-  qc_offer: [10, 60e3], qc_answer: [10, 60e3], qc_ice_candidate: [120, 60e3], qc_hangup: [10, 60e3]
+  qc_offer: [10, 60e3], qc_answer: [10, 60e3], qc_ice_candidate: [120, 60e3], qc_hangup: [10, 60e3],
+  qc_invite_accept: [6, 60e3]
 };
 // still allowed while switched off: they only end or inspect things
 const CLEANUP_EVENTS = new Set(['qc_search_cancel', 'qc_status', 'qc_match_decline', 'qc_hangup']);
@@ -141,7 +153,8 @@ async function relay(socket, event, payload) {
 
 const HANDLERS = {
   qc_search_start: (s) => matching.startSearch(s.data.userId, { auth: { scope: s.data.scope } }),
-  qc_search_cancel: (s) => matching.cancelSearch(s.data.userId),
+  qc_search_cancel: (s) => lifecycle.cancelSearchAndProposals(s.data.userId),
+  qc_invite_accept: (s, p) => discovery.acceptInvite(s.data.userId, p && p.inviteId, { auth: { scope: s.data.scope } }),
   qc_status: async (s) => ({ ok: true, enabled: config.isEnabled(), ...(await lifecycle.currentState(s.data.userId)) }),
   qc_match_accept: (s, p) => lifecycle.acceptMatch(s.data.userId, p && p.sessionId, { auth: { scope: s.data.scope } }),
   qc_match_decline: (s, p) => lifecycle.declineMatch(s.data.userId, p && p.sessionId),
@@ -186,15 +199,28 @@ function onConnection(socket) {
     try {
       if (await notify.socketCount(userId) > 0) return;          // another socket of this user is still here
       await matching.cancelSearch(userId);                       // searching needs a live connection
-      const open = await QuickConnectSession.find({ participants: userId, status: { $in: QuickConnectSession.MEDIA_STATUSES } })
-        .select('participants').lean();
-      for (const s of open) {                                    // the call is NOT ended: reconnect grace
-        awaitingReturn.add(`${userId}|${String(s._id)}`);
-        notify.toUser(s.participants.map(String).find(x => x !== userId), 'qc_peer_status', { sessionId: String(s._id), state: 'disconnected' });
-      }
+      await discovery.cancelForInviter(userId);                  // ...and so do its invitations
     } catch (err) {
       console.error('[quick-connect] disconnect cleanup failed:', err && err.name);
     }
+    // The call is NOT ended (reconnect grace). Tell the other person only if this user is still
+    // gone a moment later, so a quick reconnect produces no misleading notice.
+    const t = setTimeout(async () => {
+      try {
+        if (await notify.socketCount(userId) > 0) return;
+        const open = await QuickConnectSession.find({ participants: userId, status: { $in: QuickConnectSession.MEDIA_STATUSES } })
+          .select('participants').lean();
+        for (const s of open) {
+          const key = `${userId}|${String(s._id)}`;
+          if (awaitingReturn.has(key)) continue;                 // already told
+          awaitingReturn.add(key);
+          notify.toUser(s.participants.map(String).find(x => x !== userId), 'qc_peer_status', { sessionId: String(s._id), state: 'disconnected' });
+        }
+      } catch (err) {
+        console.error('[quick-connect] disconnect notice failed:', err && err.name);
+      }
+    }, DISCONNECT_NOTICE_MS);
+    if (t.unref) t.unref();
   });
 }
 
@@ -207,4 +233,4 @@ function initQuickConnectSocket(io) {
   return nsp;
 }
 
-module.exports = { initQuickConnectSocket, NAMESPACE, _internal: { cleanSdp, cleanCandidate, LIMITS } };
+module.exports = { initQuickConnectSocket, NAMESPACE, _internal: { cleanSdp, cleanCandidate, LIMITS, DISCONNECT_NOTICE_MS } };
