@@ -29,6 +29,8 @@
 //   - mongoose ObjectId validated before any DB operation
 //   - Every individual step wrapped in safeDelete/safeUpdate helpers
 //   - Failure in any step is logged but does NOT abort the overall deletion
+//     EXCEPT the required Quick Connect step (Step 1b): if it fails, nothing else is
+//     deleted, the request answers 500 and the user can retry (every step is idempotent)
 //   - User document is the LAST thing deleted (belt-and-suspenders for cleanup)
 // =============================================================================
 
@@ -37,6 +39,7 @@
 const mongoose        = require('mongoose');
 const User            = require('../models/User');
 const { deleteImage } = require('../config/cloudinary');
+const quickConnectCleanup = require('../services/quickConnect/accountDeletion');
 
 // ── Lazy-load every model ─────────────────────────────────────────────────────
 // safeRequireModel returns null if the model file doesn't exist yet, so new
@@ -178,6 +181,22 @@ const deleteMyAccount = async (req, res) => {
       return res.status(200).json({
         success: true,
         message: 'Account has been permanently deleted.'
+      });
+    }
+
+    // ── Step 1b: Quick Connect (REQUIRED) ─────────────────────────────────────
+    // Ends any open search, proposal or call, and removes consent, preferences, Notify me,
+    // every invitation the user sent or received, pair exclusions and report markers.
+    // Runs first and is NOT best-effort: if it fails, stop here — no other data has been
+    // deleted yet, so the user's retry starts from a clean state and completes it.
+    try {
+      stats.quickConnect = await quickConnectCleanup.purgeForDeletedAccount(userIdObj);
+    } catch (e) {
+      console.error(`[deleteAccount] Quick Connect cleanup failed — deletion stopped, userId=${userId}:`, e && e.message);
+      return res.status(500).json({
+        success: false,
+        code: 'DELETION_INCOMPLETE',
+        message: 'We could not finish deleting your account, so it has not been deleted. Please try again.'
       });
     }
 
