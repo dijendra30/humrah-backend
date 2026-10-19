@@ -11,6 +11,7 @@ const { uploadLimiter } = require('../middleware/rateLimitMiddleware');
 const User            = require('../models/User');
 const MatchingTodayMood = require('../models/MatchingTodayMood');
 const { upload, uploadBuffer, uploadBase64, deleteImage } = require('../config/cloudinary');
+const photoVerification = require('../utils/photoVerification');
 const { canonicalizeTopics } = require('../utils/roomTopicConfig');
 const crypto = require('crypto');
 const mongoose = require('mongoose');
@@ -108,6 +109,25 @@ router.put('/me', authenticate, async (req, res) => {
       if (allowedUpdates.includes(key)) filteredUpdates[key] = updates[key];
     });
 
+    // Profile photo through this route: only images in Humrah's own storage, and a photo
+    // that actually changes loses the previous photo-verification approval - the same rule
+    // as the upload routes (utils/photoVerification.js). An unchanged photo changes nothing.
+    let photoChanged = false;
+    if (Object.prototype.hasOwnProperty.call(filteredUpdates, 'profilePhoto')) {
+      const requested = filteredUpdates.profilePhoto === '' ? null : filteredUpdates.profilePhoto;
+      const current = await User.findById(req.userId).select('profilePhoto').lean();
+      if (!current) return res.status(404).json({ success: false, message: 'User not found' });
+      if ((current.profilePhoto || null) === (requested || null)) {
+        delete filteredUpdates.profilePhoto;
+      } else if (requested !== null && !photoVerification.isHumrahProfilePhotoUrl(requested)) {
+        return res.status(400).json({ success: false, code: 'INVALID_PROFILE_PHOTO', message: 'Please upload your profile photo from the app.' });
+      } else {
+        filteredUpdates.profilePhoto = requested;
+        Object.assign(filteredUpdates, photoVerification.RESET_FIELDS);
+        photoChanged = true;
+      }
+    }
+
     if (filteredUpdates.questionnaire && typeof filteredUpdates.questionnaire === 'object') {
       const { cleanedQuestionnaire, violations, errors, textsForAI } = moderateQuestionnaireSync(filteredUpdates.questionnaire);
       if (violations.length > 0) {
@@ -168,6 +188,7 @@ router.put('/me', authenticate, async (req, res) => {
 
     const updatedUser = await User.findByIdAndUpdate(req.userId, filteredUpdates, { new: true, runValidators: true }).select('-password');
     if (!updatedUser) return res.status(404).json({ success: false, message: 'User not found' });
+    if (photoChanged) await photoVerification.expireOpenSubmissions(req.userId);
     
     console.log(`[GUIDELINES]
 userId=${updatedUser._id}
@@ -368,19 +389,19 @@ router.post('/upload-profile-photo', authenticate, uploadLimiter, upload.single(
     const user = await User.findById(req.userId);
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
-    if (user.profilePhotoPublicId) await deleteImage(user.profilePhotoPublicId);
+    // Upload first: if it fails, the current photo (and its stored image) stays untouched.
+    const previousPublicId = user.profilePhotoPublicId;
     const uploadResult = await uploadBuffer(req.file.buffer, 'humrah/profiles');
 
     user.profilePhoto = uploadResult.url;
     user.profilePhotoPublicId = uploadResult.publicId;
     user.profileEditStats.lastPhotoUpdate = new Date();
-    user.verified = false;
-    user.photoVerificationStatus = 'not_submitted';
-    user.verificationPhotoSubmittedAt = null;
-    user.photoVerifiedAt = null;
-    user.photoVerifiedBy = null;
-    user.photoRejectionReason = null;
+    photoVerification.applyReset(user);   // a new photo needs a new verification
     await user.save();
+    await photoVerification.expireOpenSubmissions(user._id);
+    if (previousPublicId && previousPublicId !== uploadResult.publicId) {
+      try { await deleteImage(previousPublicId); } catch (e) { console.error('Old profile photo cleanup failed:', e && e.name); }
+    }
 
     res.json({ success: true, message: 'Profile photo uploaded successfully', profilePhoto: user.profilePhoto, photoVerificationStatus: user.photoVerificationStatus, lastPhotoUpdate: user.profileEditStats.lastPhotoUpdate, profileCompletion: user.profileCompletion, profileCompletionBreakdown: user.profileCompletionBreakdown, missingFields: user.missingFields });
   } catch (error) {
@@ -397,19 +418,19 @@ router.post('/upload-profile-photo-base64', authenticate, uploadLimiter, async (
     const user = await User.findById(req.userId);
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
-    if (user.profilePhotoPublicId) await deleteImage(user.profilePhotoPublicId);
+    // Upload first: if it fails, the current photo (and its stored image) stays untouched.
+    const previousPublicId = user.profilePhotoPublicId;
     const uploadResult = await uploadBase64(photoBase64, 'humrah/profiles');
 
     user.profilePhoto = uploadResult.url;
     user.profilePhotoPublicId = uploadResult.publicId;
     user.profileEditStats.lastPhotoUpdate = new Date();
-    user.verified = false;
-    user.photoVerificationStatus = 'not_submitted';
-    user.verificationPhotoSubmittedAt = null;
-    user.photoVerifiedAt = null;
-    user.photoVerifiedBy = null;
-    user.photoRejectionReason = null;
+    photoVerification.applyReset(user);   // a new photo needs a new verification
     await user.save();
+    await photoVerification.expireOpenSubmissions(user._id);
+    if (previousPublicId && previousPublicId !== uploadResult.publicId) {
+      try { await deleteImage(previousPublicId); } catch (e) { console.error('Old profile photo cleanup failed:', e && e.name); }
+    }
 
     res.json({ success: true, message: 'Profile photo uploaded successfully', profilePhoto: user.profilePhoto, photoVerificationStatus: user.photoVerificationStatus, lastPhotoUpdate: user.profileEditStats.lastPhotoUpdate, profileCompletion: user.profileCompletion, profileCompletionBreakdown: user.profileCompletionBreakdown, missingFields: user.missingFields });
   } catch (error) {
@@ -1152,12 +1173,18 @@ router.put('/:userId/verify-photo', authenticate, adminOnly, auditLog('VERIFY_US
     const user = await User.findById(userId);
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
     if (!user.verificationPhoto) return res.status(400).json({ success: false, message: 'No verification photo to review' });
+    if (approved && !photoVerification.guardApproval(user)) return res.status(409).json(photoVerification.PHOTO_CHANGED_RESPONSE);
 
     user.photoVerificationStatus = approved ? 'approved' : 'rejected';
     user.photoVerifiedAt  = new Date();
     user.photoVerifiedBy  = req.userId;
     user.verified         = user.isFullyVerified();
-    await user.save();
+    try {
+      await user.save();
+    } catch (e) {
+      if (photoVerification.isGuardMiss(e)) return res.status(409).json(photoVerification.PHOTO_CHANGED_RESPONSE);
+      throw e;
+    }
 
     res.json({ success: true, message: `Photo verification ${approved ? 'approved' : 'rejected'} successfully`, user: { id: user._id, photoVerificationStatus: user.photoVerificationStatus, verified: user.verified, photoVerifiedAt: user.photoVerifiedAt, profileCompletion: user.profileCompletion, profileCompletionBreakdown: user.profileCompletionBreakdown, missingFields: user.missingFields } });
   } catch (error) {

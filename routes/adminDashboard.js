@@ -12,6 +12,7 @@ const Booking = require('../models/Booking'); // Assuming Booking model exists
 const Broadcast = require('../models/Broadcast');
 const { authenticate, adminOnly } = require('../middleware/auth');
 const { deleteImage, deleteVideo } = require('../config/cloudinary');
+const photoVerification = require('../utils/photoVerification');
 
 // 1. Dashboard Stats
 router.get('/dashboard/stats', authenticate, adminOnly, async (req, res) => {
@@ -241,6 +242,10 @@ router.post('/verifications/:userId/:action', authenticate, adminOnly, async (re
     if (action === 'approve' && user.photoVerificationStatus === 'approved') {
       return res.json({ success: true, message: 'Verification already approved', status: 'APPROVED' });
     }
+    // Only a submission made for the CURRENT photo can be approved (utils/photoVerification.js).
+    if (action === 'approve' && !photoVerification.guardApproval(user)) {
+      return res.status(409).json(photoVerification.PHOTO_CHANGED_RESPONSE);
+    }
 
     if (action === 'approve') {
       user.photoVerificationStatus = 'approved';
@@ -287,18 +292,6 @@ router.post('/verifications/:userId/:action', authenticate, adminOnly, async (re
       return res.status(400).json({ success: false, message: 'Invalid action' });
     }
 
-    // Emit real-time status update to the user
-    const io = req.app.get('io');
-    if (io) {
-      const socketPayload = {
-        sessionId: session ? session.sessionId : null,
-        status: action === 'approve' ? 'APPROVED' : 'REJECTED',
-        rejectionReason: action === 'reject' ? (req.body.rejectionReason || req.body.reason) : null
-      };
-      io.to(`user:${userId.toString()}`).emit('verification_status_updated', socketPayload);
-      console.log(`[Socket] Emitted verification_status_updated: ${socketPayload.status} to room user:${userId}`);
-    }
-
     // Capture media IDs for async cleanup before clearing them from DB
     const photoIdToDelete = user.verificationPhotoPublicId;
     const videoIdToDelete = session ? session.cloudinaryPublicId : null;
@@ -317,7 +310,26 @@ router.post('/verifications/:userId/:action', authenticate, adminOnly, async (re
     }
     user.verificationMediaDeletedAt = new Date();
 
-    await user.save();
+    try {
+      await user.save();
+    } catch (e) {
+      // Approval pinned to the reviewed photo: the user changed it meanwhile, nothing was approved.
+      if (photoVerification.isGuardMiss(e)) return res.status(409).json(photoVerification.PHOTO_CHANGED_RESPONSE);
+      throw e;
+    }
+
+    // Emit real-time status update to the user (only after the decision was actually saved)
+    const io = req.app.get('io');
+    if (io) {
+      const socketPayload = {
+        sessionId: session ? session.sessionId : null,
+        status: action === 'approve' ? 'APPROVED' : 'REJECTED',
+        rejectionReason: action === 'reject' ? (req.body.rejectionReason || req.body.reason) : null
+      };
+      io.to(`user:${userId.toString()}`).emit('verification_status_updated', socketPayload);
+      console.log(`[Socket] Emitted verification_status_updated: ${socketPayload.status} to room user:${userId}`);
+    }
+
     if (session) {
       await session.save();
       console.log(`[SESSION AFTER CLEANUP]`, {

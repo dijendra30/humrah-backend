@@ -2,6 +2,7 @@
 const express = require('express');
 const router = express.Router();
 const { auth } = require('../middleware/auth');
+const photoVerification = require('../utils/photoVerification');
 const User = require('../models/User');
 const VerificationSession = require('../models/VerificationSession');
 const { uploadVerificationVideo, deleteVideo } = require('../config/cloudinary');
@@ -453,11 +454,11 @@ router.post('/admin/approve/:sessionId', auth, async (req, res) => {
       });
     }
     
-    session.status = 'APPROVED';
-    session.result = 'APPROVED';
-    session.reviewedBy = req.userId;
-    session.reviewedAt = new Date();
-    await session.save();
+    // Only a submission made for the CURRENT photo can be approved (utils/photoVerification.js):
+    // a session expired by a photo change, or a user with nothing submitted, is refused.
+    if (session.status === 'EXPIRED' || !photoVerification.guardApproval(user)) {
+      return res.status(409).json(photoVerification.PHOTO_CHANGED_RESPONSE);
+    }
     
     user.verified = true;
     user.photoVerificationStatus = 'approved';
@@ -465,7 +466,19 @@ router.post('/admin/approve/:sessionId', auth, async (req, res) => {
     user.photoVerifiedBy = req.userId;
     user.verificationEmbedding = session.faceEmbedding;
     user.verifiedAt = new Date();
-    await user.save();
+    // Written first and conditionally: if the photo changed meanwhile, nothing is approved.
+    try {
+      await user.save();
+    } catch (e) {
+      if (photoVerification.isGuardMiss(e)) return res.status(409).json(photoVerification.PHOTO_CHANGED_RESPONSE);
+      throw e;
+    }
+
+    session.status = 'APPROVED';
+    session.result = 'APPROVED';
+    session.reviewedBy = req.userId;
+    session.reviewedAt = new Date();
+    await session.save();
 
     // ✅ Emit real-time socket event on admin approval
     const io = req.app.get('io');
