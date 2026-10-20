@@ -25,7 +25,10 @@ const searchSchema = new mongoose.Schema({
   expiresAt:    { type: Date, required: true },     // search timeout (and TTL garbage collection)
   pairingToken: { type: String, default: null },
   pairingAt:    { type: Date, default: null },
-  discoveryAt:  { type: Date, default: null }       // Smart Discovery invitations were sent (once per search)
+  discoveryAt:  { type: Date, default: null },      // Smart Discovery invitations were sent (once per search)
+  // Phase 2: last sign of life from a client that sends search heartbeats (qc_search_ping). null = an older
+  // app that never does; such searches are judged only by expiresAt, exactly as before.
+  livenessAt:   { type: Date, default: null }
 }, { versionKey: false, collection: 'quickconnectsearches' });
 
 searchSchema.index({ status: 1, startedAt: 1 });

@@ -38,6 +38,8 @@
 //   QUICK_CONNECT_INVITES_PER_SEARCH optional, most invitations one search sends (default 3, 1..10)
 //   QUICK_CONNECT_INVITE_COOLDOWN_MS optional, least time between two invitations to the same
 //                                   person (default 1800000 = 30 min, 5 min..24 h)
+//   QUICK_CONNECT_SEARCH_LIVENESS_MS optional, how long a search from an app that sends search heartbeats
+//                                   stays matchable after its last heartbeat (default 30000, 15 s..120 s)
 //
 // None of these is in server.js's REQUIRED_ENV_VARS on purpose: a missing value
 // must switch Quick Connect off, not stop the whole app from starting.
@@ -127,6 +129,8 @@ function boundedMs(name, def, min, max) {
 const matchFallbackMs = () => boundedMs('QUICK_CONNECT_MATCH_FALLBACK_MS', 20000, 5000, 120000);
 /** Phase 5: how long a search may stay open before it is cancelled (60–600 s). */
 const searchTimeoutMs = () => boundedMs('QUICK_CONNECT_SEARCH_TIMEOUT_MS', 120000, 60000, 600000);
+/** Phase 2: a heartbeat-sending search with no heartbeat for this long is treated as gone (15–120 s). */
+const searchLivenessMs = () => boundedMs('QUICK_CONNECT_SEARCH_LIVENESS_MS', 30000, 15000, 120000);
 /** Phase 5: lifecycle sweeper period (5–60 s). Time limits are enforced within one period. */
 const sweepIntervalMs = () => boundedMs('QUICK_CONNECT_SWEEP_INTERVAL_MS', 10000, 5000, 60000);
 /** Most open Quick Connect sessions at once (capacity slots). Default = the validated baseline. */
@@ -164,6 +168,7 @@ module.exports = {
   turnTtlSeconds,
   matchFallbackMs,
   searchTimeoutMs,
+  searchLivenessMs,
   sweepIntervalMs,
   skipExclusionMs,
   maxActiveCalls,

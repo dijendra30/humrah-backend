@@ -13,12 +13,16 @@
 // status keep working so nothing is stranded (the sweeper also ends open sessions).
 //
 // client → server (every event answers through its ack: { ok: true, ... } | { ok: false, code })
-//   qc_search_start   {}                          start searching (eligibility re-checked)
+//   qc_search_start   {}                          start searching (eligibility re-checked); a 'searching'
+//                                                 answer includes expiresInMs (time until it times out)
 //   qc_search_cancel  {}                          stop searching (also withdraws a proposal made in the
 //                                                 same moment that I have not accepted, and my invitations)
 //   qc_invite_accept  { inviteId }                accept a Smart Discovery invitation addressed to ME:
 //                                                 re-checked, then an ordinary proposal both must accept
-//   qc_status         {}                          my current state (for reconnects)
+//   qc_status         {}                          my current state (for reconnects; a proposal includes
+//                                                 expiresAt, peer and sharedInterests; a search, expiresInMs)
+//   qc_search_ping    {}                          search heartbeat from apps that started with { liveness: true };
+//                                                 answers like qc_status
 //   qc_match_accept   { sessionId }               PROPOSED: I agree
 //   qc_match_decline  { sessionId }               PROPOSED: I decline
 //   qc_call_connecting{ sessionId }               media setup started (optional)
@@ -73,10 +77,10 @@ const LIMITS = {
   qc_match_accept: [10, 60e3], qc_match_decline: [10, 60e3],
   qc_call_connecting: [10, 60e3], qc_call_connected: [10, 60e3], qc_heartbeat: [12, 60e3],
   qc_offer: [10, 60e3], qc_answer: [10, 60e3], qc_ice_candidate: [120, 60e3], qc_hangup: [10, 60e3],
-  qc_invite_accept: [6, 60e3]
+  qc_invite_accept: [6, 60e3], qc_search_ping: [12, 60e3]
 };
 // still allowed while switched off: they only end or inspect things
-const CLEANUP_EVENTS = new Set(['qc_search_cancel', 'qc_status', 'qc_match_decline', 'qc_hangup']);
+const CLEANUP_EVENTS = new Set(['qc_search_cancel', 'qc_status', 'qc_match_decline', 'qc_hangup', 'qc_search_ping']);
 
 // `${userId}|${sessionId}` of participants whose last socket dropped during a live call; their
 // next heartbeat tells the peer they are back. Lost on restart (only a notification is lost).
@@ -152,7 +156,11 @@ async function relay(socket, event, payload) {
 }
 
 const HANDLERS = {
-  qc_search_start: (s) => matching.startSearch(s.data.userId, { auth: { scope: s.data.scope } }),
+  qc_search_start: (s, p) => matching.startSearch(s.data.userId, { auth: { scope: s.data.scope }, liveness: p.liveness === true }),
+  qc_search_ping: async (s) => {
+    await matching.pingSearch(s.data.userId);
+    return { ok: true, enabled: config.isEnabled(), ...(await lifecycle.currentState(s.data.userId)) };
+  },
   qc_search_cancel: (s) => lifecycle.cancelSearchAndProposals(s.data.userId),
   qc_invite_accept: (s, p) => discovery.acceptInvite(s.data.userId, p && p.inviteId, { auth: { scope: s.data.scope } }),
   qc_status: async (s) => ({ ok: true, enabled: config.isEnabled(), ...(await lifecycle.currentState(s.data.userId)) }),

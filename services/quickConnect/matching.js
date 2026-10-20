@@ -116,6 +116,28 @@ async function drop(userId, token, reason) {
   if (r.deletedCount > 0) notify.toUser(userId, 'qc_search_ended', { reason });
 }
 
+/**
+ * Phase 2 — search liveness. Socket.IO notices a silently dead connection only after its ping timeout
+ * (server.js: pingTimeout 90 s + pingInterval 25 s), and Android 15+ silently cuts a backgrounded app's
+ * network. Until then the server kept such a "ghost" searcher in the pool, matched real people with it
+ * and sent the proposal into the void. Apps that start a search with { liveness: true } send
+ * qc_search_ping every ~10 s; a search whose last sign of life is older than QUICK_CONNECT_SEARCH_LIVENESS_MS
+ * is never picked or claimed, and the sweeper removes it (qc_search_ended { reason: 'connection' }).
+ * Searches from older apps (livenessAt null) are unaffected.
+ */
+function liveFilter(now = Date.now()) {
+  return { $or: [{ livenessAt: null }, { livenessAt: { $gt: new Date(now - config.searchLivenessMs()) } }] };
+}
+
+/** Heartbeat from the app while it shows "Searching". No-op when the user has no search. */
+async function pingSearch(userId, { now = Date.now() } = {}) {
+  const r = await QuickConnectSearch.updateOne(
+    { _id: userId, status: { $in: ['SEARCHING', 'PAIRING'] } },
+    { $set: { livenessAt: new Date(now) } }
+  );
+  return r.matchedCount > 0;
+}
+
 async function peerCard(userId) {
   const u = await User.findById(userId).select('firstName profilePhoto').lean();
   return { firstName: (u && u.firstName) || 'Someone', profilePhoto: (u && u.profilePhoto) || null };
@@ -144,7 +166,7 @@ async function announceProposal(session, shared) {
 async function pairUp(me, cand, now) {
   const token = crypto.randomBytes(12).toString('hex');
   const claim = id => QuickConnectSearch.findOneAndUpdate(
-    { _id: id, status: 'SEARCHING' },
+    { $and: [{ _id: id, status: 'SEARCHING' }, liveFilter(now)] },     // a ghost cannot be claimed
     { $set: { status: 'PAIRING', pairingToken: token, pairingAt: new Date(now) } },
     { new: true }
   ).lean();
@@ -205,7 +227,7 @@ async function pairUp(me, cand, now) {
 /** Tries to match `userId`'s open search now. Returns the PROPOSED session or null. */
 async function tryMatch(userId, { now = Date.now() } = {}) {
   if (!config.isEnabled()) return null;
-  const me = await QuickConnectSearch.findOne({ _id: userId, status: 'SEARCHING' }).lean();
+  const me = await QuickConnectSearch.findOne({ $and: [{ _id: userId, status: 'SEARCHING' }, liveFilter(now)] }).lean();
   if (!me) return null;
   const [mine, blockers, skipped] = await Promise.all([
     User.findById(userId).select('blockedUsers').lean(),
@@ -215,7 +237,7 @@ async function tryMatch(userId, { now = Date.now() } = {}) {
   const exclude = [me._id, ...((mine && mine.blockedUsers) || []), ...blockers.map(b => b._id), ...skipped];
   const broadened = new Date(me.broadenAt).getTime() <= now;
   const candidates = await QuickConnectSearch.aggregate([
-    { $match: { status: 'SEARCHING', _id: { $nin: exclude } } },
+    { $match: { $and: [{ status: 'SEARCHING', _id: { $nin: exclude } }, liveFilter(now)] } },
     { $addFields: { shared: { $size: { $setIntersection: ['$interests', me.interests] } } } },
     { $match: broadened ? {} : { $or: [{ shared: { $gt: 0 } }, { broadenAt: { $lte: new Date(now) } }] } },
     { $sort: { shared: -1, startedAt: 1 } },
@@ -231,12 +253,15 @@ async function tryMatch(userId, { now = Date.now() } = {}) {
 
 /**
  * Starts a search for the AUTHENTICATED user. Resolves
- *   { ok: true, state: 'searching' | 'proposed', alreadySearching?, sessionId? }
+ *   { ok: true, state: 'searching' | 'proposed', alreadySearching?, sessionId?, expiresInMs? }
  *   { ok: false, code }   (QUICK_CONNECT_DISABLED, an eligibility code, QUICK_CONNECT_CAPACITY_REACHED)
+ * expiresInMs (Phase 2, 'searching' only): how long until the search times out, so an app that reconnects
+ * after that moment shows the timeout instead of silently starting a new search.
  */
-async function startSearch(userId, { auth = null, now = Date.now() } = {}) {
+async function startSearch(userId, { auth = null, now = Date.now(), liveness = false } = {}) {
   if (!config.isEnabled()) return { ok: false, code: 'QUICK_CONNECT_DISABLED' };
-  if (await QuickConnectSearch.exists({ _id: userId })) return { ok: true, state: 'searching', alreadySearching: true };
+  const open = await QuickConnectSearch.findById(userId).select('expiresAt').lean();
+  if (open) return { ok: true, state: 'searching', alreadySearching: true, expiresInMs: remainingMs(open.expiresAt) };
   const e = await evaluateEligibility(userId, { auth, now });
   if (!e.eligible) return { ok: false, code: e.code };
   if (await capacity.isFull()) return { ok: false, code: 'QUICK_CONNECT_CAPACITY_REACHED' };
@@ -248,7 +273,8 @@ async function startSearch(userId, { auth = null, now = Date.now() } = {}) {
       interests: normalizeInterests(user && user.questionnaire),
       startedAt: new Date(now),
       broadenAt: new Date(now + config.matchFallbackMs()),
-      expiresAt: new Date(now + config.searchTimeoutMs())
+      expiresAt: new Date(now + config.searchTimeoutMs()),
+      livenessAt: liveness === true ? new Date(now) : null
     });
   } catch (err) {
     if (err && err.code === 11000) return { ok: true, state: 'searching', alreadySearching: true };
@@ -265,8 +291,12 @@ async function startSearch(userId, { auth = null, now = Date.now() } = {}) {
   }
   if (session) return { ok: true, state: 'proposed', sessionId: String(session._id) };
   const proposed = await QuickConnectSession.findOne({ participants: userId, status: 'PROPOSED' }).select('_id').lean();
-  return proposed ? { ok: true, state: 'proposed', sessionId: String(proposed._id) } : { ok: true, state: 'searching' };
+  return proposed ? { ok: true, state: 'proposed', sessionId: String(proposed._id) }
+    : { ok: true, state: 'searching', expiresInMs: remainingMs(now + config.searchTimeoutMs()) };
 }
+
+/** Milliseconds from now until [at] (a Date or ms), never negative. */
+function remainingMs(at) { return Math.max(0, new Date(at).getTime() - Date.now()); }
 
 /** Cancels the user's own search (no-op when none). Works while switched off. */
 async function cancelSearch(userId) {
@@ -279,7 +309,14 @@ async function cancelSearch(userId) {
  * crash, and retries open searches (this is where broadened matches happen).
  */
 async function matchTick({ now = Date.now(), limit = 50 } = {}) {
-  const counters = { searchesExpired: 0, pairingFreed: 0, matched: 0 };
+  const counters = { searchesExpired: 0, searchesStale: 0, pairingFreed: 0, matched: 0 };
+  // Heartbeat-sending searches that went quiet: the phone's connection is gone even if Socket.IO hasn't noticed.
+  const staleCut = new Date(now - config.searchLivenessMs());
+  const stale = await QuickConnectSearch.find({ status: 'SEARCHING', livenessAt: { $ne: null, $lte: staleCut } }).select('_id').limit(200).lean();
+  for (const s of stale) {
+    const r = await QuickConnectSearch.deleteOne({ _id: s._id, status: 'SEARCHING', livenessAt: { $ne: null, $lte: staleCut } });
+    if (r.deletedCount > 0) { counters.searchesStale++; notify.toUser(s._id, 'qc_search_ended', { reason: 'connection' }); }
+  }
   const expired = await QuickConnectSearch.find({ expiresAt: { $lte: new Date(now) }, status: 'SEARCHING' }).select('_id').limit(200).lean();
   for (const s of expired) {
     const r = await QuickConnectSearch.deleteOne({ _id: s._id, status: 'SEARCHING', expiresAt: { $lte: new Date(now) } });
@@ -296,6 +333,28 @@ async function matchTick({ now = Date.now(), limit = 50 } = {}) {
   return counters;
 }
 
+/**
+ * Phase 2: what the match card needs for a PROPOSED session, for a phone that missed qc_match_proposed
+ * (reconnect). The same fields the event carries: expiry, the other person's first name and photo, shared
+ * interest labels (recomputed from both questionnaires, the same rule as at matching).
+ */
+async function proposalView(session, userId) {
+  const peerId = session.participants.map(String).find(p => p !== String(userId));
+  const select = 'questionnaire.interests questionnaire.hobbies questionnaire.conversationInterests questionnaire.humrahRoomInterests';
+  const [peer, mine, theirs] = await Promise.all([
+    peerCard(peerId),
+    User.findById(userId).select(select).lean(),
+    User.findById(peerId).select(select).lean()
+  ]);
+  const theirSet = new Set(normalizeInterests(theirs && theirs.questionnaire));
+  const shared = normalizeInterests(mine && mine.questionnaire).filter(i => theirSet.has(i)).slice(0, MAX_SHARED_SHOWN);
+  return {
+    expiresAt: new Date(new Date(session.proposedAt).getTime() + QuickConnectSession.PROPOSAL_TIMEOUT_MS).toISOString(),
+    peer,
+    sharedInterests: shared
+  };
+}
+
 /** Removes every open search (kill switch). Each user is told once. */
 async function clearAllSearches(reason = 'unavailable') {
   const rows = await QuickConnectSearch.find({}).select('_id').limit(1000).lean();
@@ -308,13 +367,13 @@ async function clearAllSearches(reason = 'unavailable') {
 }
 
 async function searchOf(userId, now = Date.now()) {
-  const s = await QuickConnectSearch.findById(userId).select('startedAt broadenAt').lean();
+  const s = await QuickConnectSearch.findById(userId).select('startedAt broadenAt expiresAt').lean();
   if (!s) return null;
-  return { startedAt: new Date(s.startedAt).toISOString(), broadened: new Date(s.broadenAt).getTime() <= now };
+  return { startedAt: new Date(s.startedAt).toISOString(), broadened: new Date(s.broadenAt).getTime() <= now, expiresInMs: remainingMs(s.expiresAt) };
 }
 
 module.exports = {
   normalizeInterests, normalizeLabel, startSearch, cancelSearch, tryMatch, matchTick, clearAllSearches, searchOf,
-  excludeSkippedPair, pairExcluded,
+  excludeSkippedPair, pairExcluded, pingSearch, proposalView,
   _internal: { pairUp, excludedPartners }
 };

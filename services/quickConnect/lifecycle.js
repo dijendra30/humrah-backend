@@ -224,7 +224,9 @@ async function currentState(userId, { now = Date.now() } = {}) {
       state: s.status.toLowerCase(), sessionId: String(s._id),
       role: idx(s, userId) === 0 ? 'offerer' : 'answerer',
       endsAt: S.MEDIA_STATUSES.includes(s.status) ? new Date(s.endsAt).toISOString() : null,
-      youAccepted: (s.acceptedBy || []).map(String).includes(String(userId))
+      youAccepted: (s.acceptedBy || []).map(String).includes(String(userId)),
+      // Phase 2: a reconnecting phone that missed qc_match_proposed can still show the match card.
+      ...(s.status === 'PROPOSED' ? await matching.proposalView(s, userId) : {})
     };
   }
   const search = await matching.searchOf(userId, now);
