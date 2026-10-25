@@ -17,6 +17,13 @@ function toLocationHash(lat, lng) {
   return `${(Math.round(lat * 100) / 100).toFixed(2)}_${(Math.round(lng * 100) / 100).toFixed(2)}`;
 }
 
+// ── Privacy: what the external Overpass service is told ───────────────────────
+// The CENTRE of the cache cell (0.01°, about 1.1 km), never the user's exact position. The result is cached per
+// cell and shared by everyone in it anyway, so nothing is lost; the 2.5 km radius still covers the whole cell.
+function overpassPoint(lat, lng) {
+  return [Math.round(Number(lat) * 100) / 100, Math.round(Number(lng) * 100) / 100];
+}
+
 // ── Category classifier ───────────────────────────────────────────────────────
 function classifyElement(tags) {
   if (!tags) return null;
@@ -179,7 +186,7 @@ async function getAreaNearby(lat, lng) {
     // Stale cache — return old data NOW, refresh in background
     setImmediate(async () => {
       try {
-        const fresh = await fetchFromOverpass(lat, lng);
+        const fresh = await fetchFromOverpass(...overpassPoint(lat, lng));
         await writeAreaCache(locationHash, fresh);
       } catch (e) {
         console.error('❌ [NearbyCache] bg refresh failed:', e.message);
@@ -189,7 +196,7 @@ async function getAreaNearby(lat, lng) {
   }
 
   // No cache — must fetch now (first user in this area)
-  const fresh = await fetchFromOverpass(lat, lng);
+  const fresh = await fetchFromOverpass(...overpassPoint(lat, lng));
   await writeAreaCache(locationHash, fresh);
   const moods = toMoodsShape(fresh);
   return { locationHash, moods, globalPlaces: fresh?.globalPlaces ?? [], fromCache: false };
@@ -206,4 +213,4 @@ function toLegacyShape(moods, globalPlaces) {
   };
 }
 
-module.exports = { toLocationHash, getAreaNearby, toLegacyShape, CACHE_TTL_MS };
+module.exports = { toLocationHash, overpassPoint, getAreaNearby, toLegacyShape, CACHE_TTL_MS };

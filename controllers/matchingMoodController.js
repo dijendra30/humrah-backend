@@ -59,7 +59,7 @@ exports.appOpen = async (req, res) => {
         if (age >= FIFTEEN_MIN_MS || latDiff > 0.001 || lngDiff > 0.001) {
           const result = await updateUserLiveLocation(req.userId, lat, lng);
           if (result.success) {
-            console.log(`[appOpen] liveLocation updated for ${req.userId}: (${lat}, ${lng}) -> ${result.liveLocation?.displayName}`);
+            console.log(`[appOpen] liveLocation updated for ${req.userId}`);   // never log coordinates or the place name
           } else {
             console.warn(`[appOpen] liveLocation update failed for ${req.userId} — previous location preserved, will retry next app open.`);
           }

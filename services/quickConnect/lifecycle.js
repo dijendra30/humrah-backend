@@ -61,6 +61,18 @@ const idx = (session, userId) => session.participants.map(String).indexOf(String
 const peerOf = (session, userId) => session.participants.map(String).find(p => p !== String(userId));
 const fail = code => ({ ok: false, code });
 
+/** How long after a call ends a reconnecting phone is still told how it ended (qc_status lastEnded). */
+const RECENT_END_MS = 2 * 60 * 1000;
+/**
+ * How a session ended, as `userId` should see it: the reason, whether the OTHER person ended it, the call length.
+ * Sent with a SESSION_ENDED heartbeat answer and as qc_status lastEnded, so a phone that missed qc_session_ended
+ * (it was reconnecting) still shows "They ended the call." instead of "The connection was lost."
+ */
+function endedView(s, userId) {
+  const duration = s.connectedAt && s.endedAt ? Math.max(0, Math.floor((new Date(s.endedAt) - new Date(s.connectedAt)) / 1000)) : 0;
+  return { sessionId: String(s._id), reason: s.endReason || 'disconnect_timeout', byPeer: !!s.endedBy && String(s.endedBy) !== String(userId), durationSeconds: duration };
+}
+
 /** Ends a session for `reason`, releases holds, and tells both participants. */
 async function finishSession(sessionId, reason, { endedBy = null, onlyIf = null } = {}) {
   const r = await sessions.endSession(sessionId, reason, { endedBy, onlyIf });
@@ -162,9 +174,10 @@ async function markConnected(userId, sessionId, { now = Date.now() } = {}) {
 /** Records the participant's heartbeat (server clock). Ended sessions answer SESSION_ENDED. */
 async function heartbeat(userId, sessionId, { now = Date.now() } = {}) {
   if (!isId(sessionId)) return fail('INVALID_REQUEST');
-  const s = await S.findOne({ _id: sessionId, participants: userId }).select('participants status endsAt').lean();
+  const s = await S.findOne({ _id: sessionId, participants: userId }).select('participants status endsAt endReason endedBy connectedAt endedAt').lean();
   if (!s) return fail('SESSION_NOT_FOUND');
-  if (!S.MEDIA_STATUSES.includes(s.status)) return fail(s.status === 'PROPOSED' ? 'INVALID_STATE' : 'SESSION_ENDED');
+  if (s.status === 'PROPOSED') return fail('INVALID_STATE');
+  if (!S.MEDIA_STATUSES.includes(s.status)) return { ...fail('SESSION_ENDED'), ended: endedView(s, userId) };
   const i = idx(s, userId);
   const r = await S.updateOne({ _id: s._id, status: { $in: S.MEDIA_STATUSES } }, { $set: { [`lastSeenAt.${i}`]: new Date(now) } });
   if (r.matchedCount === 0) return fail('SESSION_ENDED');
@@ -230,7 +243,11 @@ async function currentState(userId, { now = Date.now() } = {}) {
     };
   }
   const search = await matching.searchOf(userId, now);
-  return search ? { state: 'searching', ...search } : { state: 'idle' };
+  if (search) return { state: 'searching', ...search };
+  // A call that ended moments ago (its qc_session_ended may have been missed while reconnecting).
+  const recent = await S.findOne({ participants: userId, status: { $in: S.TERMINAL_STATUSES }, endedAt: { $gte: new Date(now - RECENT_END_MS) } })
+    .sort({ endedAt: -1 }).select('endReason endedBy connectedAt endedAt').lean();
+  return recent ? { state: 'idle', lastEnded: endedView(recent, userId) } : { state: 'idle' };
 }
 
 // ── sweeper ───────────────────────────────────────────────────────────────────

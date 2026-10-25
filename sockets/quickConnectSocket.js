@@ -171,9 +171,17 @@ const HANDLERS = {
   qc_heartbeat: async (s, p) => {
     const r = await lifecycle.heartbeat(s.data.userId, p && p.sessionId);
     const key = `${s.data.userId}|${p && p.sessionId}`;
-    if (r.ok && awaitingReturn.delete(key)) {                    // back after a dropped connection
-      const sess = await QuickConnectSession.findById(p.sessionId).select('participants').lean();
-      if (sess) notify.toUser(sess.participants.map(String).find(x => x !== s.data.userId), 'qc_peer_status', { sessionId: p.sessionId, state: 'online' });
+    const back = r.ok && awaitingReturn.delete(key);             // back after a dropped connection
+    // Phase 2: or the first heartbeat on a connection opened AFTER both accepted: this phone (re)connected
+    // during the call or its setup, so it may have missed signaling such as the offer (events are not
+    // buffered across reconnects, and a silently dropped old socket can still look connected). The peer's
+    // app sends a fresh offer if its media is not connected. Normal calls never trigger this.
+    const firstOnSocket = r.ok && !(s.data.heartbeatSessions ||= new Set()).has(p.sessionId);
+    if (firstOnSocket) s.data.heartbeatSessions.add(p.sessionId);
+    if (back || firstOnSocket) {
+      const sess = await QuickConnectSession.findById(p.sessionId).select('participants acceptedAt').lean();
+      const lateSocket = firstOnSocket && sess && sess.acceptedAt && s.handshake.issued > new Date(sess.acceptedAt).getTime();
+      if (sess && (back || lateSocket)) notify.toUser(sess.participants.map(String).find(x => x !== s.data.userId), 'qc_peer_status', { sessionId: p.sessionId, state: 'online' });
     }
     return r;
   },
