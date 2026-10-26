@@ -1236,7 +1236,7 @@ router.get('/evolution', assistantLimiter, async (req, res) => {
         tracking,
         recentEdits,
         milestones,
-        note: 'Progress is tracked from the first time you opened this tab. Humrah does not have a record of earlier changes.',
+        note: 'Progress is tracked from the first time you opened the Profile Assistant. Humrah does not have a record of earlier changes.',
       },
     });
   } catch (err) {
