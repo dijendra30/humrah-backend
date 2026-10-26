@@ -5,18 +5,22 @@
 //
 // Original endpoints (preserved):
 //   POST /consent   → store profileBotConsent = true
-//   POST /analyze   → logic engine (button tap)
-//   POST /chat      → keyword intent → logic, else Groq fallback
-//   POST /ai-fix    → Groq generates + saves safe field values
+//   POST /analyze   → deterministic answer for a known intent
+//   POST /chat      → conversational turn: facts from the profile, AI phrasing,
+//                     follow-up history; deterministic answer when AI is down
+//   POST /ai-fix    → RETIRED (410): it saved AI-invented profile data unreviewed
 //
 // New endpoints:
-//   GET  /health           → 4-dimension profile health scores
-//   GET  /nudges           → detected gaps + soft suggestions
-//   POST /bio              → AI bio rewrite (raw text + tone) + cache
+//   GET  /health           → completeness, bio, interests, verification, missing items
+//   GET  /nudges           → personalised suggestions (title, reason, action, priority)
+//   POST /bio              → AI bio draft from the user's notes + tone (never saved here)
 //   GET  /trust            → user's own trust signals
 //   GET  /match/:userId    → overlap explanation for a match
 //   GET  /starters/:userId → conversation starters for a user pair
-//   GET  /evolution        → behavioral pattern suggestions
+//   GET  /evolution        → tracked progress, recent edits, real milestones
+//
+// Facts come from services/profileAssistant/assistantFacts.js; the only model
+// calls are in services/profileAssistant/assistantAi.js.
 //
 // SECURITY — fields NEVER sent anywhere:
 //   email, password, googleId, facebookId, fcmTokens,
@@ -31,14 +35,19 @@
 
 const express  = require('express');
 const router   = express.Router();
-const axios    = require('axios');
 const crypto   = require('crypto');
 const mongoose = require('mongoose');
 const { auth } = require('../middleware/auth');
 const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const User     = require('../models/User');
+const Booking  = require('../models/Booking');
+const VerificationSession = require('../models/VerificationSession');
+const ProfileEditLog = require('../models/ProfileEditLog');
 const { calculateProfileCompletion } = require('../utils/profileCompletion');
 const { moderateQuestionnaireSync } = require('../middleware/moderation');
+const assistantFacts = require('../services/profileAssistant/assistantFacts');
+const ai       = require('../services/profileAssistant/assistantAi');
+const { getOrCreateBaseline } = require('../services/profileAssistant/progressStore');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // BIO CACHE  — inline schema, TTL 7 days
@@ -79,12 +88,16 @@ async function storeBioInCache(hash, bio, userId) {
 // RATE LIMITER
 // ─────────────────────────────────────────────────────────────────────────────
 
+// BUGFIX: `keyGenerator: ipKeyGenerator` handed the request object to a helper
+// that expects an IP string, so every request got a key of its own and the limit
+// never applied. Every route here runs after `authenticate`, so key by account;
+// the IP (via the helper, as intended) is only a fallback.
 const assistantLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 20,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: ipKeyGenerator,
+  keyGenerator: (req) => (req.userId ? `user:${req.userId}` : ipKeyGenerator(req.ip || '')),
   handler: (_req, res) => res.status(429).json({
     success: false, code: 'RATE_LIMITED',
     message: 'Slow down — wait a moment and try again.',
@@ -100,9 +113,11 @@ const assistantLimiter = rateLimit({
 // so the two AI paths in the product ran on different models. Env-overridable so
 // a model change never again needs a code deploy.
 const GROQ_MODEL       = process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
+// Daily AI calls per user (chat replies + bio drafts). 5 made a real conversation
+// impossible — a few follow-up questions used the whole day. Still env-overridable.
 const GROQ_DAILY_LIMIT = Number(process.env.GROQ_DAILY_LIMIT) > 0
   ? Number(process.env.GROQ_DAILY_LIMIT)
-  : 5;
+  : 30;
 
 const getTodayStr = () => new Date().toISOString().slice(0, 10);
 
@@ -155,69 +170,97 @@ function overGroqLimit(user) {
   return groqCallsToday(user) >= GROQ_DAILY_LIMIT;
 }
 
+/**
+ * Gives back the credit of a call that produced nothing (timeout, provider error,
+ * unusable output), so a provider outage does not use up the user's day. Only
+ * today's counter, and never below zero.
+ */
+async function refundGroq(user) {
+  const today = getTodayStr();
+  try {
+    const updated = await User.findOneAndUpdate(
+      { _id: user._id, 'groqUsage.date': today, 'groqUsage.count': { $gt: 0 } },
+      { $inc: { 'groqUsage.count': -1 } },
+      { new: true, projection: { groqUsage: 1 } }
+    );
+    if (updated) user.groqUsage = updated.groqUsage;
+  } catch (err) {
+    // Not refunding only costs the user one credit; the request itself is already answered.
+    console.error('[Assistant] groq usage refund failed:', err.message);
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
-// HUMRAH KNOWLEDGE BASE
+// REQUEST CONTEXT — the facts every assistant answer is built from
 // ─────────────────────────────────────────────────────────────────────────────
 
-const HUMRAH_KNOWLEDGE_BASE = `
-You are the Profile Assistant inside Humrah — an Indian social companion app for meeting
-people for safe, public activities (coffee, movies, gaming, walks, food spots, etc.).
-You know EVERYTHING about the app. Answer questions about profile, payments, bookings,
-verification, settings, bugs, or safety in 3-5 lines. Be friendly, clear, and actionable.
-Never make up features that don't exist. If unsure, suggest contacting support.
+const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000;
 
-PROFILE & COMPLETION:
-Key fields: profile photo, bio (max 150 chars), age group, city/state/area,
-hangout preferences, available times, meetup preference (1-on-1 or group),
-vibe words, comfort activities, relax activities, music preference, budget comfort,
-comfort zones, hangout frequency, goodMeetupMeaning, vibeQuote, interests, hobbies,
-gender, language, personality type, mood, travel preference, pet preference,
-fitness level, profession, education.
-Completion score is based on 6 key fields: photo, bio, availability,
-preferences (2+), age group, city.
-Edit: Profile > tap your photo/name > edit any field.
-Edit rate limits: profile photo 1/day, bio 5/day, age group 1/month, state/area 2/month.
+/** Host booking counts for this user only. */
+async function loadBookingStats(userId) {
+  const since = mongoose.Types.ObjectId.createFromTime(Math.floor((Date.now() - NINETY_DAYS_MS) / 1000));
+  const [byStatus, last90Days] = await Promise.all([
+    Booking.aggregate([
+      { $match: { companionId: new mongoose.Types.ObjectId(String(userId)) } },
+      { $group: { _id: '$status', n: { $sum: 1 } } },
+    ]),
+    Booking.countDocuments({ companionId: userId, _id: { $gte: since } }),
+  ]);
+  const stats = { pending: 0, confirmed: 0, completed: 0, cancelled: 0, last90Days };
+  for (const row of byStatus) if (row._id in stats) stats[row._id] = row.n;
+  return stats;
+}
 
-ACTIVITY HOST / COMPANION MODE:
-userType: MEMBER or COMPANION.
-To become a host: complete questionnaire > Activity Host Mode > "Yes, I'm interested".
-Hosts set: activities offered (openFor), availability slots, cost-sharing (price), tagline (30 chars).
-Host toggle: Profile > host-status toggle. OFF = hidden from discovery.
+/**
+ * Builds the deterministic facts for `user`. Booking counts are loaded only for
+ * hosts. A failure to read them is reported as "not available" rather than
+ * guessed — the answer then says Humrah cannot see the numbers.
+ */
+async function loadFacts(user) {
+  const latestVerificationSession = await VerificationSession.findOne({ userId: user._id })
+    .sort({ createdAt: -1 })
+    .select('status rejectionReason createdAt reviewedAt')
+    .lean();
+  let bookingStats = null;
+  const q = user.questionnaire || {};
+  if (user.userType === 'COMPANION' || q.becomeCompanion === "Yes, I'm interested") {
+    try {
+      bookingStats = await loadBookingStats(user._id);
+    } catch (err) {
+      console.error('[Assistant] booking stats unavailable:', err.message);
+    }
+  }
+  const f = assistantFacts.buildFacts(user, { latestVerificationSession, bookingStats });
+  const suggestions = assistantFacts.buildSuggestions(f);
+  return { facts: f, suggestions };
+}
 
-PAYMENTS & EARNINGS:
-Only COMPANION/Activity Hosts earn. Members do not earn.
-UPI setup: Profile > Setup UPI > enter UPI ID (e.g. name@ybl, 9876543210@paytm).
-Valid handles: @paytm @ybl @oksbi @okhdfcbank @okaxis.
-Payout schedule: earnings >= 500 every Monday; < 500 on 1st of month.
+async function loadConsentedUser(req, res) {
+  const user = await User.findById(req.userId);
+  if (!user) { res.status(404).json({ success: false, message: 'User not found.' }); return null; }
+  if (!user.profileBotConsent) {
+    res.status(403).json({ success: false, code: 'CONSENT_REQUIRED', message: 'We need your permission to access your profile data.' });
+    return null;
+  }
+  return user;
+}
 
-VERIFICATION:
-Statuses: not_submitted > pending > approved (or rejected or manual_review).
-Face++ match: >=70% APPROVED, 60-70% MANUAL REVIEW, <60% REJECTED.
-Max 3 attempts per hour.
+// How each AI failure kind is answered. Messages are for people, not logs.
+const AI_FAILURE = {
+  not_configured: { status: 503, code: 'AI_NOT_CONFIGURED', retryable: false,
+    message: "The AI assistant isn't available right now." },
+  timeout:        { status: 504, code: 'AI_TIMEOUT', retryable: true,
+    message: 'That took too long. Please try again.' },
+  rate_limited:   { status: 503, code: 'AI_BUSY', retryable: true,
+    message: 'The assistant is busy right now. Please try again in a minute.' },
+  provider_error: { status: 503, code: 'AI_UNAVAILABLE', retryable: true,
+    message: "I couldn't reach the assistant just now. Please try again." },
+  bad_output:     { status: 502, code: 'AI_BAD_OUTPUT', retryable: true,
+    message: "I couldn't put together a good answer that time. Please try again." },
+};
 
-BOOKINGS & REVIEWS:
-Members send activity requests to hosts. Hosts accept/reject.
-Reviews: 1-5 stars within 7 days. One per booking, cannot be edited. Can HIDE not delete.
+function aiFailure(kind) { return AI_FAILURE[kind] || AI_FAILURE.provider_error; }
 
-GAMING SESSIONS:
-Create/join gaming sessions. Chat open 3h after start. 2h cooldown between creates.
-
-MOVIE SESSIONS:
-Create session: pick trending movie (TMDB) + nearby theatre (Google Places).
-
-FOOD POSTS:
-Photo + caption (120 chars) + place + price. Expire after 48h. Feed within 15km.
-
-SAFETY:
-3 strikes = suspension. Report: flag icon on profile. Block: dots menu > Block.
-Always meet in PUBLIC places.
-
-SETTINGS:
-Change email: Settings > Account > Change Email (OTP required).
-Change password: min 8 chars, letter+number+special char.
-Delete account: Settings > scroll bottom > Delete Account (permanent).
-`;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SAFE PROFILE SUMMARY
@@ -279,7 +322,9 @@ function buildSafeProfileSummary(user) {
   const totalEarnings    = (user.paymentInfo && user.paymentInfo.totalEarnings)    || 0;
   const completedPayouts = (user.paymentInfo && user.paymentInfo.completedPayouts) || 0;
 
-  const isVerified           = user.verified === true;
+  // Same source of truth as profile completion and discovery (photo verification
+  // approved), not the separate `verified` flag.
+  const isVerified           = user.photoVerificationStatus === 'approved';
   const verificationStatus   = user.photoVerificationStatus  || 'not_submitted';
   const verificationType     = user.verificationType         || null;
   const verificationAttempts = user.verificationAttempts     || 0;
@@ -405,66 +450,6 @@ function scanBioSafety(bio) {
     if (p.test(bio)) return { safe: false };
   }
   return { safe: true };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// SMART NUDGES — rule-based, no AI
-// ─────────────────────────────────────────────────────────────────────────────
-
-function buildNudges(s) {
-  const nudges = [];
-
-  if (!s.hasProfilePhoto) {
-    nudges.push({ level: 'critical', field: 'profilePhoto',
-      text: 'No profile photo — the single most important field.',
-      action: 'Add a clear, well-lit photo of your face.' });
-  }
-  if (s.bio.length === 0) {
-    nudges.push({ level: 'critical', field: 'bio',
-      text: 'No bio — people have no idea who they would be meeting.',
-      action: 'Even 1-2 sentences makes a real difference.' });
-  } else if (s.bio.length < 30) {
-    nudges.push({ level: 'warn', field: 'bio',
-      text: `Bio is very short (${s.bio.length} chars). Hard to start a conversation.`,
-      action: 'Aim for at least 50 characters.' });
-  }
-  if (!s.city) {
-    nudges.push({ level: 'critical', field: 'city',
-      text: 'City not set — people nearby cannot find you.',
-      action: 'Set your city in the questionnaire.' });
-  }
-  if (s.availability.length === 0) {
-    nudges.push({ level: 'warn', field: 'availability',
-      text: 'Availability not set — people cannot tell when you are free to meet.',
-      action: 'Even marking "weekends only" helps.' });
-  }
-  if (s.comfortZones.length === 0) {
-    nudges.push({ level: 'warn', field: 'comfortZones',
-      text: 'No comfort zones listed — profiles with them feel safer to approach.',
-      action: 'Select at least one location type you are comfortable with.' });
-  }
-  if (s.preferences.length < 2) {
-    nudges.push({ level: 'info', field: 'preferences',
-      text: 'Few interests listed — more helps the matching system work for you.',
-      action: 'Add at least 2 interests or hangout preferences.' });
-  }
-  if (s.vibeWords.length === 0) {
-    nudges.push({ level: 'info', field: 'vibeWords',
-      text: 'No vibe words set — they help people understand your social energy.',
-      action: 'Add 2-3 words that describe how you like to socialise.' });
-  }
-  if (!s.isVerified) {
-    nudges.push({ level: 'info', field: 'verification',
-      text: 'Unverified — verified profiles build significantly more trust.',
-      action: 'Complete your video verification.' });
-  }
-  if (s.bio.length > 0 && !scanBioSafety(s.bio).safe) {
-    nudges.push({ level: 'critical', field: 'bioSafety',
-      text: 'Bio contains disallowed content (phone number, link, or unsafe wording).',
-      action: 'Remove it to avoid moderation action.' });
-  }
-
-  return nudges;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -677,29 +662,34 @@ const HOST_TIP = {
 // INTENT MATCHER
 // ─────────────────────────────────────────────────────────────────────────────
 
+// BUGFIX: every pattern is wrapped in \b…\b, so word stems like "verif", "complet"
+// and "improv" never matched "verified", "Complete" or "improve" — a typed "How do
+// I get verified?" fell through to the generic reply. Stems now take `\w*`.
 function matchIntent(msg) {
   const l = msg.toLowerCase().trim();
-  if (/^(hi|hello|hey|hii|helo|sup|what's up|whats up|namaste|yo)\b/.test(l)) return 'greeting';
-  if (/\b(help|what can you do|what do you do|options|menu|assist|support)\b/.test(l) && l.length < 40) return 'help_menu';
-  if (/\b(payment|upi|earn|payout|money|wallet|rupee|not receiv|not paid|setup upi|settle|withdraw|pending amount|bank|salary|income from humrah|how.*earn|earning|paid)\b/.test(l)) return 'payment_help';
-  if (/\b(verif|badge|id proof|face|video verif|selfie|stuck.*verif|verif.*stuck|reject.*verif|verif.*reject|manual review|pending.*verif|attempt|trusted badge|blue tick|verify myself)\b/.test(l)) return 'verification_help';
+  if (/\b(payment|upi|earn|payout|money|wallet|rupee|not receiv\w*|not paid|setup upi|settle|withdraw|pending amount|bank|salary|income from humrah|how.*earn|earning|paid)\b/.test(l)) return 'payment_help';
+  if (/\b(verif\w*|badge|id proof|face|video verif|selfie|stuck.*verif|verif.*stuck|reject.*verif|verif.*reject|manual review|pending.*verif|attempt|trusted badge|blue tick|verify myself)\b/.test(l)) return 'verification_help';
   if (/\b(host mode|become host|activ host|companion mode|host toggle|turn.*on.*host|host.*off|hosting|host.*profile|how.*become.*companion|companion.*how|start earning)\b/.test(l)) return 'host_help';
   if (/\b(booking|bookings|not getting|no booking|why.{0,25}book|more booking|get booking|request|activity request|no request|no one book)\b/.test(l)) return 'booking_help';
   if (/\b(bio|write.*bio|better bio|bio.*help|help.*bio|about me|improve.*bio|bio.*tip|what.*write.*bio)\b/.test(l)) return 'bio_help';
   if (/\b(first|priority|most important|what.*improve|where.*start|start with|top.*issue|main.*issue|biggest.*issue)\b/.test(l)) return 'first_improve';
   if (/\b(rating|review|star|rated|feedback|hide review|report review|low rating|bad review|remove review)\b/.test(l)) return 'review_help';
   if (/\b(edit.*limit|rate limit|can.{0,10}edit|edit.*block|photo.*limit|bio.*limit|too many edit|locked|can.{0,10}change photo|how many time.*edit)\b/.test(l)) return 'edit_limit_help';
-  if (/\b(complet|missing|fill|incomplete|finish|setup|set up|percent|score|how.*complete|profile.*done|done.*profile)\b/.test(l)) return 'complete_profile';
-  if (/\b(improv|better|tips|help.*profile|profile.*help|enhance|update.*profile|suggestion|how.*look good|look better)\b/.test(l)) return 'improve_profile';
+  if (/\b(complet\w*|missing|fill|incomplete|finish|setup|set up|percent|score|how.*complete|profile.*done|done.*profile)\b/.test(l)) return 'complete_profile';
+  if (/\b(improv\w*|better|tips|help.*profile|profile.*help|enhance|update.*profile|suggestion|how.*look good|look better)\b/.test(l)) return 'improve_profile';
   if (/\b(not visible|not showing|hidden|discovery|not appear|search|show.*profile|profile.*not.*show|nobody.*find|can.{0,10}find me)\b/.test(l)) return 'visibility_help';
   if (/\b(password|change.*email|email.*change|notif|notification|setting|account setting|change.*pass|delete account|account.*delete)\b/.test(l)) return 'settings_help';
   if (/\b(bug|crash|broken|not working|error|issue|problem|report bug|app.*crash|glitch|freezing|slow)\b/.test(l)) return 'bug_help';
   if (/\b(block|report.*user|harass|unsafe|safety|suspend|ban|flag|inappropriate|report.*someone|feel unsafe|threatening)\b/.test(l)) return 'safety_help';
-  if (/\b(suspend|banned|suspended|moderat|strike|warn|warning|account.*restrict|restrict.*account|flagged)\b/.test(l)) return 'moderation_help';
+  if (/\b(suspend|banned|suspended|moderat\w*|strike|warn|warning|account.*restrict|restrict.*account|flagged)\b/.test(l)) return 'moderation_help';
   if (/\b(gaming|game session|game.*room|play.*game|join.*game|create.*session|gaming.*humrah)\b/.test(l)) return 'gaming_help';
   if (/\b(movie.*session|watch.*together|movie.*humrah|movie.*room|join.*movie)\b/.test(l)) return 'movie_help';
   if (/\b(food post|food.*share|food.*photo|food.*discover|food.*humrah|post.*food)\b/.test(l)) return 'food_help';
   if (/\b(delete.*account|remove.*account|deactivate|close.*account)\b/.test(l)) return 'delete_account_help';
+  // Generic openers last, so "help me write a better bio" or "hi, why no bookings?"
+  // reach the specific answer instead of the menu.
+  if (/^(hi|hello|hey|hii|helo|sup|what's up|whats up|namaste|yo)\b/.test(l)) return 'greeting';
+  if (/\b(help|what can you do|what do you do|options|menu|assist|support)\b/.test(l) && l.length < 40) return 'help_menu';
   return null;
 }
 
@@ -832,220 +822,6 @@ function runLogicEngine(intent, s) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GROQ HELPERS
-// ─────────────────────────────────────────────────────────────────────────────
-
-async function polishBullets(bullets) {
-  const key = process.env.GROQ_API_KEY;
-  if (!key || bullets.length === 0) return bullets;
-  const numbered = bullets.map((b, i) => `${i + 1}. ${b}`).join('\n');
-  try {
-    const res = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
-      model: GROQ_MODEL,
-      messages: [
-        { role: 'system', content: 'Rewrite a numbered list of profile tips for a social companion app. Keep each tip warm, short, and actionable. One sentence max. Return ONLY the same numbered list.' },
-        { role: 'user', content: `Rewrite:\n${numbered}` },
-      ],
-      max_tokens: 1200, temperature: 0.4,
-    }, { headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, timeout: 15000 });
-    const raw = res.data?.choices?.[0]?.message?.content?.trim() || '';
-    if (!raw) return bullets;
-    const lines = raw.split('\n').map(l => l.replace(/^\d+\.\s*/, '').trim()).filter(Boolean);
-    if (lines.length !== bullets.length) return bullets;
-    return lines.map((l, i) => (l.length > 0 && l.length < 250 ? l : bullets[i]));
-  } catch { return bullets; }
-}
-
-async function groqFallback(userMessage, summary) {
-  const key = process.env.GROQ_API_KEY;
-  if (!key) return null;
-  const filteredData = [
-    `Profile photo: ${summary.hasProfilePhoto ? 'yes' : 'no'}`,
-    `Bio length: ${summary.bio.length} characters`,
-    `Interests/preferences count: ${summary.preferences.length}`,
-    `Availability slots: ${summary.availability.length}`,
-    `Completion score: ${summary.completionScore}%`,
-    `Missing fields: ${summary.missingFields.join(', ') || 'none'}`,
-    `User type: ${summary.userType}`,
-    `Is Activity Host: ${summary.isHost}`,
-    `Host mode active: ${summary.hostActive}`,
-    `UPI set up: ${summary.hasUpi} (status: ${summary.upiStatus})`,
-    `Verified: ${summary.isVerified} (status: ${summary.verificationStatus})`,
-    `Rating: ${summary.averageRating} from ${summary.totalRatings} reviews`,
-    `Account status: ${summary.accountStatus}`,
-    `Moderation strikes: ${summary.strikeCount}`,
-  ].join('\n');
-  try {
-    const res = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
-      model: GROQ_MODEL,
-      messages: [
-        { role: 'system', content: HUMRAH_KNOWLEDGE_BASE },
-        { role: 'user', content: `User profile (anonymised):\n${filteredData}\n\nQuestion: ${userMessage}\n\nAnswer in 3-5 lines, specific and actionable.` },
-      ],
-      max_tokens: 1000, temperature: 0.55,
-    }, { headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, timeout: 20000 });
-    return res.data?.choices?.[0]?.message?.content?.trim() || null;
-  } catch (err) {
-    console.error('[Assistant] Groq fallback error:', err?.response?.data || err.message);
-    return null;
-  }
-}
-
-async function generateAndApplyAiFix(user, summary) {
-  const key = process.env.GROQ_API_KEY;
-  if (!key) return { success: false, message: 'AI fix requires GROQ_API_KEY on the server.' };
-  const fixable = summary.missingFields.filter(f => ['bio', 'preferences', 'availability'].includes(f));
-  if (fixable.length === 0) return { success: true, message: 'Your profile data is already complete — no AI fixes needed!', applied: [] };
-  const q = user.questionnaire || {};
-  const ctxLines = [
-    Array.isArray(q.hangoutPreferences) && q.hangoutPreferences.length ? `Hangout style: ${q.hangoutPreferences.join(', ')}` : null,
-    Array.isArray(q.interests) && q.interests.length ? `Interests: ${q.interests.join(', ')}` : null,
-    Array.isArray(q.vibeWords) && q.vibeWords.length ? `Vibe: ${q.vibeWords.join(', ')}` : null,
-    Array.isArray(q.comfortActivity) && q.comfortActivity.length ? `Comfort activities: ${q.comfortActivity.join(', ')}` : null,
-    Array.isArray(q.relaxActivity) && q.relaxActivity.length ? `Relax activities: ${q.relaxActivity.join(', ')}` : null,
-    q.mood ? `Mood: ${q.mood}` : null,
-    q.personalityType ? `Personality: ${q.personalityType}` : null,
-    q.ageGroup ? `Age group: ${q.ageGroup}` : null,
-    q.meetupPreference ? `Meetup pref: ${q.meetupPreference}` : null,
-  ].filter(Boolean).join('\n');
-  const fieldInstructions = fixable.map(f => {
-    if (f === 'bio') return 'bio: a warm, genuine 2-3 sentence bio for a social companion app in India. Max 140 chars. No emojis. No phone numbers. No social handles.';
-    if (f === 'preferences') return 'interests: exactly 3 relevant interest strings as a JSON array.';
-    if (f === 'availability') return 'availableTimes: 2-3 realistic time slot strings as a JSON array.';
-    return null;
-  }).filter(Boolean);
-  const prompt = `Fill in missing profile fields for a user on Humrah, an Indian social companion app.\n\nUser context:\n${ctxLines || 'No context — use friendly defaults.'}\n\nGenerate ONLY:\n${fieldInstructions.join('\n')}\n\nReturn ONLY valid JSON with keys: ${fixable.join(', ')}. No markdown, no extra text.`;
-  let generated;
-  try {
-    const res = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
-      model: GROQ_MODEL,
-      messages: [
-        { role: 'system', content: 'Return only valid JSON. No markdown. No explanation.' },
-        { role: 'user', content: prompt },
-      ],
-      // Ask the model for JSON directly instead of hoping it does not wrap the
-      // answer in markdown (the fence-stripping below stays as a belt-and-braces
-      // fallback). Matches how services/providers/groqProvider.js already calls it.
-      response_format: { type: 'json_object' },
-      max_tokens: 800, temperature: 0.65,
-    }, { headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, timeout: 20000 });
-    const raw = res.data?.choices?.[0]?.message?.content?.trim() || '{}';
-    generated = JSON.parse(raw.replace(/```json|```/g, '').trim());
-  } catch (err) {
-    console.error('[Assistant] AI-fix generation error:', err?.response?.data || err.message);
-    return { success: false, message: 'AI could not generate suggestions right now. Please try again.' };
-  }
-  if (!user.questionnaire) user.questionnaire = {};
-  const applied = [];
-  if (generated.bio && typeof generated.bio === 'string') {
-    const bio = generated.bio.trim().slice(0, 140);
-    if (bio.length >= 10 && !/https?:\/\//.test(bio) && !/\d{10}/.test(bio)) {
-      // BUGFIX: model output was written straight onto the profile, so this was
-      // the one bio path in the product that skipped moderation. Run the same
-      // synchronous check every other questionnaire write uses; if the generated
-      // text trips it, drop the bio rather than publishing it.
-      const { cleanedQuestionnaire, errors } = moderateQuestionnaireSync({ bio });
-      const safeBio = (cleanedQuestionnaire && typeof cleanedQuestionnaire.bio === 'string')
-        ? cleanedQuestionnaire.bio.trim()
-        : '';
-      if ((!errors || errors.length === 0) && safeBio.length >= 10) {
-        user.questionnaire.bio = safeBio;
-        applied.push({ field: 'bio', value: safeBio });
-      } else {
-        console.warn('[Assistant] AI-generated bio rejected by moderation; not applied.');
-      }
-    }
-  }
-  if (Array.isArray(generated.interests) && generated.interests.length > 0) {
-    const interests = generated.interests.filter(i => typeof i === 'string' && i.trim()).slice(0, 5).map(i => i.trim());
-    if (interests.length > 0) {
-      const existing = Array.isArray(user.questionnaire.interests) ? user.questionnaire.interests : [];
-      user.questionnaire.interests = [...new Set([...existing, ...interests])].slice(0, 8);
-      applied.push({ field: 'interests', value: interests });
-    }
-  }
-  if (Array.isArray(generated.availableTimes) && generated.availableTimes.length > 0) {
-    const times = generated.availableTimes.filter(t => typeof t === 'string' && t.trim()).slice(0, 5).map(t => t.trim());
-    if (times.length > 0) {
-      user.questionnaire.availableTimes = times;
-      applied.push({ field: 'availability', value: times });
-    }
-  }
-  if (applied.length === 0) return { success: false, message: 'AI could not generate valid values. Please fill the fields manually.' };
-  user.markModified('questionnaire');
-  await user.save();
-  const newSummary = buildSafeProfileSummary(user);
-  return { success: true, message: `AI updated ${applied.length} field(s) on your profile!`, applied, newCompletionScore: newSummary.completionScore };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// BIO REWRITE — Groq + MongoDB cache (7-day TTL)
-// ─────────────────────────────────────────────────────────────────────────────
-
-const TONE_PROMPTS = {
-  calm:       'Write a calm, peaceful, unhurried bio. Soft language. No excitement markers.',
-  warm:       'Write a warm, friendly, approachable bio. Inviting but not overly cheerful.',
-  funny:      'Write a gently humorous bio. Self-aware, dry wit. Not cringe or forced.',
-  introvert:  'Write a bio that feels safe for an introvert — honest, low-pressure, no hype.',
-  elegant:    'Write an elegant, refined bio. Thoughtful phrasing, understated.',
-  thoughtful: 'Write a thoughtful, reflective bio. Values depth over surface impressions.',
-  casual:     'Write a casual, relaxed bio. Simple language, natural.',
-};
-
-async function rewriteBio(userId, rawText, tone, summary) {
-  const key = process.env.GROQ_API_KEY;
-  if (!key) return { success: false, message: 'Bio assistant requires GROQ_API_KEY.' };
-
-  // ── Cache check ───────────────────────────────────────────────────────────
-  const hash   = bioCacheKey(userId, rawText, tone);
-  const cached = await getBioFromCache(hash);
-  if (cached) {
-    console.log('[Assistant] bio cache hit:', hash.slice(0, 12));
-    return { success: true, bio: cached };
-  }
-
-  // ── Build prompt ──────────────────────────────────────────────────────────
-  const toneInstruction = TONE_PROMPTS[tone] || TONE_PROMPTS['calm'];
-  const contextHints = [
-    summary.comfortActivity.length > 0 ? `Activities: ${summary.comfortActivity.slice(0, 3).join(', ')}` : null,
-    summary.vibeWords.length > 0 ? `Vibe: ${summary.vibeWords.slice(0, 3).join(', ')}` : null,
-    summary.mood ? `Mood: ${summary.mood}` : null,
-    summary.meetupPreference ? `Meetup style: ${summary.meetupPreference}` : null,
-  ].filter(Boolean).join('. ');
-
-  const prompt = `Rewrite this rough bio for a social companion app in India called Humrah. People use Humrah to meet others for calm, public activities — coffee, walks, films, gaming.\n\n${toneInstruction}\n\nUser's rough thoughts: "${rawText}"\n${contextHints ? `Context: ${contextHints}` : ''}\n\nRules:\n- Max 140 characters\n- No emojis\n- No phone numbers, social handles, or URLs\n- Sound human, not like a dating app\n- Do not use clichés like "love to laugh" or "foodie"\n- Return ONLY the bio text. No quotes, no explanation.`;
-
-  // ── Groq call ─────────────────────────────────────────────────────────────
-  try {
-    const res = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
-      model: GROQ_MODEL,
-      messages: [
-        { role: 'system', content: 'Return only the bio text. No quotes. No explanation. Max 140 characters.' },
-        { role: 'user', content: prompt },
-      ],
-      max_tokens: 700, temperature: 0.7,
-    }, { headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, timeout: 20000 });
-
-    let bio = (res.data?.choices?.[0]?.message?.content || '').trim().replace(/^["']|["']$/g, '');
-    bio = bio.slice(0, 140);
-
-    if (!bio || bio.length < 5) return { success: false, message: 'Could not generate a bio. Please try again.' };
-
-    // ── Safety scan on AI output ──────────────────────────────────────────
-    const safe = scanBioSafety(bio);
-    if (!safe.safe) return { success: false, message: 'Generated bio contained disallowed content. Please try again.' };
-
-    // ── Store in cache ────────────────────────────────────────────────────
-    await storeBioInCache(hash, bio, userId);
-
-    return { success: true, bio };
-  } catch (err) {
-    console.error('[Assistant] bio rewrite error:', err?.response?.data || err.message);
-    return { success: false, message: 'Bio assistant is unavailable right now. Try again in a moment.' };
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // ROUTES — ORIGINAL (consent, analyze, chat, ai-fix)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1063,141 +839,275 @@ router.post('/consent', assistantLimiter, async (req, res) => {
   }
 });
 
+// Intents the deterministic guidance answers directly; everything else in
+// VALID_INTENTS still uses the original logic engine.
+const GUIDED_INTENTS = new Set([
+  'improve_profile', 'first_improve', 'bio_help', 'complete_profile', 'verification_help', 'booking_help',
+]);
+
+const VALID_INTENTS = [
+  'improve_profile', 'booking_help', 'complete_profile',
+  'bio_help', 'first_improve', 'payment_help',
+  'verification_help', 'host_help', 'settings_help',
+  'bug_help', 'safety_help', 'review_help', 'edit_limit_help',
+  'visibility_help', 'moderation_help', 'gaming_help',
+  'movie_help', 'food_help', 'delete_account_help',
+  'greeting', 'help_menu',
+];
+
+/** Deterministic answer for an intent: { intro, bullets, actions, callToAction }. */
+function answerForIntent(intent, f, suggestions, user) {
+  if (GUIDED_INTENTS.has(intent)) {
+    const g = assistantFacts.buildGuidance(intent, f, suggestions);
+    return { ...g, callToAction: g.actions[0] ? g.actions[0].label : null, showOptionsAfter: g.actions.length === 0 };
+  }
+  const legacy = runLogicEngine(intent, buildSafeProfileSummary(user));
+  return { intro: legacy.intro, bullets: legacy.bullets, actions: [], callToAction: null, showOptionsAfter: true };
+}
+
 router.post('/analyze', assistantLimiter, async (req, res) => {
   try {
-    const { intent } = req.body;
-    const VALID_INTENTS = [
-      'improve_profile', 'booking_help', 'complete_profile',
-      'bio_help', 'first_improve', 'payment_help',
-      'verification_help', 'host_help', 'settings_help',
-      'bug_help', 'safety_help', 'review_help', 'edit_limit_help',
-      'visibility_help', 'moderation_help', 'gaming_help',
-      'movie_help', 'food_help', 'delete_account_help',
-      'greeting', 'help_menu',
-    ];
+    const { intent } = req.body || {};
     if (!intent || !VALID_INTENTS.includes(intent)) {
       return res.status(400).json({ success: false, code: 'INVALID_INTENT', message: "I didn't understand that. Please select one of the options.", showOptions: true });
     }
-    const user = await User.findById(req.userId);
-    if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
-    if (!user.profileBotConsent) return res.status(403).json({ success: false, code: 'CONSENT_REQUIRED', message: 'We need your permission to access your profile data.' });
-    const summary = buildSafeProfileSummary(user);
-    const result  = runLogicEngine(intent, summary);
-    const bullets = result.bullets.length > 0 && process.env.GROQ_API_KEY ? await polishBullets(result.bullets) : result.bullets;
-    return res.json({ success: true, source: 'logic', intent, completionScore: result.completionScore, intro: result.intro, bullets, callToAction: result.callToAction, showOptionsAfter: result.showOptionsAfter });
+    const user = await loadConsentedUser(req, res);
+    if (!user) return;
+    const { facts: f, suggestions } = await loadFacts(user);
+    const a = answerForIntent(intent, f, suggestions, user);
+    return res.json({
+      success: true, source: 'logic', intent,
+      completionScore: f.completion.percentage,
+      intro: a.intro, bullets: a.bullets, callToAction: a.callToAction, actions: a.actions,
+      showOptionsAfter: a.showOptionsAfter,
+    });
   } catch (err) {
     console.error('[Assistant] analyze:', err.message);
     res.status(500).json({ success: false, message: 'Server error.' });
   }
 });
 
+/**
+ * POST /chat — one conversational turn.
+ *
+ * Body: { message, history?: [{role:'user'|'assistant', text}], intent? }
+ *   `history` is the visible conversation so far (the app keeps it for the
+ *   session; nothing is stored server-side). `intent` is sent by the quick-prompt
+ *   chips so they run through this same path as typed messages.
+ *
+ * Every reply is grounded in facts computed from the user's profile. When the AI
+ * is available it phrases the answer and handles follow-ups; when it is not, a
+ * recognised question still gets the deterministic answer, and anything else gets
+ * a clear, retryable error — never a canned reply dressed up as AI.
+ *
+ * Response keeps the original fields (source, groqReply, intro, bullets,
+ * callToAction, showOptionsAfter, completionScore, groqCallCount) for older app
+ * versions, and adds: reply, answerSource ('ai'|'logic'), draftBio, actions, notice.
+ */
 router.post('/chat', assistantLimiter, async (req, res) => {
   try {
-    const { message, groqCallCount = 0 } = req.body;
-    if (!message?.trim()) return res.status(400).json({ success: false, code: 'EMPTY_MESSAGE', message: "I didn't catch that. Try asking something or use the quick options.", showOptions: true });
-    const trimmed = message.trim();
-    if (trimmed.length > 500) return res.status(400).json({ success: false, code: 'MESSAGE_TOO_LONG', message: 'Please keep your message under 500 characters.', showOptions: false });
-    const user = await User.findById(req.userId);
-    if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
-    if (!user.profileBotConsent) return res.status(403).json({ success: false, code: 'CONSENT_REQUIRED', message: 'We need your permission to access your profile data.' });
-    const summary = buildSafeProfileSummary(user);
-    const matched = matchIntent(trimmed);
-    if (matched) {
-      const result  = runLogicEngine(matched, summary);
-      const bullets = result.bullets.length > 0 && process.env.GROQ_API_KEY ? await polishBullets(result.bullets) : result.bullets;
-      return res.json({ success: true, source: 'logic', intent: matched, completionScore: result.completionScore, intro: result.intro, bullets, callToAction: result.callToAction, showOptionsAfter: result.showOptionsAfter || groqCallCount >= 2 });
+    const body = req.body || {};
+    const { message, history, groqCallCount = 0 } = body;
+    if (typeof message !== 'string' || !message.trim()) {
+      return res.status(400).json({ success: false, code: 'EMPTY_MESSAGE', message: "I didn't catch that. Try asking something or use the quick options.", showOptions: true });
     }
-    if (await overGroqLimit(user)) return res.json({ success: true, source: 'limit', intro: "You have reached today's AI assist limit.", bullets: ['Your daily AI limit resets at midnight.', 'Try one of the quick options below.'], callToAction: null, showOptionsAfter: true, completionScore: summary.completionScore });
-    if (!process.env.GROQ_API_KEY) return res.json({ success: true, source: 'fallback', intro: "I didn't fully understand that. Try one of these options:", bullets: [], callToAction: null, showOptionsAfter: true, completionScore: summary.completionScore });
+    const trimmed = message.trim();
+    if (trimmed.length > 500) {
+      return res.status(400).json({ success: false, code: 'MESSAGE_TOO_LONG', message: 'Please keep your message under 500 characters.', showOptions: false });
+    }
+    if (history !== undefined && !Array.isArray(history)) {
+      return res.status(400).json({ success: false, code: 'INVALID_HISTORY', message: 'Conversation history must be a list.' });
+    }
+    const requestedIntent = typeof body.intent === 'string' && VALID_INTENTS.includes(body.intent) ? body.intent : null;
+
+    const user = await loadConsentedUser(req, res);
+    if (!user) return;
+
+    const { facts: f, suggestions } = await loadFacts(user);
+    const intent = requestedIntent || matchIntent(trimmed);
+    const logic = intent ? answerForIntent(intent, f, suggestions, user) : null;
+    const completionScore = f.completion.percentage;
+    const count = Number(groqCallCount) || 0;
+
+    const logicResponse = (notice) => res.json({
+      success: true, source: 'logic', answerSource: 'logic', intent,
+      reply: logic.intro || '', intro: logic.intro, bullets: logic.bullets,
+      callToAction: logic.callToAction, actions: logic.actions, draftBio: null,
+      notice: notice || null, showOptionsAfter: logic.showOptionsAfter, completionScore,
+    });
+
+    if (!ai.isConfigured()) {
+      if (logic) return logicResponse(null);
+      const fail = aiFailure('not_configured');
+      return res.status(fail.status).json({ success: false, code: fail.code, retryable: fail.retryable,
+        message: "I can only answer the quick questions right now. Try one of the options below.", showOptions: true });
+    }
+
+    if (overGroqLimit(user)) {
+      if (logic) return logicResponse("You've used today's AI replies, so this answer comes straight from your profile.");
+      return res.status(429).json({ success: false, code: 'DAILY_LIMIT', retryable: false,
+        message: "You've used today's AI replies. They reset daily at 5:30 AM IST. The quick options below still work.", showOptions: true });
+    }
+
     await incrementGroq(user);
-    let groqReply = null;
-    try { groqReply = await groqFallback(trimmed, summary); } catch {}
-    if (!groqReply) return res.json({ success: true, source: 'fallback', intro: "I didn't fully understand that. Try one of these options:", bullets: [], callToAction: null, showOptionsAfter: true, completionScore: summary.completionScore });
-    const newCount = groqCallCount + 1;
-    return res.json({ success: true, source: 'groq', groqReply, groqCallCount: newCount, showOptionsAfter: newCount >= 2, completionScore: summary.completionScore });
+    const result = await ai.chatReply({
+      message: trimmed,
+      history: Array.isArray(history) ? history : [],
+      context: assistantFacts.buildAiContext(f),
+      guidance: logic,
+    });
+
+    if (!result.ok) {
+      await refundGroq(user);
+      if (logic) return logicResponse("I couldn't reach the AI just now, so here's what your profile shows.");
+      const fail = aiFailure(result.kind);
+      return res.status(fail.status).json({ success: false, code: fail.code, retryable: fail.retryable, message: fail.message });
+    }
+
+    const actions = logic ? [...logic.actions] : [];
+    if (result.draftBio && !actions.some(a => a.target === assistantFacts.TARGET.BIO_ASSISTANT)) {
+      actions.push({ label: 'Edit in Bio Assistant', target: assistantFacts.TARGET.BIO_ASSISTANT });
+    }
+    const newCount = count + 1;
+    return res.json({
+      success: true, source: 'groq', answerSource: 'ai', intent,
+      reply: result.reply, groqReply: result.reply, draftBio: result.draftBio,
+      actions, notice: null, groqCallCount: newCount,
+      showOptionsAfter: newCount >= 2, completionScore,
+    });
   } catch (err) {
     console.error('[Assistant] chat:', err.message);
     res.status(500).json({ success: false, message: 'Server error.' });
   }
 });
 
+/**
+ * POST /ai-fix — RETIRED.
+ *
+ * This used to have the model invent missing bio text, interests and availability
+ * ("friendly defaults" when the profile had no context) and save them straight to
+ * the profile without the user seeing them first. That puts made-up information on
+ * a real person's profile, so it no longer writes anything. The route stays so
+ * older app versions get a clear answer instead of a 404; current versions do not
+ * call it. Bios now go through POST /bio and are saved only by the user.
+ */
 router.post('/ai-fix', assistantLimiter, async (req, res) => {
-  try {
-    const user = await User.findById(req.userId);
-    if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
-    if (!user.profileBotConsent) return res.status(403).json({ success: false, code: 'CONSENT_REQUIRED', message: 'We need your permission to access your profile data.' });
-    if (await overGroqLimit(user)) return res.status(429).json({ success: false, code: 'DAILY_LIMIT', message: "You've reached today's AI assist limit. Try again tomorrow or fill fields manually." });
-    await incrementGroq(user);
-    const summary = buildSafeProfileSummary(user);
-    const result  = await generateAndApplyAiFix(user, summary);
-    return res.status(result.success ? 200 : 400).json(result);
-  } catch (err) {
-    console.error('[Assistant] ai-fix:', err.message);
-    res.status(500).json({ success: false, message: 'Server error.' });
-  }
+  return res.status(410).json({
+    success: false, code: 'AI_FIX_RETIRED',
+    message: "The assistant no longer edits your profile automatically. Use the Bio Assistant to draft a bio you can review, or update your profile yourself.",
+    applied: [],
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ROUTES — NEW (health, nudges, bio, trust, match, starters, evolution)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * GET /health — what the profile actually contains, kept as separate concepts:
+ * completeness (defined, canonical), bio length, interests, verification state,
+ * trust steps and missing items marked required/optional. `scores` and
+ * `completionScore` are unchanged for older app versions.
+ */
 router.get('/health', assistantLimiter, async (req, res) => {
   try {
-    console.log(`[Assistant] GET /health userId=${req.userId} type=${typeof req.userId}`);
-    if (!req.userId) return res.status(401).json({ success: false, message: 'Not authenticated.' });
-    const user = await User.findById(req.userId);
-    if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
-    if (!user.profileBotConsent) return res.status(403).json({ success: false, code: 'CONSENT_REQUIRED', message: 'We need your permission to access your profile data.' });
-    const summary = buildSafeProfileSummary(user);
-    const scores  = buildHealthScores(summary);
-    return res.json({ success: true, scores, completionScore: summary.completionScore });
+    const user = await loadConsentedUser(req, res);
+    if (!user) return;
+    const { facts: f, suggestions } = await loadFacts(user);
+    const scores = buildHealthScores(buildSafeProfileSummary(user));
+    return res.json({
+      success: true, scores, completionScore: f.completion.percentage,
+      health: assistantFacts.buildHealth(f, suggestions),
+    });
   } catch (err) {
     console.error('[Assistant] health:', err.message);
     res.status(500).json({ success: false, message: 'Server error.' });
   }
 });
 
+/**
+ * GET /nudges — personalised suggestions. Each item: id, title, text, reason,
+ * action, actionTarget, priority (high|medium|low), plus the original level/field
+ * for older app versions. Rebuilt from the profile on every call, so a fixed item
+ * disappears on the next load.
+ */
 router.get('/nudges', assistantLimiter, async (req, res) => {
   try {
-    console.log(`[Assistant] GET /nudges userId=${req.userId} type=${typeof req.userId}`);
-    if (!req.userId) return res.status(401).json({ success: false, message: 'Not authenticated.' });
-    const user = await User.findById(req.userId);
-    if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
-    if (!user.profileBotConsent) return res.status(403).json({ success: false, code: 'CONSENT_REQUIRED', message: 'We need your permission to access your profile data.' });
-    const summary = buildSafeProfileSummary(user);
-    const nudges  = buildNudges(summary);
-    return res.json({ success: true, nudges, completionScore: summary.completionScore });
+    const user = await loadConsentedUser(req, res);
+    if (!user) return;
+    const { facts: f, suggestions } = await loadFacts(user);
+    return res.json({ success: true, nudges: suggestions, completionScore: f.completion.percentage, generatedAt: new Date().toISOString() });
   } catch (err) {
     console.error('[Assistant] nudges:', err.message);
     res.status(500).json({ success: false, message: 'Server error.' });
   }
 });
 
-// POST /bio — with cache
+const BIO_INPUT_MAX = 300;
+
+/**
+ * POST /bio — draft a bio from the user's own rough notes. Never saves it: the app
+ * shows the draft for review and editing, and the user saves through the normal
+ * profile editor endpoint.
+ *
+ * Body: { rawText, tone, regenerate?: boolean, previousBio?: string }
+ *   regenerate=true skips the cache and asks for a different version of previousBio.
+ */
 router.post('/bio', assistantLimiter, async (req, res) => {
   try {
-    const { rawText, tone = 'calm' } = req.body;
-    if (!rawText || !rawText.trim()) return res.status(400).json({ success: false, message: 'Please provide some rough thoughts to rewrite.' });
-    if (rawText.trim().length > 300) return res.status(400).json({ success: false, message: 'Input too long — keep it under 300 characters.' });
-    const VALID_TONES = ['calm', 'warm', 'funny', 'introvert', 'elegant', 'thoughtful', 'casual'];
-    const safeTone = VALID_TONES.includes(tone) ? tone : 'calm';
-    const user = await User.findById(req.userId);
-    if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
-    if (!user.profileBotConsent) return res.status(403).json({ success: false, code: 'CONSENT_REQUIRED', message: 'We need your permission to access your profile data.' });
+    const body = req.body || {};
+    const rawText = typeof body.rawText === 'string' ? body.rawText.trim() : '';
+    const tone = body.tone === undefined ? 'calm' : body.tone;
+    const regenerate = body.regenerate === true;
+    const previousBio = typeof body.previousBio === 'string' ? body.previousBio.trim().slice(0, 200) : null;
 
-    // Cache hit skips the daily Groq limit check entirely
-    const hash   = bioCacheKey(req.userId, rawText.trim(), safeTone);
-    const cached = await getBioFromCache(hash);
-    if (cached) {
-      console.log('[Assistant] /bio cache hit:', hash.slice(0, 12));
-      return res.json({ success: true, bio: cached });
+    if (!rawText) return res.status(400).json({ success: false, code: 'EMPTY_INPUT', message: 'Write a few words about yourself first.' });
+    if (rawText.length > BIO_INPUT_MAX) return res.status(400).json({ success: false, code: 'INPUT_TOO_LONG', message: `Please keep your notes under ${BIO_INPUT_MAX} characters.` });
+    if (typeof tone !== 'string' || !Object.prototype.hasOwnProperty.call(ai.TONES, tone)) {
+      return res.status(400).json({ success: false, code: 'INVALID_TONE', message: 'Please choose one of the listed tones.' });
     }
 
-    if (await overGroqLimit(user)) return res.status(429).json({ success: false, code: 'DAILY_LIMIT', message: "You've reached today's AI assist limit. Try again tomorrow." });
+    const user = await loadConsentedUser(req, res);
+    if (!user) return;
+
+    if (!ai.isConfigured()) {
+      const fail = aiFailure('not_configured');
+      return res.status(fail.status).json({ success: false, code: fail.code, retryable: fail.retryable,
+        message: "The Bio Assistant isn't available right now. You can still write or edit your bio yourself." });
+    }
+
+    const hash = bioCacheKey(req.userId, rawText, tone);
+    if (!regenerate) {
+      const cached = await getBioFromCache(hash);
+      if (cached) return res.json({ success: true, bio: cached, tone, cached: true, maxLength: assistantFacts.BIO_MAX });
+    }
+
+    if (overGroqLimit(user)) {
+      return res.status(429).json({ success: false, code: 'DAILY_LIMIT', retryable: false,
+        message: "You've used today's AI drafts. They reset daily at 5:30 AM IST — you can still edit your bio yourself." });
+    }
     await incrementGroq(user);
-    const summary = buildSafeProfileSummary(user);
-    const result  = await rewriteBio(req.userId, rawText.trim(), safeTone, summary);
-    return res.status(result.success ? 200 : 400).json(result);
+
+    const result = await ai.generateBio({ rawText, tone, previousBio: regenerate ? previousBio : null });
+    if (!result.ok) {
+      await refundGroq(user);
+      const fail = aiFailure(result.kind);
+      return res.status(fail.status).json({ success: false, code: fail.code, retryable: fail.retryable, message: fail.message });
+    }
+
+    // Same synchronous moderation every questionnaire write uses. A draft that
+    // trips it is not shown; the user can simply try again.
+    const { cleanedQuestionnaire, errors } = moderateQuestionnaireSync({ bio: result.bio });
+    const safeBio = cleanedQuestionnaire && typeof cleanedQuestionnaire.bio === 'string' ? cleanedQuestionnaire.bio.trim() : '';
+    if ((errors && errors.length > 0) || safeBio !== result.bio) {
+      await refundGroq(user);
+      console.warn('[Assistant] bio draft rejected by moderation; not returned.');
+      const fail = aiFailure('bad_output');
+      return res.status(fail.status).json({ success: false, code: fail.code, retryable: true, message: fail.message });
+    }
+
+    await storeBioInCache(hash, safeBio, user._id);
+    return res.json({ success: true, bio: safeBio, tone, cached: false, maxLength: assistantFacts.BIO_MAX });
   } catch (err) {
     console.error('[Assistant] bio:', err.message);
     res.status(500).json({ success: false, message: 'Server error.' });
@@ -1206,11 +1116,8 @@ router.post('/bio', assistantLimiter, async (req, res) => {
 
 router.get('/trust', assistantLimiter, async (req, res) => {
   try {
-    console.log(`[Assistant] GET /trust userId=${req.userId} type=${typeof req.userId}`);
-    if (!req.userId) return res.status(401).json({ success: false, message: 'Not authenticated.' });
-    const user = await User.findById(req.userId);
-    if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
-    if (!user.profileBotConsent) return res.status(403).json({ success: false, code: 'CONSENT_REQUIRED', message: 'We need your permission to access your profile data.' });
+    const user = await loadConsentedUser(req, res);
+    if (!user) return;
     const summary = buildSafeProfileSummary(user);
     const signals = buildTrustSignals(summary);
     const scores  = buildHealthScores(summary);
@@ -1257,16 +1164,81 @@ router.get('/starters/:userId', assistantLimiter, async (req, res) => {
   }
 });
 
+const EVOLUTION_EDIT_WINDOW_MS = 90 * 24 * 60 * 60 * 1000;
+
+/**
+ * GET /evolution — real progress only.
+ *
+ * - baseline: where the profile stood the first time the user opened Evolution
+ *   (recorded then, never back-filled), compared with now;
+ * - completedSinceBaseline: items missing at the baseline that are filled in now;
+ * - recentEdits: field names and dates from ProfileEditLog (no values);
+ * - milestones: dates Humrah already stores (joined, verification).
+ * Nothing is estimated. `suggestions` is unchanged for older app versions.
+ */
 router.get('/evolution', assistantLimiter, async (req, res) => {
   try {
-    console.log(`[Assistant] GET /evolution userId=${req.userId} type=${typeof req.userId}`);
-    if (!req.userId) return res.status(401).json({ success: false, message: 'Not authenticated.' });
-    const user = await User.findById(req.userId);
-    if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
-    if (!user.profileBotConsent) return res.status(403).json({ success: false, code: 'CONSENT_REQUIRED', message: 'We need your permission to access your profile data.' });
-    const summary     = buildSafeProfileSummary(user);
-    const suggestions = buildEvolutionSuggestions(summary, user);
-    return res.json({ success: true, suggestions, completionScore: summary.completionScore });
+    const user = await loadConsentedUser(req, res);
+    if (!user) return;
+    const { facts: f } = await loadFacts(user);
+    const missingKeys = f.completion.missing.map(m => m.key);
+
+    let tracking;
+    try {
+      const base = await getOrCreateBaseline(user._id, { percentage: f.completion.percentage, missingKeys });
+      const completedSinceBaseline = base.baselineMissing
+        .filter(k => !missingKeys.includes(k))
+        .map(k => ({ key: k, label: assistantFacts.itemInfo(k).label }));
+      tracking = {
+        available: true,
+        startedAt: base.baselineAt,
+        startedNow: base.created,
+        baselinePercentage: base.baselinePercentage,
+        currentPercentage: f.completion.percentage,
+        completedSinceBaseline,
+      };
+    } catch (err) {
+      console.error('[Assistant] evolution baseline unavailable:', err.message);
+      tracking = { available: false, currentPercentage: f.completion.percentage, completedSinceBaseline: [] };
+    }
+
+    const edits = await ProfileEditLog.find({ userId: user._id, editedAt: { $gte: new Date(Date.now() - EVOLUTION_EDIT_WINDOW_MS) } })
+      .sort({ editedAt: -1 })
+      .limit(30)
+      .select('field editedAt')
+      .lean();
+    const seen = new Set();
+    const recentEdits = [];
+    for (const e of edits) {
+      const day = new Date(e.editedAt).toISOString().slice(0, 10);
+      const k = `${e.field}|${day}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      recentEdits.push({ field: e.field, label: assistantFacts.itemInfo(e.field).label, editedAt: e.editedAt });
+      if (recentEdits.length >= 10) break;
+    }
+
+    const milestones = [];
+    if (user.createdAt) milestones.push({ type: 'joined', label: 'Joined Humrah', date: user.createdAt });
+    if (f.verification.status === 'pending' && f.verification.submittedAt) {
+      milestones.push({ type: 'verification_submitted', label: 'Sent photo verification', date: f.verification.submittedAt });
+    }
+    if (f.verification.status === 'approved' && user.photoVerifiedAt) {
+      milestones.push({ type: 'verified', label: 'Photo verified', date: user.photoVerifiedAt });
+    }
+    milestones.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+    return res.json({
+      success: true,
+      suggestions: buildEvolutionSuggestions(buildSafeProfileSummary(user), user),
+      completionScore: f.completion.percentage,
+      evolution: {
+        tracking,
+        recentEdits,
+        milestones,
+        note: 'Progress is tracked from the first time you opened this tab. Humrah does not have a record of earlier changes.',
+      },
+    });
   } catch (err) {
     console.error('[Assistant] evolution:', err.message);
     res.status(500).json({ success: false, message: 'Server error.' });
@@ -1274,3 +1246,4 @@ router.get('/evolution', assistantLimiter, async (req, res) => {
 });
 
 module.exports = router;
+module.exports._internals = { answerForIntent, matchIntent, GUIDED_INTENTS, VALID_INTENTS, GROQ_DAILY_LIMIT, assistantLimiter };
