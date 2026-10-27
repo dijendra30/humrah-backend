@@ -3,6 +3,9 @@
 
 const User = require('../models/User');
 const MatchingTodayMood = require('../models/MatchingTodayMood');
+// Companions are "nearby" only by this one rule (eligible, fresh real locations on
+// both sides, real distance inside the radius). Members keep the rules below.
+const companionProximity = require('../services/companionProximityService');
 
 // =============================================================================
 // HELPERS
@@ -179,10 +182,10 @@ exports.getNearbyUsers = async (req, res) => {
     }
 
     const candidates = await User.find(filter)
-      .select('firstName lastName profilePhoto verified photoVerificationStatus isPremium userType ratingStats last_known_lat last_known_lng questionnaire liveLocation tagline bio interests hobbies vibeWords availableTimes languagePreference language price city state availability comfortZones')
+      .select('firstName lastName profilePhoto verified photoVerificationStatus isPremium userType status hostActive ratingStats last_known_lat last_known_lng last_location_updated_at questionnaire liveLocation tagline bio interests hobbies vibeWords availableTimes languagePreference language price city state availability comfortZones')
       .limit(300)
       .lean();
-      
+
     console.log(`[Nearby] Base users from DB: ${candidates.length}`);
 
     // Fetch active moods for all candidates
@@ -200,6 +203,13 @@ exports.getNearbyUsers = async (req, res) => {
     // ── Distance Filtering ──────────────────────────────────────────────────
     let afterDistance = [];
     for (const c of candidates) {
+       // Companions: the shared rule only — never the city / missing-coordinates fallback.
+       if (c.userType === 'COMPANION') {
+          const near = companionProximity.evaluate(me, c, now);
+          if (near.ok) afterDistance.push(formatUser(c, me, MAX_KM, near.distanceKm));
+          continue;
+       }
+
        const cLat = c.liveLocation?.lat ?? c.last_known_lat ?? null;
        const cLng = c.liveLocation?.lng ?? c.last_known_lng ?? null;
        
@@ -367,7 +377,7 @@ exports.getPeopleNearby = async (req, res) => {
     }
 
     const candidates = await User.find(filter)
-      .select('firstName lastName profilePhoto verified photoVerificationStatus isPremium userType ratingStats last_known_lat last_known_lng questionnaire liveLocation tagline bio interests hobbies vibeWords availableTimes languagePreference language price city state availability comfortZones')
+      .select('firstName lastName profilePhoto verified photoVerificationStatus isPremium userType status hostActive ratingStats last_known_lat last_known_lng last_location_updated_at questionnaire liveLocation tagline bio interests hobbies vibeWords availableTimes languagePreference language price city state availability comfortZones')
       .limit(300)
       .lean();
 
@@ -393,11 +403,16 @@ exports.getPeopleNearby = async (req, res) => {
 
       let distKm = 9999;
 
-      if (userLat !== null && userLng !== null && cLat !== null && cLng !== null) {
+      if (c.userType === 'COMPANION') {
+        // Companions: the shared rule only — never the city / missing-coordinates fallback.
+        const near = companionProximity.evaluate(me, c, now);
+        if (!near.ok) continue;
+        distKm = near.distanceKm;
+      } else if (userLat !== null && userLng !== null && cLat !== null && cLng !== null) {
         distKm = haversineKm(userLat, userLng, cLat, cLng);
         if (distKm > MAX_KM) continue;
       }
-      // Missing coordinates → kept, same as getNearbyUsers() (Task #6).
+      // Members with missing coordinates → kept, same as getNearbyUsers() (Task #6).
 
       // Reuses the shared formatter, so the per-user payload — including
       // userType and profilePreview.costSharing — is identical to the existing
@@ -439,15 +454,23 @@ exports.getPeopleNearby = async (req, res) => {
 // Matching first, never empty just because nobody shares an interest. One ranked
 // list, in these pools (each user appears once, in the first pool they qualify for):
 //
-//   1. NEARBY_COMPANION  Companions with a REAL distance inside the existing radius
-//                        (2 km at night, 5 km by day) — at most two.
+//   1. NEARBY_COMPANION  Companions that pass services/companionProximityService
+//                        (eligible, fresh real location on BOTH sides, real distance
+//                        inside the Companion radius — by default the existing 2 km at
+//                        night / 5 km by day) — at most two.
 //   2. NEARBY_MATCH      Members inside the radius with a real shared signal.
 //   3. NEARBY_GENERAL    Other Members inside the radius (no claimed match).
 //   4. INDIA_MATCH       Members elsewhere (beyond the radius / unknown location) with
 //                        a real shared signal.
 //   5. INDIA_GENERAL     Other Members elsewhere.
-//   6. MORE_COMPANION    Any further Companions — never presented as nearby unless
-//                        they really are inside the radius.
+//   6. MORE_COMPANION    Further nearby Companions (beyond the first two). A Companion
+//                        who is NOT nearby by that rule — far away, no location, a
+//                        stale location, or the viewer has no location — is not in the
+//                        list at all (they used to be appended here with a city label,
+//                        which put distant Companions and their Meetup button on Home).
+//   The response also carries companionAvailability { status, radiusKm }:
+//   AVAILABLE | NONE_NEARBY | LOCATION_UNAVAILABLE (the viewer has no fresh location),
+//   so the app can say why no Companion is shown. Members are unaffected by it.
 //
 // Real signals only: the DISTINCT shared items of hangout preferences / interests /
 // hobbies (both users' own profile data), and the same active mood today. The
@@ -531,10 +554,8 @@ function rankDiscovery(candidates, seed) {
   const p3 = pool('NEARBY_GENERAL', ordered(members.filter(c => c.nearby && tierOf(c) === 0)));
   const p4 = pool('INDIA_MATCH', ordered(members.filter(c => !c.nearby && tierOf(c) > 0)));
   const p5 = pool('INDIA_GENERAL', ordered(members.filter(c => !c.nearby && tierOf(c) === 0)));
-  const p6 = pool('MORE_COMPANION', [
-    ...nearbyCompanions.slice(2),
-    ...ordered(unique.filter(c => c.isCompanion && !c.nearby)),
-  ]);
+  // Only genuinely nearby Companions are ever listed; a non-nearby one is dropped.
+  const p6 = pool('MORE_COMPANION', nearbyCompanions.slice(2));
   return [...p1, ...p2, ...p3, ...p4, ...p5, ...p6];
 }
 
@@ -548,9 +569,10 @@ async function getPeopleDiscovery(req, res) {
       ? (Number(req.query.seed) >>> 0) : (Math.floor(Math.random() * 2 ** 31) >>> 0);
 
     const me = await User.findById(req.userId)
-      .select('last_known_lat last_known_lng questionnaire blockedUsers status liveLocation interests hobbies city')
+      .select('last_known_lat last_known_lng last_location_updated_at questionnaire blockedUsers status liveLocation interests hobbies city')
       .lean();
     if (!me) return res.status(404).json({ success: false, message: 'User not found' });
+    const COMPANION_KM = companionProximity.companionRadiusKm(now);
 
     // Exclusions: blocked both ways, plus self — exactly as above.
     const blockedIds = (me.blockedUsers || []).map(id => id.toString());
@@ -561,7 +583,7 @@ async function getPeopleDiscovery(req, res) {
     const myMTM = await MatchingTodayMood.findOne({ userId: req.userId, visible: true, expiresAt: { $gt: now } }).lean();
     me._mtm = myMTM;
 
-    const select = 'firstName lastName profilePhoto verified photoVerificationStatus isPremium userType ratingStats last_known_lat last_known_lng questionnaire liveLocation tagline bio interests hobbies vibeWords availableTimes languagePreference language price city state availability comfortZones profileCompletion';
+    const select = 'firstName lastName profilePhoto verified photoVerificationStatus isPremium userType status hostActive ratingStats last_known_lat last_known_lng last_location_updated_at questionnaire liveLocation tagline bio interests hobbies vibeWords availableTimes languagePreference language price city state availability comfortZones profileCompletion';
     const base = { _id: { $nin: blockedIds }, status: 'ACTIVE', profilePhoto: { $ne: null } };
 
     // Local candidates: the same radius / city query as the endpoint above.
@@ -592,7 +614,22 @@ async function getPeopleDiscovery(req, res) {
     const broad = await User.find({ ...base, _id: { $nin: [...blockedIds, ...localIds.map(String)] }, userType: { $in: ['MEMBER', 'COMPANION'] } })
       .select(select).sort({ _id: -1 }).limit(DISCOVERY_BROAD_LIMIT).lean();
 
-    const all = [...local, ...broad];
+    // Only when NEARBY_COMPANION_RADIUS_KM is set wider than the member radius: the
+    // Companions between the two, which the local query above can't reach. A
+    // Companion-only query, so the member candidate set is exactly as before.
+    let extraCompanions = [];
+    const myFix = companionProximity.usableLocation(me, now);
+    if (myFix && COMPANION_KM > MAX_KM) {
+      const seenIds = [...blockedIds, ...localIds.map(String), ...broad.map(u => String(u._id))];
+      const dLat = COMPANION_KM / 111.0;
+      const dLng = COMPANION_KM / (111.0 * Math.cos(myFix.lat * Math.PI / 180));
+      extraCompanions = await User.find({ ...base, _id: { $nin: seenIds }, userType: 'COMPANION', $or: [
+        { 'liveLocation.coordinates': { $geoWithin: { $centerSphere: [[myFix.lng, myFix.lat], COMPANION_KM / 6378.1] } } },
+        { last_known_lat: { $gte: myFix.lat - dLat, $lte: myFix.lat + dLat }, last_known_lng: { $gte: myFix.lng - dLng, $lte: myFix.lng + dLng } },
+      ] }).select(select).limit(100).lean();
+    }
+
+    const all = [...local, ...broad, ...extraCompanions];
     const moods = await MatchingTodayMood.find({ userId: { $in: all.map(u => u._id) }, visible: true, expiresAt: { $gt: now } }).lean();
     const moodBy = new Map(moods.map(d => [d.userId.toString(), d]));
 
@@ -600,10 +637,19 @@ async function getPeopleDiscovery(req, res) {
     const myGender = _binaryGender(me.questionnaire && me.questionnaire.gender);
     const candidates = all.map(u => {
       u._mtm = moodBy.get(u._id.toString()) || null;
-      const cLat = u.liveLocation?.lat ?? u.last_known_lat ?? null;
-      const cLng = u.liveLocation?.lng ?? u.last_known_lng ?? null;
-      const distKm = (userLat !== null && userLng !== null && cLat !== null && cLng !== null) ? haversineKm(userLat, userLng, cLat, cLng) : null;
-      const nearby = distKm !== null && distKm <= MAX_KM;
+      let distKm, nearby;
+      if (u.userType === 'COMPANION') {
+        // The one Companion rule; a Companion that fails it is dropped below.
+        const near = companionProximity.evaluate(me, u, now);
+        nearby = near.ok;
+        distKm = near.ok ? near.distanceKm : null;
+      } else {
+        // Members: exactly as before.
+        const cLat = u.liveLocation?.lat ?? u.last_known_lat ?? null;
+        const cLng = u.liveLocation?.lng ?? u.last_known_lng ?? null;
+        distKm = (userLat !== null && userLng !== null && cLat !== null && cLng !== null) ? haversineKm(userLat, userLng, cLat, cLng) : null;
+        nearby = distKm !== null && distKm <= MAX_KM;
+      }
       const theirs = _interestSet(u);
       let shared = 0;
       const sharedItems = [];
@@ -622,7 +668,15 @@ async function getPeopleDiscovery(req, res) {
       };
     });
 
-    const ranked = rankDiscovery(candidates, (seed ^ _hash(req.userId)) >>> 0);
+    // A Companion is listed only when nearby by the rule above (never "In Mumbai").
+    const listed = candidates.filter(c => !c.isCompanion || c.nearby);
+    const nearbyCompanionCount = listed.filter(c => c.isCompanion).length;
+    const companionAvailability = {
+      status: !myFix ? 'LOCATION_UNAVAILABLE' : nearbyCompanionCount > 0 ? 'AVAILABLE' : 'NONE_NEARBY',
+      radiusKm: COMPANION_KM,
+    };
+
+    const ranked = rankDiscovery(listed, (seed ^ _hash(req.userId)) >>> 0);
     const start = (page - 1) * limit;
     const slice = ranked.slice(start, start + limit);
     const users = slice.map(c => {
@@ -637,7 +691,7 @@ async function getPeopleDiscovery(req, res) {
       f.sameMood = c.sameMood;
       return f;
     });
-    res.json({ success: true, users, page, limit, seed, total: ranked.length, hasMore: start + limit < ranked.length });
+    res.json({ success: true, users, page, limit, seed, total: ranked.length, hasMore: start + limit < ranked.length, companionAvailability });
   } catch (err) {
     console.error('[PeopleDiscovery]', err.message);
     res.status(500).json({ success: false, message: 'Server error' });

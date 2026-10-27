@@ -2,8 +2,10 @@
 const express = require('express');
 const router = express.Router();
 const { auth } = require('../middleware/auth');
+const mongoose = require('mongoose');
 const Booking = require('../models/Booking');
 const User = require('../models/User');
+const { checkCompanionBookable } = require('../services/companionProximityService');
 
 // ─── helper: push a lightweight booking ref into a user doc ───────────────────
 async function pushBookingRef(userId, { bookingId, otherUserId, otherUserEmail, status }) {
@@ -42,12 +44,17 @@ router.post('/', auth, async (req, res) => {
   try {
     const { companionId, bookingDate, meetingLocation, notes } = req.body;
 
-    const companion = await User.findById(companionId);
-    if (!companion) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Companion not found' 
-      });
+    if (!companionId || !mongoose.Types.ObjectId.isValid(String(companionId))) {
+      return res.status(400).json({ success: false, code: 'INVALID_COMPANION', message: 'companionId is required' });
+    }
+
+    // Re-checked here, for the authenticated caller, on every booking: a real,
+    // eligible Companion, not yourself, no block either way, and both fresh
+    // locations within the Companion radius. Nothing from the request (no
+    // coordinates, no distance, no card state) is trusted.
+    const gate = await checkCompanionBookable(req.userId, companionId);
+    if (!gate.ok) {
+      return res.status(gate.status).json({ success: false, code: gate.code, message: gate.message });
     }
 
     const booking = new Booking({
