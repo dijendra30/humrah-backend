@@ -14,6 +14,10 @@ router.get('/movies', ctrl.getMovies);
 // TMDB Search API with normalization and caching
 router.get('/movies/search', ctrl.searchMovies);
 
+// GET /api/movies/:movieId/details  (TMDB movie ID)
+// Details + video metadata for the Home movie-details sheet (cached 6 h)
+router.get('/movies/:movieId/details', require('../controllers/movieDetailsController').getMovieDetails);
+
 // ── Theatres ──────────────────────────────────────────────────────────────────
 // GET /api/theatres?lat=&lng=&radius=
 // Top 5 nearby cinemas, rating >= 3.0, sorted by distance+rating
