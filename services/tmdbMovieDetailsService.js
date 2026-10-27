@@ -20,7 +20,7 @@ const DETAILS_TTL    = 6 * 60 * 60 * 1000;
 const NOT_FOUND_TTL  = 10 * 60 * 1000;
 const CACHE_MAX      = 200;
 const TIMEOUT_MS     = 8000;
-const MAX_VIDEOS     = 30;
+const MAX_VIDEOS     = 30;   // applied AFTER filtering + ranking (see _mapVideos)
 
 // TMDB movie IDs are positive integers. Anything else never reaches TMDB.
 const MOVIE_ID_RE = /^[1-9][0-9]{0,9}$/;
@@ -56,21 +56,49 @@ function _mapDetails(m) {
   };
 }
 
-// Only well-formed entries; the fields the client needs to pick a trailer.
+// YouTube video IDs: 11 characters of [A-Za-z0-9_-].
+const YOUTUBE_KEY_RE = /^[A-Za-z0-9_-]{11}$/;
+
+// Playable trailer candidates only, best first, THEN capped.
+//
+// Why: TMDB lists every video newest-first — a big release can have 200+ (Spider-Man:
+// Brand New Day: 221, of which 3 English trailers sit at positions 106–218, behind
+// featurettes and teasers). Capping the raw list first threw every trailer away.
+//
+// Rank: Trailer+official, Trailer, Teaser+official, Teaser; English before other
+// languages (the app is English); then TMDB's original order. The client makes the
+// final, deterministic pick from this list (TrailerSelector).
 function _mapVideos(results) {
   if (!Array.isArray(results)) return [];
+  const tier = v => {
+    const trailer = v.type.toLowerCase() === 'trailer';
+    return (trailer ? 0 : 2) + (v.official === true ? 0 : 1);
+  };
   return results
-    .filter(v => v && _str(v.key) && _str(v.site) && _str(v.type))
+    .map((v, index) => ({ v, index }))
+    .filter(({ v }) => v && typeof v === 'object'
+      && _str(v.site) && v.site.trim().toLowerCase() === 'youtube'
+      && _str(v.type) && ['trailer', 'teaser'].includes(v.type.trim().toLowerCase())
+      && _str(v.key) && YOUTUBE_KEY_RE.test(v.key.trim()))
+    .map(({ v, index }) => ({
+      index,
+      video: {
+        key:         v.key.trim(),
+        name:        _str(v.name),
+        site:        v.site.trim(),
+        type:        v.type.trim(),
+        official:    typeof v.official === 'boolean' ? v.official : null,
+        size:        Number.isInteger(v.size) ? v.size : null,
+        publishedAt: _str(v.published_at),
+        language:    _str(v.iso_639_1),
+      },
+    }))
+    .sort((a, b) =>
+      (tier(a.video) - tier(b.video))
+      || ((a.video.language === 'en' ? 0 : 1) - (b.video.language === 'en' ? 0 : 1))
+      || (a.index - b.index))
     .slice(0, MAX_VIDEOS)
-    .map(v => ({
-      key:         v.key.trim(),
-      name:        _str(v.name),
-      site:        v.site.trim(),
-      type:        v.type.trim(),
-      official:    typeof v.official === 'boolean' ? v.official : null,
-      size:        Number.isInteger(v.size) ? v.size : null,
-      publishedAt: _str(v.published_at),
-    }));
+    .map(x => x.video);
 }
 
 async function _tmdb(url, fetchImpl) {
