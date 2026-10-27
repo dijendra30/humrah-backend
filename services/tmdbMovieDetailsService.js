@@ -50,6 +50,7 @@ function _mapDetails(m) {
     title:       _str(m.title),
     overview:    _str(m.overview),
     posterPath:  _str(m.poster_path),
+    backdropPath: _str(m.backdrop_path),   // 16:9 artwork for the sheet's hero
     releaseDate: _str(m.release_date),
     runtime:     Number.isInteger(m.runtime) && m.runtime > 0 ? m.runtime : null,
     genres:      Array.isArray(m.genres) ? m.genres.map(g => _str(g && g.name)).filter(Boolean) : [],
