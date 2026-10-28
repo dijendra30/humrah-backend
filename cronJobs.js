@@ -66,6 +66,24 @@ try {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+// EVERY MINUTE — Movie Hangout ticket check
+//
+// An hour before a movie hangout the chat asks "Have you booked your movie ticket?";
+// at the showtime the poll closes. All state is in Mongo and every step is a
+// conditional update (services/movieTicketPollService.js), so it survives a restart
+// and is safe to run twice or on several instances. No eligible members → no poll
+// and no notification.
+// ══════════════════════════════════════════════════════════════════════════════
+cron.schedule('* * * * *', async () => {
+  try {
+    const { tickMovieTicketPolls } = require('./services/movieTicketPollService');
+    await tickMovieTicketPolls();
+  } catch (err) {
+    console.error('[CRON] Movie ticket poll tick error:', err.message);
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
 // EVERY MINUTE — Sports attendance check
 //
 // An hour before a Sports game the group chat asks "Are you still coming?"; at the

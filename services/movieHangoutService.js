@@ -192,6 +192,8 @@ async function handlePollVote(userId, sessionId, rating, io) {
  * Handle marking messages as read
  */
 async function handleMarkRead(userId, sessionId, messageIds) {
+  // Members only: someone who left (or never joined) cannot mark this chat read.
+  await validateAccess(userId, sessionId);
   // We just add userId to readBy arrays of all these messages
   await MovieMessage.updateMany(
     { _id: { $in: messageIds }, sessionId },
@@ -253,6 +255,8 @@ function formatMovieMessage(msg, replyTargets = new Map()) {
     readBy:          (m.readBy || []).map(r => r.toString()),
     reactions:       deleted ? [] : (m.reactions || []).map(r => ({ userId: r.userId?.toString(), reaction: r.reaction })),
     isSystem:        m.type === 'system',
+    // The ticket check's message (Movie Hangout); null for everything else.
+    pollId:          m.pollId ? m.pollId.toString() : null,
     editedAt:        deleted || !m.editedAt ? null : new Date(m.editedAt).toISOString(),
     deleted,
     timestamp:       new Date(m.createdAt).toISOString(),
@@ -369,6 +373,34 @@ async function deleteMovieMessage(userId, sessionId, messageId, io, now = Date.n
 }
 
 /**
+ * POST /movie-session/:id/messages/:messageId/hide — "Delete for me". Any message a
+ * member can see, mine or not; only the caller's own view changes (MovieHiddenMessage),
+ * nobody is told, and doing it twice changes nothing. The ticket check cannot be hidden.
+ */
+async function hideMovieMessage(userId, sessionId, messageId) {
+  const access = await _accessFor(userId, sessionId);
+  if (access.error) return access.error;
+  if (!mongoose.isValidObjectId(messageId)) return _fail(404, 'MESSAGE_NOT_FOUND', 'Message not found');
+  const m = await MovieMessage.findOne({ _id: messageId, sessionId }).select('_id pollId').lean();
+  if (!m) return _fail(404, 'MESSAGE_NOT_FOUND', 'Message not found');
+  if (m.pollId) return _fail(422, 'CANNOT_HIDE', 'The ticket check cannot be deleted.');
+  const MovieHiddenMessage = require('../models/MovieHiddenMessage');
+  try {
+    await MovieHiddenMessage.create({ userId, sessionId, messageId: m._id });
+  } catch (err) {
+    if (!(err && err.code === 11000)) throw err;   // already hidden: nothing to do
+  }
+  return { success: true, status: 200, messageId: m._id.toString() };
+}
+
+/** The messages this person has hidden in this hangout (ids as strings). */
+async function hiddenFor(userId, sessionId) {
+  const MovieHiddenMessage = require('../models/MovieHiddenMessage');
+  const rows = await MovieHiddenMessage.find({ userId, sessionId }).select('messageId').lean();
+  return new Set(rows.map(r => r.messageId.toString()));
+}
+
+/**
  * A server-written system row in the chat the screen reads (MovieMessage), e.g.
  * "Asha joined the hangout". Additive: the legacy MovieChat copy is still written.
  */
@@ -398,6 +430,8 @@ module.exports = {
   handleMarkRead,
   editMovieMessage,
   deleteMovieMessage,
+  hideMovieMessage,
+  hiddenFor,
   postSystemMessage,
   formatMovieMessage,
   loadReplyTargets,

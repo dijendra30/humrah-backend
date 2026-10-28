@@ -61,6 +61,16 @@ router.patch('/movie-session/:id/messages/:messageId', ctrl.editMessage);
 // DELETE /api/movie-session/:id/messages/:messageId — delete own message for everyone
 router.delete('/movie-session/:id/messages/:messageId', ctrl.deleteMessage);
 
+// POST /api/movie-session/:id/leave — Leave Hangout (the caller only)
+router.post('/movie-session/:id/leave', ctrl.leaveSession);
+
+// POST /api/movie-session/:id/messages/:messageId/hide — delete a message for me only
+router.post('/movie-session/:id/messages/:messageId/hide', ctrl.hideMessage);
+
+// GET / POST /api/movie-session/:id/ticket-poll — the ticket check (members only)
+router.get('/movie-session/:id/ticket-poll', ctrl.getTicketPoll);
+router.post('/movie-session/:id/ticket-poll', ctrl.voteTicketPoll);
+
 // GET /api/movie-session/:id/summary
 router.get('/movie-session/:id/summary', ctrl.getSessionSummary);
 

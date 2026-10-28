@@ -1,0 +1,274 @@
+// cronJobs.js - Automated cleanup + surprise meetup reservation expiry
+'use strict';
+
+const cron               = require('node-cron');
+const RandomBooking      = require('./models/RandomBooking');
+const RandomBookingChat  = require('./models/RandomBookingChat');
+const EncryptionKey      = require('./models/EncryptionKey');
+
+// ══════════════════════════════════════════════════════════════════════════════
+// STARTUP RECOVERY — Resume Broadcasts
+// ══════════════════════════════════════════════════════════════════════════════
+(async () => {
+  try {
+    const Broadcast = require('./models/Broadcast');
+    const { sendToAudience } = require('./services/broadcastService');
+    const stuckBroadcasts = await Broadcast.find({ status: 'SENDING' }).lean();
+    for (const b of stuckBroadcasts) {
+      console.log(`[STARTUP] Resuming stuck broadcast: ${b._id}`);
+      sendToAudience(b._id).catch(e => console.error(`[STARTUP] Failed to resume broadcast ${b._id}:`, e.message));
+    }
+  } catch (err) {
+    console.error('[STARTUP] Error resuming broadcasts:', err.message);
+  }
+})();
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EVERY MINUTE — Surprise Meetup reservation expiry
+//
+// Safety net: if the in-process setTimeout was lost (server restart, crash),
+// this cron advances bookings whose reservedUntil has passed.
+// Low cost: only fetches bookings with status = RESERVED & reservedUntil < now.
+// ══════════════════════════════════════════════════════════════════════════════
+cron.schedule('* * * * *', async () => {
+  try {
+    const { tickReservationExpiry } = require('./utils/surpriseMeetupMatcher');
+    await tickReservationExpiry();
+  } catch (err) {
+    console.error('[CRON] Reservation expiry tick error:', err.message);
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EVERY MINUTE — Surprise Activity meetup safety lifecycle
+//
+// 30 min before → 10 min before → completion → feedback prompt.
+// One indexed query per tick, bounded by a startTime range; a tick with nothing due
+// costs a single query and returns. All state lives in the booking document, so this
+// survives a restart and is safe to run twice or on several instances at once.
+// ══════════════════════════════════════════════════════════════════════════════
+cron.schedule('* * * * *', async () => {
+  try {
+    const { tickMeetupSafetyReminders } = require('./services/meetupSafetyReminderService');
+    await tickMeetupSafetyReminders();
+  } catch (err) {
+    console.error('[CRON] Meetup safety tick error:', err.message);
+  }
+});
+
+// Sports discovery (Phase 5D): one startup line that states the gate (OFF / ON since / enabled
+// but not running), so an operator can see it in the log without reading the environment.
+// It only logs; nothing is started here.
+try {
+  require('./services/sportsDiscoveryService').logStartupBanner();
+} catch (err) {
+  console.error('[SPORTS_DISCOVERY] startup banner failed:', err && err.name);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EVERY MINUTE — Sports attendance check
+//
+// An hour before a Sports game the group chat asks "Are you still coming?"; at the
+// start time the poll closes and the result is posted. One indexed query per step
+// per tick; all state is in Mongo and every step is a conditional update, so it
+// survives a restart and is safe to run twice or on several instances at once.
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// Phase 4: the same tick also flushes Sports chat message pushes that waited out
+// their 3-minute window (one grouped push each, or none if already read). Its
+// own try, so neither step can stop the other.
+cron.schedule('* * * * *', async () => {
+  try {
+    const { tickSportsAttendance } = require('./services/sportsAttendanceService');
+    await tickSportsAttendance();
+  } catch (err) {
+    console.error('[CRON] Sports attendance tick error:', err.message);
+  }
+  try {
+    const { flushMessagePushes } = require('./services/sportsChatService');
+    await flushMessagePushes();
+  } catch (err) {
+    console.error('[CRON] Sports message push flush error:', err.message);
+  }
+  // Sports discovery (Phase 5C): "{Sport} plan near you" to a few nearby people who
+  // qualify, once per plan. A complete no-op unless SPORTS_DISCOVERY_ENABLED=true
+  // (and SPORTS_DISCOVERY_STARTED_AT is set); its own try, like the two above.
+  try {
+    const { tickSportsDiscovery } = require('./services/sportsDiscoveryService');
+    await tickSportsDiscovery();
+  } catch (err) {
+    console.error('[CRON] Sports discovery tick error:', err && err.name);
+  }
+  // No-join outcome: a plan that started with nobody but its host ever in it closes its
+  // chat once and tells the host once (services/sportsSessionService.js, tickNoJoin).
+  // Kill switch SPORTS_NO_JOIN_ENABLED (default on); its own try, like the others.
+  try {
+    const { tickNoJoin } = require('./services/sportsSessionService');
+    await tickNoJoin();
+  } catch (err) {
+    console.error('[CRON] Sports no-join tick error:', err && err.name);
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EVERY 5 MINUTES — Official Events: auto-publish Scheduled, auto-expire old
+// ══════════════════════════════════════════════════════════════════════════════
+cron.schedule('*/5 * * * *', async () => {
+  try {
+    const { runOfficialEventsCron } = require('./cronJobs/officialEventsCron');
+    await runOfficialEventsCron();
+  } catch (err) {
+    console.error('[CRON] Official Events tick error:', err.message);
+  }
+  // Ask a Question: ACTIVE questions past their 24 h → EXPIRED (bounded batches, idempotent).
+  // Runs whatever QUESTIONS_ENABLED says: it only closes things. Its own try.
+  try {
+    const { tickQuestionExpiry } = require('./services/questionService');
+    await tickQuestionExpiry();
+  } catch (err) {
+    console.error('[CRON] Question expiry tick error:', err && err.name);
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EVERY MINUTE — Ask a Question (Phase 4): answers that arrived inside a question's
+// 2-minute push window go to the asker as one push ("3 new answers"), or none if they
+// were deleted, hidden or blocked meanwhile. A no-op while QUESTIONS_ENABLED is off or
+// QUESTION_PUSH_ENABLED=false. Its own schedule, so it cannot delay or stop any other.
+// ══════════════════════════════════════════════════════════════════════════════
+cron.schedule('* * * * *', async () => {
+  try {
+    const { flushAnswerPushes } = require('./services/questions/questionNotifications');
+    await flushAnswerPushes();
+  } catch (err) {
+    console.error('[CRON] Question answer push flush error:', err && err.name);
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EVERY HOUR — general cleanup
+// ══════════════════════════════════════════════════════════════════════════════
+cron.schedule('0 * * * *', async () => {
+  console.log(`\n🧹 [CRON] Hourly cleanup — ${new Date().toISOString()}`);
+
+  try {
+    // 1. Mark expired bookings (PENDING / SEARCHING / RESERVED past expiresAt)
+    const expiredResult = await RandomBooking.cleanupExpired();
+    console.log(`✅ [CRON] Expired bookings marked: ${expiredResult.modifiedCount || 0}`);
+
+    // 2. Delete expired chats
+    const deletedChats = await RandomBookingChat.cleanupExpired();
+    // Two stages now: chats close at expiresAt, their text is purged 24h later.
+    console.log(`✅ [CRON] Chats closed: ${deletedChats.expired}/${deletedChats.total} | ` +
+                `text purged: ${deletedChats.purged} chat(s), ${deletedChats.messagesRemoved} message(s)`);
+
+    // 3. Clean up encryption keys
+    const deletedKeys = await EncryptionKey.cleanupExpired();
+    console.log(`✅ [CRON] Encryption keys cleaned: ${deletedKeys.modifiedCount || 0}`);
+
+    // 4. Auto-expire Safety Tickets
+    const { checkExpiry: checkSafetyExpiry } = require('./cronJobs/safetyTicketExpiry');
+    await checkSafetyExpiry();
+
+    // 5. Clean orphan letter data (replies, reactions, reports)
+    try {
+      const LetterReply = require('./models/LetterReply');
+      const LetterReaction = require('./models/LetterReaction');
+      const LetterReport = require('./models/LetterReport');
+      const LetterNotification = require('./models/LetterNotification');
+      const Letter = require('./models/Letter');
+      
+      const activeLetters = await Letter.find({}, '_id').lean();
+      const existingLetterIds = activeLetters.map(l => l._id);
+
+      const [repliesRes, reactionsRes, reportsRes, notifRes] = await Promise.all([
+        LetterReply.deleteMany({ letterId: { $nin: existingLetterIds } }),
+        LetterReaction.deleteMany({ letterId: { $nin: existingLetterIds } }),
+        LetterReport.deleteMany({ letterId: { $nin: existingLetterIds } }),
+        LetterNotification.deleteMany({ letterId: { $nin: existingLetterIds } })
+      ]);
+
+      console.log('🧹 [Letters Cleanup]');
+      console.log(`   Deleted orphan replies: ${repliesRes.deletedCount}`);
+      console.log(`   Deleted orphan reactions: ${reactionsRes.deletedCount}`);
+      console.log(`   Deleted orphan reports: ${reportsRes.deletedCount}`);
+      console.log(`   Deleted orphan notifications: ${notifRes.deletedCount}`);
+    } catch (err) {
+      console.error('[CRON] Letters orphan cleanup error:', err.message);
+    }
+
+    // 6. R7.1 — expire overdue Meetup proposals.
+    //    Reuses this existing hourly cleanup rather than adding a new scheduler.
+    //    A no-op while MEETUP_ENABLED is false. Correctness does not depend on it:
+    //    the proposal path self-heals a Room's expired Meetups before checking the
+    //    one-active-Meetup rule, so this is a housekeeping sweep, not the guarantee.
+    try {
+      const { expireStaleMeetups } = require('./services/meetup/meetupExpiryService');
+      const meetupExpiry = await expireStaleMeetups();
+      if (!meetupExpiry.skipped) {
+        console.log(`✅ [CRON] Meetup proposals expired: ${meetupExpiry.expiredCount}`);
+      }
+    } catch (err) {
+      console.error('[CRON] Meetup expiry error:', err.message);
+    }
+
+    console.log('✨ [CRON] Hourly cleanup complete\n');
+  } catch (err) {
+    console.error('❌ [CRON] Hourly cleanup error:', err);
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DAILY MIDNIGHT — stats report
+// ══════════════════════════════════════════════════════════════════════════════
+cron.schedule('0 0 * * *', async () => {
+  console.log('📊 [CRON] Daily stats report');
+
+  try {
+    const WeeklyUsage = require('./models/WeeklyUsage');
+    const yesterday   = new Date(Date.now() - 24 * 3600 * 1000);
+
+    const [total, active, matchedToday, surpriseMatchedToday, weeklyStats] = await Promise.all([
+      RandomBooking.countDocuments(),
+      RandomBooking.countDocuments({ status: { $in: ['PENDING', 'SEARCHING', 'RESERVED'] } }),
+      RandomBooking.countDocuments({ status: 'MATCHED',  matchedAt: { $gte: yesterday } }),
+      RandomBooking.countDocuments({ status: 'MATCHED',  activityType: 'CASUAL', matchedAt: { $gte: yesterday } }),
+      WeeklyUsage.getStatistics().catch(() => ({ totalUsers: 'n/a', totalBookings: 'n/a' })),
+    ]);
+
+    console.log('📈 [STATS]');
+    console.log(`   Total bookings:           ${total}`);
+    console.log(`   Active (searching):        ${active}`);
+    console.log(`   Matched today (all):       ${matchedToday}`);
+    console.log(`   Matched today (surprise):  ${surpriseMatchedToday}`);
+    console.log(`   Weekly users:              ${weeklyStats.totalUsers}`);
+    console.log(`   Weekly bookings:           ${weeklyStats.totalBookings}`);
+    console.log('---------------------------------------------------\n');
+    
+    // Humrah Letters Daily Analytics
+    try {
+      console.log('📊 [CRON] Humrah Letters Analytics');
+      const { runDailyAnalytics } = require('./utils/analyticsHelper');
+      await runDailyAnalytics();
+    } catch (err) {
+      console.error('❌ [CRON] Humrah Letters Analytics error:', err);
+    }
+    
+  } catch (err) {
+    console.error('❌ [CRON] Stats error:', err);
+  }
+});
+
+console.log('🤖 Cron jobs initialised');
+console.log('   • Reservation expiry tick: every minute');
+console.log('   • Meetup safety tick:      every minute');
+console.log('   • Official Events tick:    every 5 minutes');
+console.log('   • General cleanup:         every hour');
+console.log('   • Stats report:            daily at midnight\n');
+
+// ══════════════════════════════════════════════════════════════════════════════
+// AI Moderation Worker (Runs continuously in background)
+// ══════════════════════════════════════════════════════════════════════════════
+const runModerationWorker = require('./cronJobs/aiModerationWorker');
+runModerationWorker();
+console.log('🤖 AI Moderation Worker initialized');

@@ -1531,6 +1531,14 @@ async function joinSession(userId, sessionId, io) {
 
   const isFirstJoin = joined.participants.length === 1;
 
+  // Rejoining clears any earlier leave, so an old "left" can never hide this hangout
+  // from their Sessions list (movieMembershipService). Never fails the join.
+  try {
+    await require('./movieMembershipService').clearLeave(userId, joined._id);
+  } catch (e) {
+    console.warn('[joinSession] leave not cleared:', e.message);
+  }
+
   // ── Atomic admin assignment — only if no admin yet ────────────────────────
   await MovieSession.findOneAndUpdate(
     { _id: sessionId, adminId: null },
@@ -1600,8 +1608,12 @@ async function getSessionChat(userId, sessionId, page = 1, limit = 30) {
   const isMember = session.participants.some(p => p.toString() === userId.toString());
   if (!isMember) return { success: false, status: 403, message: 'You are not a member of this session' };
 
+  // "Delete for me": what this person hid is left out of their own history only.
+  const { formatMovieMessage, loadReplyTargets, hiddenFor } = require('./movieHangoutService');
+  const hidden = await hiddenFor(userId, session._id);
+
   const skip = (page - 1) * limit;
-  const messages = await MovieMessage.find({ sessionId })
+  const messages = await MovieMessage.find({ sessionId, ...(hidden.size ? { _id: { $nin: [...hidden] } } : {}) })
     .sort({ createdAt: -1 })
     .skip(skip)
     .limit(limit)
@@ -1609,8 +1621,18 @@ async function getSessionChat(userId, sessionId, page = 1, limit = 30) {
 
   // The same per-message shape the socket sends (adds clientMessageId, editedAt,
   // deleted and the reply's quote; a deleted message keeps only its place).
-  const { formatMovieMessage, loadReplyTargets } = require('./movieHangoutService');
   const replyTargets = await loadReplyTargets(messages);
+
+  // Movie Hangout header + information panel (additive): the hangout's real details,
+  // its current members (first name and photo only, as the Sessions list shows) and
+  // the ticket check. Nothing here is invented: a missing field stays null.
+  const User = mongoose.model('User');
+  const people = await User.find({ _id: { $in: session.participants } }).select('firstName profilePhoto').lean();
+  const byId = new Map(people.map(u => [u._id.toString(), u]));
+  const creatorId = session.createdBy && session.createdBy.toString ? session.createdBy.toString() : null;
+  const coords = session.location && Array.isArray(session.location.coordinates) ? session.location.coordinates : null;
+  const MovieTicketPoll = require('../models/MovieTicketPoll');
+  const poll = await MovieTicketPoll.findOne({ sessionId: session._id }).lean();
 
   return {
     success: true,
@@ -1621,6 +1643,40 @@ async function getSessionChat(userId, sessionId, page = 1, limit = 30) {
       pinnedMessageId: session.pinnedMessageId?.toString() || null,
       expiresAt: session.chatExpiresAt.toISOString(),
       status:    session.status,
+      session: {
+        id:                session._id.toString(),
+        movieId:           session.movieId,
+        title:             session.movieTitle,
+        posterPath:        session.poster || null,
+        theatreName:       session.theatreName || null,
+        theatreAddress:    session.theatreAddress || null,
+        theatrePlaceId:    session.theatrePlaceId || null,
+        lat:               coords && coords.length === 2 ? coords[1] : null,
+        lng:               coords && coords.length === 2 ? coords[0] : null,
+        showTime:          session.showTime ? session.showTime.toISOString() : null,
+        date:              session.date || '',
+        time:              session.time || '',
+        timeLabel:         session.showTime ? getTimeLabel(session.showTime) : null,
+        status:            session.status,
+        maxParticipants:   session.maxParticipants,
+        participantsCount: session.participants.length,
+        isSystemGenerated: !!session.isSystemGenerated,
+        isCreator:         creatorId === userId.toString(),
+      },
+      members: session.participants.map(p => {
+        const id = p.toString();
+        const u = byId.get(id);
+        return {
+          id,
+          firstName:    (u && u.firstName) || '',
+          profilePhoto: (u && u.profilePhoto) || null,
+          isHost:       id === creatorId,
+          isMe:         id === userId.toString(),
+        };
+      }),
+      ticketPoll: poll
+        ? require('./movieTicketPollService').formatPoll(poll, session.participants, userId)
+        : null,
     },
   };
 }
@@ -1776,13 +1832,29 @@ async function debugSessions() {
 // are returned as long as the chat window is still open.
 // ─────────────────────────────────────────────────────────────────────────────
 async function getMySessions(userId) {
-  const sessions = await MovieSession.find({
+  const memberOf = await MovieSession.find({
     participants: userId,
   })
     .populate('participants', 'firstName lastName profilePhoto')
     .sort({ showTime: -1 })
     .limit(50)
     .lean();
+
+  // Leave Hangout: a hangout this person left stays in THEIR list for 5 minutes after
+  // the server's leave time, marked as left (not openable), then is never returned
+  // again. Decided here from the stored leftAt — no timer — so it holds with the app
+  // closed and across restarts; other members' lists are not affected.
+  const membership = require('./movieMembershipService');
+  const leaves = await membership.recentLeaves(userId);
+  const memberIds = new Set(memberOf.map(s => s._id.toString()));
+  const leftIds = [...leaves.keys()].filter(id => !memberIds.has(id));
+  const leftOf = leftIds.length
+    ? await MovieSession.find({ _id: { $in: leftIds } })
+      .populate('participants', 'firstName lastName profilePhoto')
+      .lean()
+    : [];
+  const sessions = [...memberOf, ...leftOf]
+    .sort((a, b) => new Date(b.showTime || 0) - new Date(a.showTime || 0));
 
   // Attach chat status for each session
   const chatIds = sessions
@@ -1802,7 +1874,9 @@ async function getMySessions(userId) {
     success: true,
     sessions: sessions.map(s => {
       const chat     = s.chatId ? chatMap[s.chatId.toString()] : null;
-      const chatOpen = chat && chat.status === 'active' && new Date(chat.expiresAt) > now;
+      const leftAt   = memberIds.has(s._id.toString()) ? null : leaves.get(s._id.toString());
+      // Someone who left cannot type, and cannot open the chat (the server refuses them).
+      const chatOpen = !leftAt && !!chat && chat.status === 'active' && new Date(chat.expiresAt) > now;
 
       return {
         id:                 s._id.toString(),
@@ -1830,6 +1904,11 @@ async function getMySessions(userId) {
         chatOpen,           // true = user can type; false = read-only
         isCreator:          s.createdBy?.toString?.() === userId.toString(),
         timeLabel:          getTimeLabel(s.showTime),
+        // Leave Hangout (additive): 'member', or 'left' during the 5-minute window, with
+        // the moment it disappears from this list.
+        membership:         leftAt ? 'left' : 'member',
+        leftAt:             leftAt ? new Date(leftAt).toISOString() : null,
+        listRemoveAt:       leftAt ? membership.listRemoveAt(leftAt).toISOString() : null,
       };
     }),
   };

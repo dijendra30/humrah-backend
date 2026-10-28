@@ -54,7 +54,13 @@ const movieMessageSchema = new mongoose.Schema({
   editedAt:  { type: Date, default: null },
   deletedAt: { type: Date, default: null },
   deletedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
-  readBy: [{ 
+  // Movie Hangout ticket check (additive). Set on the one system message that carries
+  // the poll; clients that know it draw the poll card, older ones show the system text.
+  pollId:    { type: mongoose.Schema.Types.ObjectId, ref: 'MovieTicketPoll', default: null },
+  // A server-written system message that must exist at most once per session
+  // ("MOVIE_TICKET_POLL:<sessionId>"). Unique per session where set (index below).
+  systemKey: { type: String, default: null },
+  readBy: [{
     type: mongoose.Schema.Types.ObjectId, 
     ref: 'User' 
   }],
@@ -68,5 +74,12 @@ const movieMessageSchema = new mongoose.Schema({
     index: true
   }
 }, { timestamps: false });
+
+// At most one system message per (session, systemKey). Partial: only rows that HAVE
+// a systemKey are indexed, so every existing message is untouched.
+movieMessageSchema.index(
+  { sessionId: 1, systemKey: 1 },
+  { unique: true, partialFilterExpression: { systemKey: { $type: 'string' } } }
+);
 
 module.exports = mongoose.model('MovieMessage', movieMessageSchema);

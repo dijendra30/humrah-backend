@@ -212,3 +212,51 @@ exports.debugSessions = async (req, res) => {
     return res.status(500).json({ success: false, message: err.message });
   }
 };
+
+// =============================================================================
+// Movie Hangout — Leave, Delete for me, ticket check (additive)
+// =============================================================================
+
+// POST /api/movie-session/:id/leave — the caller leaves (never anyone else).
+exports.leaveSession = async (req, res) => {
+  try {
+    const { leaveSession } = require('../services/movieMembershipService');
+    return send(res, await leaveSession(uid(req), req.params.id, req.app.get('io')));
+  } catch (err) {
+    console.error('[ctrl] leaveSession:', err.message);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+// POST /api/movie-session/:id/messages/:messageId/hide — delete for me.
+exports.hideMessage = async (req, res) => {
+  try {
+    const { hideMovieMessage } = require('../services/movieHangoutService');
+    return send(res, await hideMovieMessage(uid(req), req.params.id, req.params.messageId));
+  } catch (err) {
+    console.error('[ctrl] hideMessage:', err.message);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+// GET /api/movie-session/:id/ticket-poll — members only; { poll: null } until it opens.
+exports.getTicketPoll = async (req, res) => {
+  try {
+    const { getPoll } = require('../services/movieTicketPollService');
+    return send(res, await getPoll(uid(req), req.params.id));
+  } catch (err) {
+    console.error('[ctrl] getTicketPoll:', err.message);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+// POST /api/movie-session/:id/ticket-poll { answer } — the caller's own answer.
+exports.voteTicketPoll = async (req, res) => {
+  try {
+    const { castVote } = require('../services/movieTicketPollService');
+    return send(res, await castVote(uid(req), req.params.id, req.body || {}, req.app.get('io')));
+  } catch (err) {
+    console.error('[ctrl] voteTicketPoll:', err.message);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};

@@ -29,7 +29,15 @@ const movieParticipantSchema = new mongoose.Schema({
   mutedUsers: [{ 
     type: mongoose.Schema.Types.ObjectId, 
     ref: 'User' 
-  }]
+  }],
+  // Leave Hangout (additive). When this person left; null while they are in it.
+  // Their own Sessions list keeps the hangout for 5 minutes after this, then never
+  // again (movieMembershipService.LIST_GRACE_MS) — decided whenever the list is
+  // read, so no timer can be lost. Rejoining clears it.
+  leftAt: {
+    type: Date,
+    default: null
+  }
 }, { timestamps: true });
 
 // Compound index for unique participants per session
