@@ -13,7 +13,13 @@ async function validateAccess(userId, sessionId) {
   const isMember = session.participants.some(p => p.toString() === userId.toString());
   if (!isMember) throw new Error('Not a member');
 
-  if (session.status === 'expired') throw new Error('Chat is no longer available');
+  // The CHAT's own lifetime (7 days past the last message), not the card's status:
+  // the card expires 15 min after the showtime, the chat does not.
+  const lifetime = require('./movieChatLifetime');
+  if (lifetime.chatStateOf(session) === 'expired') {
+    await lifetime.persistExpiryIfDue(session);
+    throw new Error('Chat is no longer available');
+  }
 
   return session;
 }
@@ -36,6 +42,9 @@ async function handleSocketMessage(userId, sessionId, text, replyTo, clientMessa
 
   const sender = await User.findById(userId).select('firstName lastName profilePhoto').lean();
   const senderName = sender ? `${sender.firstName} ${sender.lastName || ''}`.trim() : 'User';
+
+  // A member's message keeps the chat alive — claimed only while it is still open.
+  if (!(await require('./movieChatLifetime').claimActivity(sessionId))) throw new Error('Chat is no longer available');
 
   const msg = new MovieMessage({
     sessionId,
@@ -78,6 +87,8 @@ async function handleSocketVoiceNote(userId, sessionId, voiceUrl, duration, repl
 
   const sender = await User.findById(userId).select('firstName lastName profilePhoto').lean();
   const senderName = sender ? `${sender.firstName} ${sender.lastName || ''}`.trim() : 'User';
+
+  if (!(await require('./movieChatLifetime').claimActivity(sessionId))) throw new Error('Chat is no longer available');
 
   const msg = new MovieMessage({
     sessionId,
@@ -294,7 +305,11 @@ async function _accessFor(userId, sessionId) {
   if (!session.participants.some(p => p.toString() === userId.toString())) {
     return { error: _fail(403, 'NOT_A_MEMBER', 'You are not a member of this session') };
   }
-  if (session.status === 'expired') return { error: _fail(409, 'CHAT_CLOSED', 'This chat is no longer available') };
+  const lifetime = require('./movieChatLifetime');
+  if (lifetime.chatStateOf(session) === 'expired') {
+    await lifetime.persistExpiryIfDue(session);
+    return { error: _fail(409, 'CHAT_CLOSED', 'This chat is no longer available') };
+  }
   return { session };
 }
 

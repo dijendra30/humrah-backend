@@ -73,6 +73,13 @@ const movieSessionSchema = new mongoose.Schema({
   // Notification sent flag — avoids duplicate post-session notifications
   postSessionNotified: { type: Boolean, default: false },
 
+  // ── Chat lifetime (services/movieChatLifetime.js) — additive ────────────────
+  // The chat lives until max(lastMessageAt, showTime) + 7 days. lastMessageAt moves
+  // only on a member's message or a join, only forward. chatExpiredAt is written the
+  // first time the chat is seen closed. The card (status / expiresAt) is separate.
+  lastMessageAt: { type: Date, default: null },
+  chatExpiredAt: { type: Date, default: null },
+
 }, { timestamps: true });
 
 // ── Indexes ────────────────────────────────────────────────────────────────────
@@ -91,7 +98,10 @@ movieSessionSchema.index(
   { unique: true, partialFilterExpression: { dailyKey: { $type: 'string' } } }
 );
 
-// MongoDB TTL — auto-delete expired docs after 24 hrs (keeps collection clean)
-movieSessionSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 86400 });
+// No TTL any more: the old { expiresAt: 1 } TTL index deleted every hangout (and so
+// its chat) 24 h after its card ended. Chats now live 7 days past their last message
+// (movieChatLifetime.js), so it is gone from the schema; the copy already in the
+// database is removed once by scripts/migrateMovieChatLifetime.js --apply. Until that
+// runs, hangouts keep being deleted as before.
 
 module.exports = mongoose.model('MovieSession', movieSessionSchema);

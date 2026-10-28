@@ -64,6 +64,9 @@ router.delete('/movie-session/:id/messages/:messageId', ctrl.deleteMessage);
 // POST /api/movie-session/:id/leave — Leave Hangout (the caller only)
 router.post('/movie-session/:id/leave', ctrl.leaveSession);
 
+// POST /api/movie-session/:id/hide — delete a closed hangout chat from my Sessions list
+router.post('/movie-session/:id/hide', ctrl.hideSession);
+
 // POST /api/movie-session/:id/messages/:messageId/hide — delete a message for me only
 router.post('/movie-session/:id/messages/:messageId/hide', ctrl.hideMessage);
 

@@ -228,6 +228,17 @@ exports.leaveSession = async (req, res) => {
   }
 };
 
+// POST /api/movie-session/:id/hide — delete a CLOSED hangout chat from my Sessions list.
+exports.hideSession = async (req, res) => {
+  try {
+    const { hideSession } = require('../services/movieMembershipService');
+    return send(res, await hideSession(uid(req), req.params.id));
+  } catch (err) {
+    console.error('[ctrl] hideSession:', err.message);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
 // POST /api/movie-session/:id/messages/:messageId/hide — delete for me.
 exports.hideMessage = async (req, res) => {
   try {

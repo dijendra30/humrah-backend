@@ -37,6 +37,12 @@ const movieParticipantSchema = new mongoose.Schema({
   leftAt: {
     type: Date,
     default: null
+  },
+  // "Delete" from my Sessions list (a closed chat only). This person's list only;
+  // a later message in the chat would show it again (movieChatLifetime.hiddenFromList).
+  hiddenAt: {
+    type: Date,
+    default: null
   }
 }, { timestamps: true });
 

@@ -27,6 +27,7 @@ const MovieParticipant = require('../models/MovieParticipant');
 const LIST_GRACE_MS = 5 * 60 * 1000;
 
 const fail = (status, code, message) => ({ success: false, status, code, message });
+const ids = arr => (arr || []).map(String);
 const iso = d => new Date(d).toISOString();
 
 /** When a leave stops showing in the leaver's own Sessions list. */
@@ -40,6 +41,13 @@ const listRemoveAt = leftAt => new Date(new Date(leftAt).getTime() + LIST_GRACE_
 async function leaveSession(userId, sessionId, io, now = Date.now()) {
   if (!mongoose.isValidObjectId(sessionId)) return fail(404, 'SESSION_NOT_FOUND', 'Session not found');
   const uid = new mongoose.Types.ObjectId(String(userId));
+
+  // A closed chat is not left — it is deleted from your list (hideSession), as in Sports.
+  const lifetime = require('./movieChatLifetime');
+  const current = await MovieSession.findById(sessionId).select('participants showTime lastMessageAt chatExpiredAt').lean();
+  if (current && ids(current.participants).includes(String(uid)) && lifetime.chatStateOf(current, now) === 'expired') {
+    return { ...fail(409, 'CHAT_EXPIRED', 'This chat has closed. Delete it from your sessions instead.'), removal: 'DELETE' };
+  }
 
   // The one step that decides it: only a current member is removed, exactly once.
   const updated = await MovieSession.findOneAndUpdate(
@@ -107,6 +115,33 @@ async function leaveSession(userId, sessionId, io, now = Date.now()) {
     leftAt: iso(leftAt), listRemoveAt: iso(listRemoveAt(leftAt)) };
 }
 
+/**
+ * POST /movie-session/:id/hide — "Delete" a closed hangout chat from MY Sessions list
+ * (Sports' hideSession). Members only, and only once the chat has closed: an open one is
+ * left instead (409, removal LEAVE). One field on the caller's own row; nothing shared
+ * changes, nobody is told, and repeating it is harmless.
+ */
+async function hideSession(userId, sessionId, now = Date.now()) {
+  if (!mongoose.isValidObjectId(sessionId)) return fail(404, 'SESSION_NOT_FOUND', 'Session not found');
+  const session = await MovieSession.findById(sessionId).select('participants showTime lastMessageAt chatExpiredAt').lean();
+  if (!session) return fail(404, 'SESSION_NOT_FOUND', 'Session not found');
+  if (!ids(session.participants).includes(String(userId))) {
+    return fail(403, 'NOT_A_MEMBER', 'You are not a member of this hangout');
+  }
+  const lifetime = require('./movieChatLifetime');
+  if (lifetime.chatStateOf(session, now) !== 'expired') {
+    return { ...fail(409, 'SESSION_STILL_ACTIVE', 'This hangout chat is still open. Leave it to remove it from your sessions.'), removal: 'LEAVE' };
+  }
+  await lifetime.persistExpiryIfDue(session, now);
+  const at = new Date(now);
+  await MovieParticipant.updateOne(
+    { sessionId: session._id, userId },
+    { $set: { hiddenAt: at }, $setOnInsert: { joinedAt: at } },
+    { upsert: true },
+  );
+  return { success: true, status: 200, hidden: true, sessionId: String(session._id) };
+}
+
 /** Joining (or rejoining): this person is in it again — no leave may hide it. */
 async function clearLeave(userId, sessionId) {
   await MovieParticipant.updateOne(
@@ -127,4 +162,4 @@ async function recentLeaves(userId, now = Date.now()) {
   return new Map(rows.map(r => [String(r.sessionId), r.leftAt]));
 }
 
-module.exports = { leaveSession, clearLeave, recentLeaves, listRemoveAt, LIST_GRACE_MS };
+module.exports = { leaveSession, hideSession, clearLeave, recentLeaves, listRemoveAt, LIST_GRACE_MS };

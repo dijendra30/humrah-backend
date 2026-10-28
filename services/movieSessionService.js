@@ -1538,6 +1538,12 @@ async function joinSession(userId, sessionId, io) {
   } catch (e) {
     console.warn('[joinSession] leave not cleared:', e.message);
   }
+  // A join is chat activity (movieChatLifetime): it moves lastMessageAt forward.
+  try {
+    await require('./movieChatLifetime').claimActivity(joined._id);
+  } catch (e) {
+    console.warn('[joinSession] activity not recorded:', e.message);
+  }
 
   // ── Atomic admin assignment — only if no admin yet ────────────────────────
   await MovieSession.findOneAndUpdate(
@@ -1641,8 +1647,11 @@ async function getSessionChat(userId, sessionId, page = 1, limit = 30) {
       participants: session.participants.map(p => p.toString()),
       messages:     messages.reverse().map(m => formatMovieMessage(m, replyTargets)),
       pinnedMessageId: session.pinnedMessageId?.toString() || null,
-      expiresAt: session.chatExpiresAt.toISOString(),
-      status:    session.status,
+      // The chat's own lifetime (7 days past the last message), written once when seen
+      // closed. session.status (below, in `session`) is still the card's.
+      expiresAt: require('./movieChatLifetime').chatExpiresAtOf(session).toISOString(),
+      status:    require('./movieChatLifetime').chatStateOf(
+        await require('./movieChatLifetime').persistExpiryIfDue(session)),
       session: {
         id:                session._id.toString(),
         movieId:           session.movieId,
@@ -1853,30 +1862,38 @@ async function getMySessions(userId) {
       .populate('participants', 'firstName lastName profilePhoto')
       .lean()
     : [];
-  const sessions = [...memberOf, ...leftOf]
+  // Chat lifetime (movieChatLifetime.js), Sports' rules: an open chat is listed; a closed
+  // one is listed (read-only, with "Delete") for 7 days after it closed, unless this
+  // member deleted it from their list; after that it is not returned at all.
+  const lifetime = require('./movieChatLifetime');
+  const nowMs = Date.now();
+  const rows = memberOf.length
+    ? await MovieParticipant.find({ userId, sessionId: { $in: memberOf.map(s => s._id) } }).select('sessionId hiddenAt').lean()
+    : [];
+  const rowBySession = new Map(rows.map(r => [r.sessionId.toString(), r]));
+  const listedMemberOf = [];
+  for (const s of memberOf) {
+    if (lifetime.chatStateOf(s, nowMs) === 'expired') {
+      if (!s.chatExpiredAt) await lifetime.persistExpiryIfDue(s, nowMs);
+      const until = lifetime.listedUntil(s, nowMs);
+      if (until && nowMs >= until.getTime()) continue;                               // closed > 7 days
+      if (lifetime.hiddenFromList(rowBySession.get(s._id.toString()), s)) continue;  // they deleted it
+    }
+    listedMemberOf.push(s);
+  }
+
+  const sessions = [...listedMemberOf, ...leftOf]
     .sort((a, b) => new Date(b.showTime || 0) - new Date(a.showTime || 0));
-
-  // Attach chat status for each session
-  const chatIds = sessions
-    .map(s => s.chatId)
-    .filter(Boolean);
-
-  const chats = await MovieChat.find({ _id: { $in: chatIds } })
-    .select('_id status expiresAt')
-    .lean();
-
-  const chatMap = {};
-  chats.forEach(c => { chatMap[c._id.toString()] = c; });
 
   const now = new Date();
 
   return {
     success: true,
     sessions: sessions.map(s => {
-      const chat     = s.chatId ? chatMap[s.chatId.toString()] : null;
-      const leftAt   = memberIds.has(s._id.toString()) ? null : leaves.get(s._id.toString());
+      const leftAt    = memberIds.has(s._id.toString()) ? null : leaves.get(s._id.toString());
+      const chatState = lifetime.chatStateOf(s, nowMs);
       // Someone who left cannot type, and cannot open the chat (the server refuses them).
-      const chatOpen = !leftAt && !!chat && chat.status === 'active' && new Date(chat.expiresAt) > now;
+      const chatOpen  = !leftAt && chatState === 'active';
 
       return {
         id:                 s._id.toString(),
@@ -1887,7 +1904,8 @@ async function getMySessions(userId) {
         theatreAddress:     s.theatreAddress,
         showTime:           s.showTime?.toISOString()     || null,
         expiresAt:          s.expiresAt?.toISOString()    || null,
-        chatExpiresAt:      s.chatExpiresAt?.toISOString() || null,
+        // When the CHAT closes (or closed): max(last message, showtime) + 7 days.
+        chatExpiresAt:      lifetime.chatExpiresAtOf(s).toISOString(),
         date:               s.date || '',
         time:               s.time || '',
         participants:       (s.participants || []).map(p => ({
@@ -1900,8 +1918,13 @@ async function getMySessions(userId) {
         isSystemGenerated:  s.isSystemGenerated,
         sessionStatus:      s.status,             // 'active' | 'expired'  (card)
         chatId:             s.chatId?.toString() || null,
-        chatStatus:         chat?.status || 'expired',
+        chatStatus:         chatState,            // 'active' | 'expired'  (chat)
         chatOpen,           // true = user can type; false = read-only
+        // Long press on the Sessions card: LEAVE while the chat is open, DELETE (from my
+        // own list) once it has closed; null for a hangout I already left.
+        removal:            leftAt ? null : lifetime.removalOf(s, nowMs),
+        // A closed chat leaves this list at this moment (7 days after it closed).
+        listedUntil:        leftAt ? null : (lifetime.listedUntil(s, nowMs) || null) && lifetime.listedUntil(s, nowMs).toISOString(),
         isCreator:          s.createdBy?.toString?.() === userId.toString(),
         timeLabel:          getTimeLabel(s.showTime),
         // Leave Hangout (additive): 'member', or 'left' during the 5-minute window, with

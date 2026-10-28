@@ -54,10 +54,15 @@ function startMovieSessionExpiryJob() {
       // But wait, the spec says "Session becomes read-only after expiry." (which is showTime + 3 hours, i.e., chatExpiresAt).
       // Let's find sessions that just passed chatExpiresAt and clean voice notes if not cleaned yet.
       
+      // Chats now live until max(lastMessageAt, showTime) + 7 days (movieChatLifetime.js),
+      // so their voice notes are kept until then — not deleted 3 h after the showtime
+      // while the chat is still open and readable.
+      const chatCutoff = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
       const chatsToExpire = await MovieSession.find({
-        chatExpiresAt: { $lte: now },
+        showTime: { $lte: chatCutoff },
+        $or: [{ lastMessageAt: null }, { lastMessageAt: { $lte: chatCutoff } }],
         voiceNotesCleaned: { $ne: true }
-      }).lean();
+      }).limit(200).lean();
 
       if (chatsToExpire.length > 0) {
         const admin = require('firebase-admin');
