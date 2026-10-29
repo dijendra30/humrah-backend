@@ -220,9 +220,13 @@ async function fetchMoodChats(userId) {
     let lastMessageText = null;
     let lastMessageAt = chat.updatedAt || chat.createdAt;
     
-    if (chat.messages && chat.messages.length > 0) {
-      const lastMsg = chat.messages[chat.messages.length - 1];
-      lastMessageText = lastMsg.text;
+    // The newest message this person can see (not one they deleted for themselves);
+    // a message deleted for everyone shows as such, never its old words.
+    const visible = (chat.messages || []).filter(m =>
+      !(m.hiddenFor || []).some(u => u.toString() === userId.toString()));
+    if (visible.length > 0) {
+      const lastMsg = visible[visible.length - 1];
+      lastMessageText = lastMsg.deletedForEveryoneAt ? 'This message was deleted' : lastMsg.text;
       lastMessageAt = lastMsg.createdAt;
     }
 

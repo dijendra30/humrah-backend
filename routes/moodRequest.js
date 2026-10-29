@@ -31,4 +31,14 @@ router.get('/chat/:chatRoomId',      ctrl.getChatRoom);
 // POST /api/mood-request/chat/:chatRoomId/message — send message (rate limited)
 router.post('/chat/:chatRoomId/message', ctrl.sendMessage);
 
+// Person-to-person chat actions (services/personChatService.js)
+// PATCH  /api/mood-request/chat/:chatRoomId/message/:messageId           — edit my message { text }
+router.patch('/chat/:chatRoomId/message/:messageId',        ctrl.editMessage);
+// DELETE /api/mood-request/chat/:chatRoomId/message/:messageId?scope=me|everyone
+router.delete('/chat/:chatRoomId/message/:messageId',       ctrl.deleteMessage);
+// POST   /api/mood-request/chat/:chatRoomId/message/:messageId/react     — { emoji } (again = remove)
+router.post('/chat/:chatRoomId/message/:messageId/react',   ctrl.reactToMessage);
+// POST   /api/mood-request/chat/:chatRoomId/mute                         — { muted: true|false }
+router.post('/chat/:chatRoomId/mute',                       ctrl.setMuted);
+
 module.exports = router;

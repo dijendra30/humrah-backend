@@ -5,6 +5,8 @@ const MoodRequest      = require('../models/MoodRequest');
 const MoodChat         = require('../models/MoodChat');
 const MatchingTodayMood = require('../models/MatchingTodayMood');
 const User             = require('../models/User');
+const personChat       = require('../services/personChatService');
+const mongoose         = require('mongoose');
 
 const FCM_AVAILABLE = (() => {
   try { require('../config/firebase'); return true; } catch { return false; }
@@ -274,15 +276,32 @@ exports.acceptRequest = async (req, res) => {
   try {
     const { requestId } = req.params;
     const now = new Date();
+    if (!mongoose.isValidObjectId(requestId)) {
+      return res.status(404).json({ success: false, message: 'Request not found or expired' });
+    }
 
-    const moodReq = await MoodRequest.findOne({
-      _id:        requestId,
-      receiverId: req.userId,
-      status:     'pending',
-      expiresAt:  { $gt: now },
-    });
+    // Blocked either way: never turns into a conversation.
+    const pendingReq = await MoodRequest.findOne({ _id: requestId, receiverId: req.userId }).select('senderId status chatRoomId').lean();
+    if (pendingReq && (await personChat.blockedBetween(req.userId, pendingReq.senderId)).any) {
+      return res.status(403).json({ success: false, code: 'BLOCKED', message: 'This request is no longer available' });
+    }
 
-    if (!moodReq) return res.status(404).json({ success: false, message: 'Request not found or expired' });
+    // The one step that decides it: only the intended recipient, only a pending,
+    // unexpired request, and only once — a second tap or a second device can't
+    // create a second conversation.
+    const moodReq = await MoodRequest.findOneAndUpdate(
+      { _id: requestId, receiverId: req.userId, status: 'pending', expiresAt: { $gt: now } },
+      { $set: { status: 'accepted', updatedAt: now } },
+      { new: true }
+    );
+
+    if (!moodReq) {
+      // Already accepted by this same person (a repeat tap): answer with the same chat.
+      if (pendingReq && pendingReq.status === 'accepted' && pendingReq.chatRoomId) {
+        return res.json({ success: true, chatRoomId: pendingReq.chatRoomId, message: 'Request accepted', alreadyAccepted: true });
+      }
+      return res.status(404).json({ success: false, message: 'Request not found or expired' });
+    }
 
     // Create private chat room (or reuse if exists)
     let chat = await MoodChat.findOne({
@@ -327,10 +346,16 @@ exports.acceptRequest = async (req, res) => {
       // mood-match create call is byte-identical to the original.
       if (seeded.length) chatDoc.messages = seeded;
 
-      chat = await MoodChat.create(chatDoc);
+      try {
+        chat = await MoodChat.create(chatDoc);
+      } catch (createErr) {
+        // Give the request back so it can be accepted again — never "accepted" without a chat.
+        await MoodRequest.updateOne({ _id: moodReq._id, status: 'accepted', chatRoomId: null },
+          { $set: { status: 'pending', updatedAt: new Date() } });
+        throw createErr;
+      }
     }
 
-    moodReq.status     = 'accepted';
     moodReq.chatRoomId = chat._id;
     moodReq.updatedAt  = now;
     await moodReq.save();
@@ -410,6 +435,7 @@ exports.getChatRoom = async (req, res) => {
   try {
     const { chatRoomId } = req.params;
 
+    if (!mongoose.isValidObjectId(chatRoomId)) return res.status(404).json({ success: false, message: 'Chat not found' });
     const chat = await MoodChat.findOne({
       _id:   chatRoomId,
       users: req.userId,
@@ -419,7 +445,11 @@ exports.getChatRoom = async (req, res) => {
 
     if (!chat) return res.status(404).json({ success: false, message: 'Chat not found' });
 
-    return res.json({ success: true, chat });
+    // What this person sees: their hidden messages left out, deleted ones as a
+    // placeholder, and whether they can still send (open chat, no block).
+    const peer  = personChat.peerOf(chat, req.userId);
+    const block = peer ? await personChat.blockedBetween(req.userId, peer._id || peer) : { any: false };
+    return res.json({ success: true, chat: personChat.shapeChatFor(chat, req.userId, block) });
   } catch (err) {
     console.error('❌ [MoodReq] getChatRoom:', err);
     return res.status(500).json({ success: false, message: 'Server error' });
@@ -430,14 +460,25 @@ exports.getChatRoom = async (req, res) => {
 exports.sendMessage = async (req, res) => {
   try {
     const { chatRoomId } = req.params;
-    const { text }       = req.body;
+    const { text, replyToId } = req.body;
 
     if (!text?.trim()) return res.status(400).json({ success: false, message: 'text required' });
+    if (!mongoose.isValidObjectId(chatRoomId)) return res.status(404).json({ success: false, message: 'Chat not found' });
 
     const chat = await MoodChat.findOne({ _id: chatRoomId, users: req.userId, active: true });
     if (!chat) return res.status(404).json({ success: false, message: 'Chat not found' });
+    if (!personChat.isOpen(chat)) {
+      return res.status(409).json({ success: false, code: 'CHAT_CLOSED', message: 'This chat has closed' });
+    }
+    // A block (either way) stops the conversation here, whatever the app shows.
+    const peerId = personChat.peerOf(chat, req.userId);
+    if (peerId && (await personChat.blockedBetween(req.userId, peerId)).any) {
+      return res.status(403).json({ success: false, code: 'BLOCKED', message: 'You can no longer message this person' });
+    }
 
     const msg = { senderId: req.userId, text: text.trim().slice(0, 500), createdAt: new Date() };
+    const reply = personChat.replyReference(chat, replyToId, req.userId);
+    if (reply) msg.replyTo = reply;
     chat.messages.push(msg);
     chat.updatedAt = new Date();
     await chat.save();
@@ -452,6 +493,7 @@ exports.sendMessage = async (req, res) => {
       console.log(`[MESSAGE_SAVED] Message saved to MongoDB for chat ${chatRoomId}`);
       const { io } = require('../server');
       const msgId = chat.messages[chat.messages.length - 1]?._id?.toString() ?? chatRoomId;
+      const saved = chat.messages[chat.messages.length - 1];
       io.to(chatRoomId).emit('new-message', {
         _id:             msgId,
         chatId:          chatRoomId,
@@ -462,6 +504,8 @@ exports.sendMessage = async (req, res) => {
         messageType:     'TEXT',
         isSystemMessage: false,
         deliveryStatus:  'SENT',
+        // Additive: the quoted message, for the new 1:1 chat screen.
+        replyTo:         saved ? personChat.shapeMessage(saved.toObject(), personChat.messageMap(chat)).replyTo : null,
       });
       console.log(`[MESSAGE_BROADCAST] Message broadcasted to Socket room ${chatRoomId}`);
     } catch {}
@@ -476,7 +520,9 @@ exports.sendMessage = async (req, res) => {
           User.findById(otherId).select('fcmTokens'),
           User.findById(req.userId).select('firstName profilePhoto'),
         ]);
-        if (recipient?.fcmTokens?.length > 0) {
+        // They muted this chat: the message is saved and shown live, just no push.
+        const recipientMuted = (chat.mutedBy || []).some(u => u.toString() === otherId.toString());
+        if (!recipientMuted && recipient?.fcmTokens?.length > 0) {
           const msgId = chat.messages[chat.messages.length - 1]?._id?.toString() ?? chatRoomId;
           await sendDataFcm(otherId.toString(), recipient.fcmTokens, {
             type:            'NEW_CHAT_MESSAGE',
@@ -495,7 +541,11 @@ exports.sendMessage = async (req, res) => {
       }
     }
 
-    return res.json({ success: true, message: msg });
+    const savedMsg = chat.messages[chat.messages.length - 1];
+    return res.json({
+      success: true,
+      message: savedMsg ? personChat.shapeMessage(savedMsg.toObject(), personChat.messageMap(chat)) : msg,
+    });
   } catch (err) {
     console.error('❌ [MoodReq] sendMessage:', err);
     return res.status(500).json({ success: false, message: 'Server error' });
@@ -515,9 +565,59 @@ exports.getMyChatRooms = async (req, res) => {
       .populate('users', 'firstName profilePhoto verified')
       .lean();
 
-    return res.json({ success: true, chats });
+    // Each chat as this person sees it (no mute list, no hidden-by lists).
+    const shaped = chats.map(c => personChat.shapeChatFor(c, req.userId, null));
+    return res.json({ success: true, chats: shaped });
   } catch (err) {
     console.error('❌ [MoodReq] getMyChatRooms:', err);
+    return res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+
+// ── 9. PERSON-TO-PERSON CHAT ACTIONS ──────────────────────────────────────────
+// Thin handlers; every rule lives in services/personChatService.js.
+const sendResult = (res, r, okBody) => r.ok
+  ? res.status(r.status || 200).json({ success: true, ...okBody(r) })
+  : res.status(r.status).json({ success: false, code: r.code, message: r.message });
+
+exports.editMessage = async (req, res) => {
+  try {
+    const r = await personChat.editMessage(req.userId, req.params.chatRoomId, req.params.messageId, req.body?.text);
+    return sendResult(res, r, x => ({ message: x.message }));
+  } catch (err) {
+    console.error('❌ [MoodReq] editMessage:', err);
+    return res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+exports.deleteMessage = async (req, res) => {
+  try {
+    const scope = req.query?.scope || req.body?.scope;
+    const r = await personChat.deleteMessage(req.userId, req.params.chatRoomId, req.params.messageId, scope);
+    return sendResult(res, r, x => (x.hidden ? { hidden: true, messageId: x.messageId } : { message: x.message }));
+  } catch (err) {
+    console.error('❌ [MoodReq] deleteMessage:', err);
+    return res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+exports.reactToMessage = async (req, res) => {
+  try {
+    const r = await personChat.reactToMessage(req.userId, req.params.chatRoomId, req.params.messageId, req.body?.emoji);
+    return sendResult(res, r, x => ({ message: x.message }));
+  } catch (err) {
+    console.error('❌ [MoodReq] reactToMessage:', err);
+    return res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+exports.setMuted = async (req, res) => {
+  try {
+    const r = await personChat.setMuted(req.userId, req.params.chatRoomId, req.body?.muted === true);
+    return sendResult(res, r, x => ({ muted: x.muted }));
+  } catch (err) {
+    console.error('❌ [MoodReq] setMuted:', err);
     return res.status(500).json({ success: false, message: 'Server error' });
   }
 };
