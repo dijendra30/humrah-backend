@@ -13,7 +13,9 @@
 //     again removes it, a different one replaces it.
 //   • Nothing can be sent or changed while either person has blocked the other,
 //     while either has left the conversation, or if the chat was switched off.
-//   • One-to-one chats do NOT expire: age never closes or hides them.
+//   • Chats created from now on carry no expiry and never close or hide because of
+//     age. Older chats keep the 24 h date they were given: once it has passed they
+//     stay closed and out of the lists, exactly as before (the user's choice).
 // -----------------------------------------------------------------------------
 'use strict';
 
@@ -42,10 +44,16 @@ async function blockedBetween(a, b) {
   };
 }
 
-// One-to-one chats never expire; only an explicit switch-off (active: false) closes one.
-// `now` is kept in the signature for the callers, not used.
-function isOpen(chat, now = Date.now()) { // eslint-disable-line no-unused-vars
-  return chat.active !== false;
+// New chats have no expiresAt and never expire. A chat from before this change still
+// has its old 24 h date; once that has passed it stays closed (and out of the lists).
+function isOpen(chat, now = Date.now()) {
+  if (chat.active === false) return false;
+  return !chat.expiresAt || new Date(chat.expiresAt).getTime() > now;
+}
+
+/** Query part: not an older chat that is past its old expiry (new chats have none). */
+function notLegacyExpired(now = new Date()) {
+  return { $or: [{ expiresAt: null }, { expiresAt: { $gt: now } }] };
 }
 
 /** Ids of the people who left this conversation (Leave Conversation). */
@@ -104,7 +112,7 @@ function shapeChatFor(chat, viewerId, block, now = Date.now()) {
   const peerLeft = left.some(id => id !== me);
   return {
     ...rest,
-    // No expiry for one-to-one chats; older documents still carry a date — never show it.
+    // No countdown is ever shown: new chats have no expiry, older ones simply close.
     expiresAt:   null,
     messages,
     mutedByMe:   (mutedBy || []).some(u => idOf(u) === me),
@@ -284,6 +292,6 @@ function replyReference(chat, replyToId, viewerId) {
 
 module.exports = {
   EDIT_WINDOW_MS, REACTIONS, DELETED_TEXT, MAX_TEXT,
-  blockedBetween, isOpen, leftIds, shapeMessage, shapeChatFor, messageMap, peerOf,
+  blockedBetween, isOpen, notLegacyExpired, leftIds, shapeMessage, shapeChatFor, messageMap, peerOf,
   editMessage, deleteMessage, reactToMessage, setMuted, replyReference, leaveChat,
 };

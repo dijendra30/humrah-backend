@@ -196,8 +196,10 @@ async function fetchMoodChats(userId) {
   const chats = await MoodChat.find({
     users: userId,
     active: true,
-    // One-to-one chats don't expire; a chat this person left is not in their list.
-    'leftBy.userId': { $ne: userId }
+    // A chat this person left is not in their list; nor is an older chat past its
+    // old 24 h expiry (chats created from now on have none and never expire).
+    'leftBy.userId': { $ne: userId },
+    $or: [{ expiresAt: null }, { expiresAt: { $gt: new Date() } }]
   })
     .populate({
       path: 'users',

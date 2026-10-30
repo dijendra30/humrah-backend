@@ -84,12 +84,13 @@ exports.sendRequest = async (req, res) => {
     // than raise a second request. Scoped to people_nearby so the mood-match
     // path, which the published app uses, keeps its original behaviour exactly.
     if (isPeopleNearby) {
-      // One-to-one chats don't expire. A conversation either person left is not
-      // "active": a new request (and its acceptance) reopens that same chat.
+      // A conversation either person left is not "active": a new request (and its
+      // acceptance) reopens that same chat. An older chat past its old expiry doesn't count.
       const activeChat = await MoodChat.findOne({
         users:       { $all: [senderId, receiverId] },
         active:      true,
         'leftBy.0':  { $exists: false },
+        ...personChat.notLegacyExpired(now),
       }).select('_id').lean();
 
       if (activeChat) {
@@ -306,14 +307,18 @@ exports.acceptRequest = async (req, res) => {
     }
 
     // One conversation per pair: if these two already have one (even one that
-    // someone left), it is reopened with its history — never a second chat.
+    // someone left), it is reopened with its history — never a second chat. An older
+    // chat past its old expiry stays closed and hidden; they get a fresh one instead.
     let chat = await MoodChat.findOne({
       users:  { $all: [moodReq.senderId, moodReq.receiverId], $size: 2 },
       active: true,
+      ...personChat.notLegacyExpired(now),
     }).sort({ createdAt: -1 }).lean();
 
     if (chat) {
-      await MoodChat.updateOne({ _id: chat._id }, { $set: { leftBy: [], requestId: moodReq._id, updatedAt: now } });
+      // Reopened now, so it never expires from here on.
+      await MoodChat.updateOne({ _id: chat._id },
+        { $set: { leftBy: [], requestId: moodReq._id, updatedAt: now }, $unset: { expiresAt: 1 } });
     }
 
     if (!chat) {
@@ -572,8 +577,9 @@ exports.getMyChatRooms = async (req, res) => {
     const chats = await MoodChat.find({
       users:  req.userId,
       active: true,
-      // No expiry for one-to-one chats; a chat I left is no longer in my list.
+      // A chat I left is no longer in my list; nor is an older chat past its old expiry.
       'leftBy.userId': { $ne: req.userId },
+      ...personChat.notLegacyExpired(),
     })
       .sort({ updatedAt: -1 })
       .limit(20)

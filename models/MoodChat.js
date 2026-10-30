@@ -48,8 +48,9 @@ const moodChatSchema = new mongoose.Schema({
     at:     { type: Date, default: Date.now },
   }],
 
-  // One-to-one chats no longer expire. Kept (not required, no TTL) only because
-  // older documents carry a value; nothing reads it to close or hide a chat.
+  // Chats created from now on have none and never expire. Chats from before keep the
+  // 24 h date they were given, and stay closed once it has passed. No TTL: nothing is
+  // ever deleted because of it.
   expiresAt:  { type: Date, default: null, index: true },
   createdAt:  { type: Date, default: Date.now },
   updatedAt:  { type: Date, default: Date.now },
