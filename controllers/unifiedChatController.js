@@ -193,10 +193,11 @@ async function fetchRandomBookingChats(userId) {
 
 // Helper: Fetch Mood Chats
 async function fetchMoodChats(userId) {
-  const chats = await MoodChat.find({ 
+  const chats = await MoodChat.find({
     users: userId,
     active: true,
-    expiresAt: { $gt: new Date() }
+    // One-to-one chats don't expire; a chat this person left is not in their list.
+    'leftBy.userId': { $ne: userId }
   })
     .populate({
       path: 'users',
@@ -249,7 +250,7 @@ async function fetchMoodChats(userId) {
         mood: chat.mood,
         vibeLevel: chat.vibeLevel,
         active: chat.active,
-        expiresAt: chat.expiresAt
+        expiresAt: null // never expires
       }
     };
   });

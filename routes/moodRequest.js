@@ -40,5 +40,7 @@ router.delete('/chat/:chatRoomId/message/:messageId',       ctrl.deleteMessage);
 router.post('/chat/:chatRoomId/message/:messageId/react',   ctrl.reactToMessage);
 // POST   /api/mood-request/chat/:chatRoomId/mute                         — { muted: true|false }
 router.post('/chat/:chatRoomId/mute',                       ctrl.setMuted);
+// POST   /api/mood-request/chat/:chatRoomId/leave                        — Leave Conversation
+router.post('/chat/:chatRoomId/leave',                      ctrl.leaveChat);
 
 module.exports = router;

@@ -39,8 +39,18 @@ const moodChatSchema = new mongoose.Schema({
   // People who turned off notifications for this chat (never shown to the other person).
   mutedBy: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
 
-  // Auto-expire chat 24h after creation
-  expiresAt:  { type: Date, required: true, index: true },
+  // "Leave Conversation": who left and when. A person who left no longer sees the
+  // chat in their lists and nobody can send until it is reopened by an accepted
+  // request (acceptRequest clears this). History is kept for both people.
+  leftBy: [{
+    _id:    false,
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    at:     { type: Date, default: Date.now },
+  }],
+
+  // One-to-one chats no longer expire. Kept (not required, no TTL) only because
+  // older documents carry a value; nothing reads it to close or hide a chat.
+  expiresAt:  { type: Date, default: null, index: true },
   createdAt:  { type: Date, default: Date.now },
   updatedAt:  { type: Date, default: Date.now },
 }, {

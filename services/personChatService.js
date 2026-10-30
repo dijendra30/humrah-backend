@@ -12,7 +12,8 @@
 //   • React: one reaction per person per message, from REACTIONS; the same emoji
 //     again removes it, a different one replaces it.
 //   • Nothing can be sent or changed while either person has blocked the other,
-//     or after the chat has closed.
+//     while either has left the conversation, or if the chat was switched off.
+//   • One-to-one chats do NOT expire: age never closes or hides them.
 // -----------------------------------------------------------------------------
 'use strict';
 
@@ -41,8 +42,15 @@ async function blockedBetween(a, b) {
   };
 }
 
-function isOpen(chat, now = Date.now()) {
-  return chat.active !== false && (!chat.expiresAt || new Date(chat.expiresAt).getTime() > now);
+// One-to-one chats never expire; only an explicit switch-off (active: false) closes one.
+// `now` is kept in the signature for the callers, not used.
+function isOpen(chat, now = Date.now()) { // eslint-disable-line no-unused-vars
+  return chat.active !== false;
+}
+
+/** Ids of the people who left this conversation (Leave Conversation). */
+function leftIds(chat) {
+  return (chat.leftBy || []).map(l => idOf(l.userId));
 }
 
 /** The quoted part of a reply, as it reads NOW (an edit shows, a deleted original never does). */
@@ -89,15 +97,22 @@ function shapeChatFor(chat, viewerId, block, now = Date.now()) {
   const messages = (chat.messages || [])
     .filter(m => !(m.hiddenFor || []).some(u => idOf(u) === me))
     .map(m => shapeMessage(m, byId));
-  const { mutedBy, ...rest } = chat;
+  const { mutedBy, leftBy, ...rest } = chat;
   const open = isOpen(chat, now);
+  const left = leftIds(chat);
+  const leftByMe = left.includes(me);
+  const peerLeft = left.some(id => id !== me);
   return {
     ...rest,
+    // No expiry for one-to-one chats; older documents still carry a date — never show it.
+    expiresAt:   null,
     messages,
     mutedByMe:   (mutedBy || []).some(u => idOf(u) === me),
     blockedByMe: !!block?.byA,
+    leftByMe,
+    peerLeft,
     // One flag for "you can't send here", without saying which side blocked.
-    canMessage:  open && !block?.any,
+    canMessage:  open && !block?.any && left.length === 0,
     closed:      !open,
   };
 }
@@ -119,6 +134,9 @@ async function writableFor(chatRoomId, userId, now = Date.now()) {
   const { chat, error } = await loadForMember(chatRoomId, userId);
   if (error) return { error };
   if (!isOpen(chat, now)) return { error: fail(409, 'CHAT_CLOSED', 'This chat has closed') };
+  const left = leftIds(chat);
+  if (left.includes(idOf(userId))) return { error: fail(409, 'LEFT', 'You left this conversation') };
+  if (left.length) return { error: fail(409, 'PEER_LEFT', 'This person is no longer in this conversation') };
   const peer = peerOf(chat, userId);
   if (peer && (await blockedBetween(userId, peer)).any) {
     return { error: fail(403, 'BLOCKED', 'You can no longer interact in this chat') };
@@ -230,6 +248,31 @@ async function setMuted(userId, chatRoomId, muted) {
   return { ok: true, status: 200, muted: !!muted };
 }
 
+// ── Leave Conversation ───────────────────────────────────────────────────────
+/**
+ * The caller leaves: recorded once (a repeat is harmless), the chat leaves THEIR lists,
+ * and nobody can send until an accepted request reopens it. Nothing is deleted, the
+ * other person is not blocked or reported, and their copy of the chat stays — it only
+ * says they are no longer in it.
+ */
+async function leaveChat(userId, chatRoomId, now = Date.now()) {
+  const { chat, error } = await loadForMember(chatRoomId, userId);
+  if (error) return error;
+  const uid = new mongoose.Types.ObjectId(idOf(userId));
+  const r = await MoodChat.updateOne(
+    { _id: chat._id, users: uid, 'leftBy.userId': { $ne: uid } },
+    { $push: { leftBy: { userId: uid, at: new Date(now) } }, $set: { updatedAt: new Date(now) } },
+  );
+  if (r.modifiedCount === 1) {
+    try {
+      const { io } = require('../server');
+      // No who/why beyond what the other screen needs to show its status.
+      io.to(idOf(chat._id)).emit('mood:participant-left', { chatId: idOf(chat._id) });
+    } catch (_) { /* best-effort; the next load is authoritative */ }
+  }
+  return { ok: true, status: 200, left: true, alreadyLeft: r.modifiedCount !== 1, chatRoomId: idOf(chat._id) };
+}
+
 /** Builds the stored reply reference for a new message (null if the target is gone). */
 function replyReference(chat, replyToId, viewerId) {
   if (!replyToId) return null;
@@ -241,6 +284,6 @@ function replyReference(chat, replyToId, viewerId) {
 
 module.exports = {
   EDIT_WINDOW_MS, REACTIONS, DELETED_TEXT, MAX_TEXT,
-  blockedBetween, isOpen, shapeMessage, shapeChatFor, messageMap, peerOf,
-  editMessage, deleteMessage, reactToMessage, setMuted, replyReference,
+  blockedBetween, isOpen, leftIds, shapeMessage, shapeChatFor, messageMap, peerOf,
+  editMessage, deleteMessage, reactToMessage, setMuted, replyReference, leaveChat,
 };

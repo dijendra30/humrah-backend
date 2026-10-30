@@ -84,10 +84,12 @@ exports.sendRequest = async (req, res) => {
     // than raise a second request. Scoped to people_nearby so the mood-match
     // path, which the published app uses, keeps its original behaviour exactly.
     if (isPeopleNearby) {
+      // One-to-one chats don't expire. A conversation either person left is not
+      // "active": a new request (and its acceptance) reopens that same chat.
       const activeChat = await MoodChat.findOne({
-        users:     { $all: [senderId, receiverId] },
-        active:    true,
-        expiresAt: { $gt: now },
+        users:       { $all: [senderId, receiverId] },
+        active:      true,
+        'leftBy.0':  { $exists: false },
       }).select('_id').lean();
 
       if (activeChat) {
@@ -303,15 +305,18 @@ exports.acceptRequest = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Request not found or expired' });
     }
 
-    // Create private chat room (or reuse if exists)
+    // One conversation per pair: if these two already have one (even one that
+    // someone left), it is reopened with its history — never a second chat.
     let chat = await MoodChat.findOne({
-      users:    { $all: [moodReq.senderId, moodReq.receiverId] },
-      active:   true,
-      requestId: moodReq._id,
-    }).lean();
+      users:  { $all: [moodReq.senderId, moodReq.receiverId], $size: 2 },
+      active: true,
+    }).sort({ createdAt: -1 }).lean();
+
+    if (chat) {
+      await MoodChat.updateOne({ _id: chat._id }, { $set: { leftBy: [], requestId: moodReq._id, updatedAt: now } });
+    }
 
     if (!chat) {
-      const chatExpiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000); // 24h
 
       // A People Nearby greeting opens the conversation, attributed to the
       // sender — and it is TWO messages, not one: a wave, then the words. They
@@ -340,7 +345,7 @@ exports.acceptRequest = async (req, res) => {
         mood:      moodReq.mood,
         vibeLevel: moodReq.vibeLevel,
         requestId: moodReq._id,
-        expiresAt: chatExpiresAt,
+        // No expiresAt: one-to-one chats don't expire.
       };
       // Only add the field at all when there is something to seed, so the
       // mood-match create call is byte-identical to the original.
@@ -476,6 +481,15 @@ exports.sendMessage = async (req, res) => {
       return res.status(403).json({ success: false, code: 'BLOCKED', message: 'You can no longer message this person' });
     }
 
+    // Leave Conversation: nobody sends until an accepted request reopens it.
+    const leftIds = personChat.leftIds(chat);
+    if (leftIds.includes(req.userId.toString())) {
+      return res.status(409).json({ success: false, code: 'LEFT', message: 'You left this conversation' });
+    }
+    if (leftIds.length) {
+      return res.status(409).json({ success: false, code: 'PEER_LEFT', message: 'This person is no longer in this conversation' });
+    }
+
     const msg = { senderId: req.userId, text: text.trim().slice(0, 500), createdAt: new Date() };
     const reply = personChat.replyReference(chat, replyToId, req.userId);
     if (reply) msg.replyTo = reply;
@@ -558,7 +572,8 @@ exports.getMyChatRooms = async (req, res) => {
     const chats = await MoodChat.find({
       users:  req.userId,
       active: true,
-      expiresAt: { $gt: new Date() },
+      // No expiry for one-to-one chats; a chat I left is no longer in my list.
+      'leftBy.userId': { $ne: req.userId },
     })
       .sort({ updatedAt: -1 })
       .limit(20)
@@ -618,6 +633,17 @@ exports.setMuted = async (req, res) => {
     return sendResult(res, r, x => ({ muted: x.muted }));
   } catch (err) {
     console.error('❌ [MoodReq] setMuted:', err);
+    return res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+
+exports.leaveChat = async (req, res) => {
+  try {
+    const r = await personChat.leaveChat(req.userId, req.params.chatRoomId);
+    return sendResult(res, r, x => ({ left: true, alreadyLeft: x.alreadyLeft, chatRoomId: x.chatRoomId }));
+  } catch (err) {
+    console.error('❌ [MoodReq] leaveChat:', err);
     return res.status(500).json({ success: false, message: 'Server error' });
   }
 };
