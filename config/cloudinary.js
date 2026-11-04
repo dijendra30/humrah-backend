@@ -73,17 +73,55 @@ const uploadBuffer = async (buffer, folder = 'humrah') => {
   });
 };
 
-// Helper function to upload verification video (Temporary, Authenticated)
+// =============================================
+// VERIFICATION VIDEOS ARE PRIVATE
+// =============================================
+// New verification videos are stored with Cloudinary delivery type 'authenticated': Cloudinary
+// refuses to deliver them unless the URL is signed with the API secret, which never leaves this
+// server. Admins watch them through /api/verification-media/<short-lived token>
+// (utils/verificationMedia.js), which streams the video from Cloudinary.
+//
+// VERIFICATION_VIDEO_DELIVERY_TYPE=upload restores the old public storage. It exists only as an
+// explicit, logged rollback switch if the Cloudinary account refuses authenticated uploads.
+const VERIFICATION_VIDEO_DELIVERY_TYPES = ['authenticated', 'upload'];
+
+function verificationVideoDeliveryType() {
+  const raw = String(process.env.VERIFICATION_VIDEO_DELIVERY_TYPE || 'authenticated').trim().toLowerCase();
+  return VERIFICATION_VIDEO_DELIVERY_TYPES.includes(raw) ? raw : 'authenticated';
+}
+
+/**
+ * The stored reference to a verification video. For 'authenticated' videos this URL is NOT
+ * signed, so it gives no access by itself; its path (/video/authenticated/) records how the
+ * video is stored. Older sessions store the public secure_url (/video/upload/).
+ */
+function verificationVideoReferenceUrl(publicId, deliveryType, version) {
+  return cloudinary.url(publicId, {
+    resource_type: 'video', type: deliveryType, secure: true, format: 'mp4',
+    ...(version ? { version } : {})
+  });
+}
+
+/** Server-side URL the media route fetches from. Signed for authenticated videos; never sent to clients or logged. */
+function verificationVideoSourceUrl(publicId, deliveryType) {
+  return cloudinary.url(publicId, {
+    resource_type: 'video', type: deliveryType, secure: true, format: 'mp4',
+    ...(deliveryType === 'authenticated' ? { sign_url: true } : {})
+  });
+}
+
+// Helper function to upload verification video (private: delivery type 'authenticated')
 const uploadVerificationVideo = async (filePath, sessionId) => {
+  const deliveryType = verificationVideoDeliveryType();
   return new Promise((resolve, reject) => {
-    console.log(`📤 [Cloudinary] Uploading verification video for session ${sessionId}`);
-    
-    console.log("Uploading video to Cloudinary");
+    if (deliveryType !== 'authenticated') {
+      console.warn('[Cloudinary] VERIFICATION_VIDEO_DELIVERY_TYPE=upload: verification video stored PUBLICLY (rollback mode)');
+    }
     const uploadStream = cloudinary.uploader.upload_stream(
       {
         folder: `verification-temp/${sessionId}`,
         resource_type: 'video',
-        type: 'upload', // Changed from 'authenticated' to 'upload' to bypass tier restrictions
+        type: deliveryType,
         format: 'mp4',
         invalidate: true,
         eager: '', // No transformations
@@ -94,25 +132,25 @@ const uploadVerificationVideo = async (filePath, sessionId) => {
       },
       (error, result) => {
         if (error) {
-          console.error("CLOUDINARY VIDEO ERROR");
-          console.error(error);
+          // Category and HTTP code only: the error object can echo upload parameters.
+          console.error(`[Cloudinary] verification video upload failed: ${error.name || 'Error'} http=${error.http_code || 'n/a'}`);
           reject(error);
+        } else if (!result || !result.public_id || !result.secure_url) {
+          resolve({ url: null, publicId: null, deliveryType });
         } else {
-          console.log("FULL CLOUDINARY RESULT");
-          console.log(result);
-          console.log("public_id:", result.public_id);
-          console.log("secure_url:", result.secure_url);
+          console.log(`[Cloudinary] verification video stored (type=${deliveryType}, bytes=${result.bytes || 'n/a'})`);
           resolve({
-            url: result.secure_url,
-            publicId: result.public_id
+            url: verificationVideoReferenceUrl(result.public_id, deliveryType, result.version),
+            publicId: result.public_id,
+            deliveryType
           });
         }
       }
     );
-    
+
     const readStream = fs.createReadStream(filePath);
     readStream.on('error', (err) => {
-      console.error(`❌ [Cloudinary Upload] Error reading file stream for session ${sessionId}:`, err);
+      console.error(`[Cloudinary] could not read the verification video temp file: ${err.code || err.name}`);
       reject(err);
     });
     
@@ -136,26 +174,20 @@ const deleteImage = async (publicId) => {
   }
 };
 
-// Helper function to delete video from Cloudinary
-const deleteVideo = async (publicId) => {
+// Helper function to delete video from Cloudinary.
+// `deliveryType` must match how the video was stored ('authenticated' for new verification
+// videos, 'upload' for older ones); Cloudinary does not find the asset under the wrong type.
+const deleteVideo = async (publicId, deliveryType = 'upload') => {
   try {
-    console.log(`[DELETE VIDEO CALLED]`);
-    console.log(`[VIDEO PUBLIC ID] ${publicId}`);
-    
-    // NOTE: Removed type: 'authenticated' since verification videos are now 'upload'
     const result = await cloudinary.uploader.destroy(publicId, {
       resource_type: 'video',
+      type: deliveryType,
       invalidate: true
     });
-    
-    console.log(`[CLOUDINARY DELETE RESPONSE]`, result);
-    
-    if (result && result.result === 'not found') {
-      console.log(`[CLOUDINARY ASSET NOT FOUND]`);
-    }
+    console.log(`[Cloudinary] video delete (type=${deliveryType}) result=${result && result.result}`);
     return true;
   } catch (error) {
-    console.error(`❌ [Cloudinary Delete Video] Error deleting video ${publicId}:`, error);
+    console.error(`[Cloudinary] video delete failed (type=${deliveryType}): ${error.name || 'Error'} http=${error.http_code || 'n/a'}`);
     return false;
   }
 };
@@ -208,5 +240,8 @@ module.exports = {
   deleteImage,
   deleteVideo,
   uploadBase64,
-  getAuthenticatedUrl
+  getAuthenticatedUrl,
+  verificationVideoDeliveryType,
+  verificationVideoReferenceUrl,
+  verificationVideoSourceUrl
 };

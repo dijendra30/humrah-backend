@@ -13,6 +13,7 @@ const Broadcast = require('../models/Broadcast');
 const { authenticate, adminOnly } = require('../middleware/auth');
 const { deleteImage, deleteVideo } = require('../config/cloudinary');
 const photoVerification = require('../utils/photoVerification');
+const verificationMedia = require('../utils/verificationMedia');
 
 // 1. Dashboard Stats
 router.get('/dashboard/stats', authenticate, adminOnly, async (req, res) => {
@@ -183,7 +184,9 @@ router.get('/verifications/pending', authenticate, adminOnly, async (req, res) =
     const formattedSessions = sessions
       .filter(session => session.userId)
       .map(session => {
-        let videoUrl = session.videoUrl || null;
+        // A short-lived link through /api/verification-media, never the storage URL itself.
+        // The field name is unchanged, so the deployed dashboard plays it as before.
+        const videoUrl = verificationMedia.mediaUrlFor(req, session, req.user && req.user._id);
 
         return {
           _id: session.userId._id, // User ID for backwards compatibility
@@ -295,8 +298,8 @@ router.post('/verifications/:userId/:action', authenticate, adminOnly, async (re
     // Capture media IDs for async cleanup before clearing them from DB
     const photoIdToDelete = user.verificationPhotoPublicId;
     const videoIdToDelete = session ? session.cloudinaryPublicId : null;
-    console.log(`[Admin Review] Loaded User photoIdToDelete: ${photoIdToDelete}`);
-    console.log(`[Admin Review] Loaded Session videoIdToDelete: ${videoIdToDelete}`);
+    // How the video was stored decides how Cloudinary must be asked to delete it.
+    const videoDeliveryType = session ? verificationMedia.deliveryTypeOf(session.videoUrl) : 'upload';
 
     // Clear DB fields immediately
     if (photoIdToDelete) {
@@ -304,7 +307,6 @@ router.post('/verifications/:userId/:action', authenticate, adminOnly, async (re
       user.verificationPhotoPublicId = null;
     }
     if (session && videoIdToDelete) {
-      console.log(`[BEFORE CLEANUP] session.cloudinaryPublicId = ${session.cloudinaryPublicId}`);
       session.videoUrl = null;
       session.cloudinaryPublicId = null;
     }
@@ -332,14 +334,8 @@ router.post('/verifications/:userId/:action', authenticate, adminOnly, async (re
 
     if (session) {
       await session.save();
-      console.log(`[SESSION AFTER CLEANUP]`, {
-        sessionId: session._id,
-        status: session.status,
-        cloudinaryPublicId: session.cloudinaryPublicId,
-        videoUrl: session.videoUrl
-      });
+      console.log(`[Admin Review] session ${session._id} -> ${session.status}; media references cleared`);
     }
-    console.log(`[CLEANUP SUCCESS] Successfully cleared media fields from MongoDB for user ${user._id}`);
     
     // Log action safely
     if (AuditLog && AuditLog.logAction) {
@@ -393,19 +389,22 @@ router.post('/verifications/:userId/:action', authenticate, adminOnly, async (re
 
     // --- ASYNC CLEANUP ---
     setImmediate(async () => {
+      // deleteImage/deleteVideo report failure by returning false (they do not throw), so a
+      // false result counts as a failed attempt and is retried.
       const deleteWithRetry = async (deleteFn, publicId, type, retries = 1) => {
         if (!publicId) return;
         for (let i = 0; i <= retries; i++) {
+          let ok = false;
           try {
-            await deleteFn(publicId);
-            console.log(`[Verification Cleanup] Successfully deleted ${type}: ${publicId}`);
-            return;
+            ok = (await deleteFn(publicId)) !== false;
           } catch (error) {
-            console.error(`[Verification Cleanup] Failed to delete ${type}: ${publicId} (Attempt ${i + 1}). Error:`, error.message);
-            if (i === retries) {
-              console.error(`[Verification Cleanup] Max retries reached for ${publicId}. Affected User ID: ${userId}`);
-            }
+            ok = false;
           }
+          if (ok) {
+            console.log(`[Verification Cleanup] ${type} deleted for user ${userId}`);
+            return;
+          }
+          console.error(`[Verification Cleanup] ${type} delete failed for user ${userId} (attempt ${i + 1})`);
         }
       };
 
@@ -413,12 +412,12 @@ router.post('/verifications/:userId/:action', authenticate, adminOnly, async (re
         await deleteWithRetry(deleteImage, photoIdToDelete, 'photo');
       }
       if (videoIdToDelete) {
-        await deleteWithRetry(deleteVideo, videoIdToDelete, 'video');
+        await deleteWithRetry((id) => deleteVideo(id, videoDeliveryType), videoIdToDelete, 'video');
       }
     });
 
   } catch (error) {
-    console.error('Verification review error:', error);
+    console.error(`Verification review error: ${error.name || 'Error'}`); // the object can hold user fields
     res.status(500).json({ success: false, message: 'Failed to process verification' });
   }
 });

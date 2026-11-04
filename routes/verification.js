@@ -33,10 +33,28 @@ const upload = multer({
     if (file.mimetype.startsWith('video/')) {
       cb(null, true);
     } else {
-      cb(new Error('Only video files are allowed!'), false);
+      const err = new Error('Only video files are allowed!');
+      err.code = 'INVALID_VIDEO_TYPE';
+      cb(err, false);
     }
   }
 });
+
+// =============================================
+// SUBMISSION SAFETY
+// =============================================
+// A session is claimed (PENDING -> PROCESSING) before its video goes to storage, so two uploads
+// for the same session can never both store a video. A claim older than this is a crashed upload
+// and may be taken over (the Cloudinary upload itself times out after 2 minutes).
+const PROCESSING_STALE_MS = 5 * 60 * 1000;
+const SESSION_TTL_MS = 10 * 60 * 1000;
+
+/** Short, non-secret form of a session id for logs. */
+const shortId = (id) => (typeof id === 'string' && id.length >= 6 ? `${id.slice(0, 6)}…` : 'n/a');
+
+/** Error reply with a stable code. Messages are written for people; internals are never sent. */
+const fail = (res, status, code, message, extra = {}) =>
+  res.status(status).json({ success: false, code, message, ...extra });
 
 // =============================================
 // VERIFICATION INSTRUCTIONS POOL
@@ -67,29 +85,56 @@ router.post('/start', auth, async (req, res) => {
       });
     }
     
-    // Check if user already verified
-    if (user.verified) {
-      return res.status(400).json({
-        success: false,
-        message: 'User is already verified'
-      });
+    // Check if user already verified. `verified` also needs a verified email, so an approved
+    // photo verification is checked on its own: a new submission would only replace the
+    // approval with "pending".
+    if (user.verified || user.photoVerificationStatus === 'approved') {
+      return fail(res, 400, 'VERIFICATION_ALREADY_APPROVED', 'User is already verified');
     }
-    
-    // Check for pending verification
-    const pendingSession = await VerificationSession.findOne({
+
+    // A submission already waiting for review (the user is "pending") must not get a duplicate.
+    // Sessions left in review from before a decision or a photo change do not block: the
+    // user's own status is what says a review is open.
+    if (user.photoVerificationStatus === 'pending') {
+      const inReview = await VerificationSession.exists({ userId: req.userId, status: 'MANUAL_REVIEW' });
+      if (inReview) {
+        return fail(res, 400, 'VERIFICATION_UNDER_REVIEW', 'Your verification video is already under review');
+      }
+    }
+
+    // A video still being stored for this user must finish first.
+    const uploading = await VerificationSession.exists({
+      userId: req.userId,
+      status: 'PROCESSING',
+      updatedAt: { $gte: new Date(Date.now() - PROCESSING_STALE_MS) }
+    });
+    if (uploading) {
+      return fail(res, 400, 'VERIFICATION_UPLOAD_IN_PROGRESS', 'Your previous verification video is still uploading. Please wait a moment.');
+    }
+
+    // An unused session (started, no video yet) is resumed instead of refused. Before, closing
+    // the camera or a camera error locked the user out for 10 minutes. The user still has one
+    // active session at a time, and the reply has the same shape as a new session.
+    const unused = await VerificationSession.findOne({
       userId: req.userId,
       status: 'PENDING',
-      createdAt: { $gte: new Date(Date.now() - 10 * 60 * 1000) } // Last 10 minutes
-    });
-    
-    if (pendingSession) {
-      return res.status(400).json({
-        success: false,
-        message: 'You already have a pending verification session',
-        sessionId: pendingSession.sessionId
+      cloudinaryPublicId: null,
+      expiresAt: { $gt: new Date() }
+    }).sort({ createdAt: -1 });
+
+    if (unused) {
+      unused.expiresAt = new Date(Date.now() + SESSION_TTL_MS);
+      await unused.save();
+      console.log(`[Verification] session ${shortId(unused.sessionId)} resumed for user ${req.userId}`);
+      return res.json({
+        success: true,
+        sessionId: unused.sessionId,
+        instructions: unused.instructions,
+        duration: 6,
+        expiresIn: SESSION_TTL_MS / 1000
       });
     }
-    
+
     // Generate unique session ID
     const sessionId = crypto.randomBytes(16).toString('hex');
     
@@ -107,7 +152,7 @@ router.post('/start', auth, async (req, res) => {
       expiresAt: new Date(Date.now() + 10 * 60 * 1000) // 10 minutes
     });
     
-    console.log(`✅ [Verification] Session created: ${sessionId} for user ${req.userId}`);
+    console.log(`[Verification] session ${shortId(sessionId)} created for user ${req.userId}`);
     
     res.json({
       success: true,
@@ -118,11 +163,8 @@ router.post('/start', auth, async (req, res) => {
     });
     
   } catch (error) {
-    console.error('❌ [Verification] Start session error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to start verification session'
-    });
+    console.error(`[Verification] start failed: ${error.name || 'Error'}`);
+    fail(res, 500, 'VERIFICATION_SERVER_ERROR', 'Failed to start verification session');
   }
 });
 
@@ -136,148 +178,168 @@ router.post('/upload-video', auth, (req, res, next) => {
   upload.single('video')(req, res, (err) => {
     if (err) {
       if (req.file && req.file.path) {
-        unlinkAsync(req.file.path).catch(e => console.error(`❌ [Cleanup] Failed to delete partial file:`, e));
+        unlinkAsync(req.file.path).catch(e => console.error(`[Cleanup] temp video delete failed: ${e.code || e.name}`));
       }
       if (err instanceof multer.MulterError) {
         if (err.code === 'LIMIT_FILE_SIZE') {
-          console.error(`❌ [Upload] File too large error for user ${req.userId}`);
-          return res.status(413).json({ 
-            success: false, 
-            message: 'Verification video is too large. Maximum allowed size is 50 MB.' 
-          });
+          console.error(`[Upload] file too large for user ${req.userId}`);
+          return fail(res, 413, 'VIDEO_TOO_LARGE', 'Verification video is too large. Maximum allowed size is 50 MB.');
         }
-        console.error(`❌ [Upload] Multer error:`, err);
-        return res.status(400).json({ success: false, message: `Upload error: ${err.message}` });
-      } else {
-        console.error(`❌ [Upload] Unknown error:`, err);
-        return res.status(500).json({ success: false, message: err.message || 'Unknown upload error' });
+        console.error(`[Upload] multer error ${err.code} for user ${req.userId}`);
+        return fail(res, 400, 'INVALID_UPLOAD', 'The video upload was not valid. Please record your video again.');
       }
+      if (err.code === 'INVALID_VIDEO_TYPE') {
+        // Was a 500, which the app retried forever; a non-video can never succeed.
+        console.error(`[Upload] non-video file refused for user ${req.userId}`);
+        return fail(res, 415, 'INVALID_VIDEO', 'That file is not a video. Please record your verification video again.');
+      }
+      console.error(`[Upload] upload parsing failed: ${err.name || 'Error'}`);
+      return fail(res, 500, 'VERIFICATION_SERVER_ERROR', 'Failed to upload video');
     }
     next();
   });
 }, async (req, res) => {
+  let claimed = null;            // the session document while this request holds the claim
+  let storedVideo = null;        // { publicId, deliveryType } once the video is in storage
   try {
-    console.log("========== FORENSIC DIAGNOSTIC LOG (BACKEND) ==========");
-    console.log("body keys:", Object.keys(req.body));
-    console.log("raw sessionId from body:", req.body.sessionId);
-    console.log("type of sessionId:", typeof req.body.sessionId);
-    console.log("req.file exists:", !!req.file);
-    if (req.file) {
-      console.log("size:", req.file.size);
-      console.log("mime:", req.file.mimetype);
-    }
-    console.log("req.userId:", req.userId);
-    console.log("=======================================================");
-
     let { sessionId } = req.body;
-    
+
     // Sometimes Retrofit sends text parts with extra quotes depending on converter
-    if (sessionId && sessionId.startsWith('"') && sessionId.endsWith('"')) {
+    if (typeof sessionId === 'string' && sessionId.startsWith('"') && sessionId.endsWith('"')) {
       sessionId = sessionId.replace(/^"|"$/g, '');
-      console.log("Cleaned sessionId:", sessionId);
     }
 
     if (!req.file) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'No video file provided' 
-      });
+      return fail(res, 400, 'NO_VIDEO', 'No video file provided');
     }
-    
-    console.log(`📥 [Upload] Received video for session ${sessionId}`);
-    console.log(`👤 [Upload] User ID: ${req.userId}`);
-    
+    if (typeof sessionId !== 'string' || !sessionId) {
+      return fail(res, 404, 'SESSION_NOT_FOUND', 'Session not found');
+    }
+
     // Verify session exists and belongs to user
-    const query = {
-      sessionId,
-      userId: req.userId
-    };
-    console.log("Querying MongoDB with:", query);
-    
-    const session = await VerificationSession.findOne(query);
-    
+    const session = await VerificationSession.findOne({ sessionId, userId: req.userId });
     if (!session) {
-      console.log(`❌ [Upload] Session not found AT ALL for this sessionId...`);
-      return res.status(404).json({
-        success: false,
-        message: 'Session not found'
-      });
+      console.log(`[Upload] session ${shortId(sessionId)} not found for user ${req.userId}`);
+      return fail(res, 404, 'SESSION_NOT_FOUND', 'Session not found');
     }
 
-    // Phase 10: IDEMPOTENCY
-    // If Android network timed out after successful backend processing, 
-    // it will retry. We must return success immediately without re-uploading.
-    if (session.status === 'MANUAL_REVIEW' || session.status === 'APPROVED') {
-      console.log(`✅ [Upload] Idempotent retry detected for session ${sessionId}, already processed.`);
-      return res.json({
-        success: true,
-        message: 'Video already uploaded successfully. Sent for manual review.',
-        sessionId: session.sessionId,
-        status: session.status
-      });
-    }
-
-    if (session.status !== 'PENDING') {
-      return res.status(400).json({
-        success: false,
-        message: `Session cannot be processed in state: ${session.status}`
-      });
-    }
-    
-    // Check if session expired
-    if (session.isExpired()) {
-      session.status = 'EXPIRED';
-      await session.save();
-      
-      return res.status(400).json({
-        success: false,
-        message: 'Session expired. Please start a new verification.'
-      });
-    }
-    
-    // Upload video file to Cloudinary
-    console.log(`☁️ [Upload] Uploading to Cloudinary...`);
-    const cloudinaryResult = await uploadVerificationVideo(
-      req.file.path,
-      sessionId
-    );
-    
-    console.log(`✅ [Upload] Video uploaded: ${cloudinaryResult.publicId}`);
-    
-    // Hard Validation: Verify public_id and secure_url exist
-    if (!cloudinaryResult || !cloudinaryResult.publicId || !cloudinaryResult.url) {
-      console.log(`[VIDEO UPLOAD INVALID]`);
-      console.log(`[VIDEO UPLOAD ABORTED]`);
-      return res.status(500).json({
-        success: false,
-        message: 'Failed to retrieve valid video URL from Cloudinary'
-      });
-    }
-
-    // Update session with Cloudinary details
-    session.videoUrl = cloudinaryResult.url;
-    session.cloudinaryPublicId = cloudinaryResult.publicId;
-    session.cloudinaryUrl = cloudinaryResult.url;
-    session.status = 'MANUAL_REVIEW'; // Bypass AI, go straight to manual review
-    
-    console.log("Saving session:");
-    console.log({
-       videoUrl: session.videoUrl,
-       cloudinaryPublicId: session.cloudinaryPublicId,
-       status: session.status
+    const alreadyDone = () => res.json({
+      success: true,
+      message: 'Video already uploaded successfully. Sent for manual review.',
+      sessionId: session.sessionId,
+      status: session.status
     });
 
-    await session.save();
+    // Phase 10: IDEMPOTENCY
+    // If Android network timed out after successful backend processing,
+    // it will retry. We must return success immediately without re-uploading.
+    if (session.status === 'MANUAL_REVIEW' || session.status === 'APPROVED') {
+      console.log(`[Upload] idempotent retry for session ${shortId(sessionId)}`);
+      return alreadyDone();
+    }
 
-    // Synchronize User profile status so Android UI knows it's pending review
-    const updatedUser = await User.findByIdAndUpdate(
-      req.userId,
-      { 
+    const processingIsStale = session.status === 'PROCESSING' &&
+      session.updatedAt && (Date.now() - new Date(session.updatedAt).getTime()) > PROCESSING_STALE_MS;
+
+    if (session.status === 'PROCESSING' && !processingIsStale) {
+      // Another request for this session is storing its video right now. Retryable (5xx), so
+      // the app tries again and then receives the idempotent success above.
+      res.set('Retry-After', '30');
+      return fail(res, 503, 'VERIFICATION_UPLOAD_IN_PROGRESS', 'Your verification video is still being uploaded.');
+    }
+
+    if (session.status !== 'PENDING' && !processingIsStale) {
+      return fail(res, 400, 'SESSION_NOT_PENDING', `Session cannot be processed in state: ${session.status}`);
+    }
+
+    // Check if session expired
+    if (session.isExpired()) {
+      await VerificationSession.updateOne({ _id: session._id, status: session.status }, { $set: { status: 'EXPIRED' } });
+      return fail(res, 400, 'SESSION_EXPIRED', 'Session expired. Please start a new verification.');
+    }
+
+    // Never let a new submission replace an approval, or duplicate a review already open.
+    const user = await User.findById(req.userId).select('photoVerificationStatus');
+    if (!user) {
+      return fail(res, 404, 'USER_NOT_FOUND', 'User not found');
+    }
+    if (user.photoVerificationStatus === 'approved') {
+      await VerificationSession.updateOne({ _id: session._id, status: session.status },
+        { $set: { status: 'EXPIRED', rejectionReason: 'Already verified' } });
+      console.log(`[Upload] session ${shortId(sessionId)} closed: user already approved`);
+      return res.json({ success: true, message: 'You are already verified.', sessionId: session.sessionId, status: 'APPROVED' });
+    }
+    if (user.photoVerificationStatus === 'pending') {
+      const otherReview = await VerificationSession.exists({ userId: req.userId, status: 'MANUAL_REVIEW', _id: { $ne: session._id } });
+      if (otherReview) {
+        await VerificationSession.updateOne({ _id: session._id, status: session.status },
+          { $set: { status: 'EXPIRED', rejectionReason: 'Duplicate submission' } });
+        console.log(`[Upload] session ${shortId(sessionId)} closed: another submission is already in review`);
+        return res.json({ success: true, message: 'Your verification video is already under review.', sessionId: session.sessionId, status: 'MANUAL_REVIEW' });
+      }
+    }
+
+    // Claim the session: only one request can move it to PROCESSING.
+    claimed = await VerificationSession.findOneAndUpdate(
+      { _id: session._id, status: session.status, updatedAt: session.updatedAt },
+      { $set: { status: 'PROCESSING' } },
+      { new: true }
+    );
+    if (!claimed) {
+      const now = await VerificationSession.findById(session._id).select('status').lean();
+      if (now && (now.status === 'MANUAL_REVIEW' || now.status === 'APPROVED')) {
+        session.status = now.status;
+        return alreadyDone();
+      }
+      res.set('Retry-After', '30');
+      return fail(res, 503, 'VERIFICATION_UPLOAD_IN_PROGRESS', 'Your verification video is still being uploaded.');
+    }
+
+    // Upload video file to Cloudinary (private: delivery type 'authenticated')
+    const cloudinaryResult = await uploadVerificationVideo(req.file.path, sessionId);
+
+    // Hard Validation: Verify public_id and the stored reference exist
+    if (!cloudinaryResult || !cloudinaryResult.publicId || !cloudinaryResult.url) {
+      console.error(`[Upload] storage returned no video for session ${shortId(sessionId)}`);
+      await VerificationSession.updateOne({ _id: claimed._id, status: 'PROCESSING' }, { $set: { status: 'PENDING' } });
+      claimed = null;
+      return fail(res, 500, 'VERIFICATION_SERVER_ERROR', 'Failed to upload video');
+    }
+    storedVideo = { publicId: cloudinaryResult.publicId, deliveryType: cloudinaryResult.deliveryType };
+
+    // Record the video only if this request still holds the claim (a profile-photo change
+    // meanwhile expires open submissions; that video must not enter review).
+    const saved = await VerificationSession.findOneAndUpdate(
+      { _id: claimed._id, status: 'PROCESSING' },
+      { $set: { videoUrl: cloudinaryResult.url, cloudinaryPublicId: cloudinaryResult.publicId, status: 'MANUAL_REVIEW' } },
+      { new: true }
+    );
+    claimed = null;
+    if (!saved) {
+      await deleteVideo(storedVideo.publicId, storedVideo.deliveryType);
+      console.log(`[Upload] session ${shortId(sessionId)} changed during upload; video discarded`);
+      return fail(res, 400, 'SESSION_NOT_PENDING', 'Session cannot be processed. Please start a new verification.');
+    }
+
+    // Synchronize User profile status so Android UI knows it's pending review.
+    // Conditional: an approval that landed meanwhile is never turned back into "pending".
+    const updatedUser = await User.findOneAndUpdate(
+      { _id: req.userId, photoVerificationStatus: { $ne: 'approved' } },
+      {
         photoVerificationStatus: 'pending',
-        verificationStatus: 'pending' 
+        verificationStatus: 'pending'
       },
       { new: true }
     );
+    if (!updatedUser) {
+      await VerificationSession.updateOne({ _id: saved._id, status: 'MANUAL_REVIEW' },
+        { $set: { status: 'EXPIRED', rejectionReason: 'Already verified', videoUrl: null, cloudinaryPublicId: null } });
+      await deleteVideo(storedVideo.publicId, storedVideo.deliveryType);
+      console.log(`[Upload] session ${shortId(sessionId)} closed: user approved during upload`);
+      return res.json({ success: true, message: 'You are already verified.', sessionId: session.sessionId, status: 'APPROVED' });
+    }
+
+    console.log(`[Upload] session ${shortId(sessionId)} -> MANUAL_REVIEW for user ${req.userId}`);
 
     // Notify UI that video was received and is processing
     const io = req.app.get('io');
@@ -286,32 +348,32 @@ router.post('/upload-video', auth, (req, res, next) => {
         status: 'MANUAL_REVIEW'
       });
     }
-    
+
     // Notify admin team via Telegram (fire and forget)
-    if (updatedUser) {
-        notifyVerificationReview(updatedUser, session).catch(err => 
-            console.error('[Telegram] Failed to notify verification review:', err)
-        );
-    }
-    
+    notifyVerificationReview(updatedUser, saved).catch(err =>
+        console.error(`[Telegram] verification review notice failed: ${err && err.name}`)
+    );
+
     res.json({
       success: true,
       message: 'Video uploaded successfully. Sent for manual review.',
       sessionId: session.sessionId,
       status: 'MANUAL_REVIEW'
     });
-    
+
   } catch (error) {
-    console.error('❌ [Upload] Error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to upload video',
-      error: error.message
-    });
+    console.error(`[Upload] failed: ${error.name || 'Error'}${error.http_code ? ` http=${error.http_code}` : ''}`);
+    // Release the claim so the app's retry can upload again.
+    if (claimed) {
+      await VerificationSession.updateOne({ _id: claimed._id, status: 'PROCESSING' }, { $set: { status: 'PENDING' } })
+        .catch(() => {});
+    }
+    // Technical details stay in the server log; the reply never carries them.
+    fail(res, 500, 'VERIFICATION_SERVER_ERROR', 'Failed to upload video');
   } finally {
     if (req.file && req.file.path) {
       unlinkAsync(req.file.path).catch(err => {
-        console.error(`❌ [Cleanup] Failed to delete temp video file ${req.file.path}:`, err);
+        console.error(`[Cleanup] temp video delete failed: ${err.code || err.name}`);
       });
     }
   }
@@ -348,7 +410,7 @@ router.get('/status/:sessionId', auth, async (req, res) => {
     });
     
   } catch (error) {
-    console.error('❌ [Verification] Check status error:', error);
+    console.error(`[Verification] status check failed: ${error.name || 'Error'}`);
     res.status(500).json({
       success: false,
       message: 'Failed to check verification status'
@@ -374,7 +436,7 @@ router.get('/history/:userId', auth, async (req, res) => {
       userId: req.params.userId
     })
     .sort({ createdAt: -1 })
-    .select('-faceEmbedding')
+    .select('-faceEmbedding -videoUrl -cloudinaryPublicId') // no storage references in responses
     .limit(20);
     
     res.json({
@@ -383,7 +445,7 @@ router.get('/history/:userId', auth, async (req, res) => {
     });
     
   } catch (error) {
-    console.error('❌ [Verification] Get history error:', error);
+    console.error(`[Verification] history failed: ${error.name || 'Error'}`);
     res.status(500).json({
       success: false,
       message: 'Server error'
@@ -409,6 +471,7 @@ router.get('/admin/pending-reviews', auth, async (req, res) => {
       status: 'MANUAL_REVIEW'
     })
     .populate('userId', 'firstName lastName email profilePhoto')
+    .select('-faceEmbedding -videoUrl -cloudinaryPublicId') // review videos are watched in the admin dashboard
     .sort({ createdAt: -1 })
     .limit(50);
     
@@ -418,7 +481,7 @@ router.get('/admin/pending-reviews', auth, async (req, res) => {
     });
     
   } catch (error) {
-    console.error('❌ [Verification] Get pending reviews error:', error);
+    console.error(`[Verification] pending reviews failed: ${error.name || 'Error'}`);
     res.status(500).json({
       success: false,
       message: 'Server error'
@@ -466,6 +529,7 @@ router.post('/admin/approve/:sessionId', auth, async (req, res) => {
     user.photoVerifiedBy = req.userId;
     user.verificationEmbedding = session.faceEmbedding;
     user.verifiedAt = new Date();
+    user.verificationStatus = 'approved'; // keep the mirror in step, as the dashboard route does
     // Written first and conditionally: if the photo changed meanwhile, nothing is approved.
     try {
       await user.save();
@@ -497,7 +561,7 @@ router.post('/admin/approve/:sessionId', auth, async (req, res) => {
     });
     
   } catch (error) {
-    console.error('❌ [Verification] Approve error:', error);
+    console.error(`[Verification] legacy approve failed: ${error.name || 'Error'}`);
     res.status(500).json({
       success: false,
       message: 'Server error'
@@ -527,13 +591,30 @@ router.post('/admin/reject/:sessionId', auth, async (req, res) => {
     }
 
     const user = await User.findById(session.userId);
-    
+    const wasInReview = session.status === 'MANUAL_REVIEW';
+
     session.status = 'REJECTED';
     session.result = 'REJECTED';
     session.rejectionReason = reason || 'Manually rejected by admin';
     session.reviewedBy = req.userId;
     session.reviewedAt = new Date();
     await session.save();
+
+    // This route used to update only the session, leaving the user "pending" for good (the app
+    // showed "under review" and blocked resubmission). Rejecting the submission that is under
+    // review now records it on the user exactly as the admin dashboard does. A user who is not
+    // "pending" (approved, or who changed photo meanwhile) is left unchanged.
+    if (user && wasInReview) {
+      await User.updateOne(
+        { _id: user._id, photoVerificationStatus: 'pending' },
+        { $set: {
+            photoVerificationStatus: 'rejected',
+            verificationStatus: 'rejected',
+            photoRejectionReason: session.rejectionReason,
+            verified: false
+        } }
+      );
+    }
 
     // ✅ Emit real-time socket event on admin rejection
     if (user) {
@@ -554,7 +635,7 @@ router.post('/admin/reject/:sessionId', auth, async (req, res) => {
     });
     
   } catch (error) {
-    console.error('❌ [Verification] Reject error:', error);
+    console.error(`[Verification] legacy reject failed: ${error.name || 'Error'}`);
     res.status(500).json({
       success: false,
       message: 'Server error'

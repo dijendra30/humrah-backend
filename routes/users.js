@@ -453,7 +453,7 @@ router.post('/submit-verification-photo', authenticate, uploadLimiter, upload.si
     user.verificationPhotoPublicId = uploadResult.publicId;
     user.verificationPhotoSubmittedAt = new Date();
     user.photoVerificationStatus = 'pending';
-    console.log(`[Upload Lifecycle] Saving verificationPhotoPublicId to MongoDB for user ${user._id}: ${user.verificationPhotoPublicId}`);
+    console.log(`[Upload Lifecycle] Saving verification photo reference for user ${user._id}`); // storage id not logged
     await user.save();
 
     res.json({ success: true, message: 'Verification photo submitted successfully. Our team will review it soon.', verificationPhoto: user.verificationPhoto, photoVerificationStatus: user.photoVerificationStatus, profileCompletion: user.profileCompletion, profileCompletionBreakdown: user.profileCompletionBreakdown, missingFields: user.missingFields });
@@ -478,7 +478,7 @@ router.post('/submit-verification-photo-base64', authenticate, uploadLimiter, as
     user.verificationPhotoPublicId = uploadResult.publicId;
     user.verificationPhotoSubmittedAt = new Date();
     user.photoVerificationStatus = 'pending';
-    console.log(`[Upload Lifecycle] Saving verificationPhotoPublicId (base64) to MongoDB for user ${user._id}: ${user.verificationPhotoPublicId}`);
+    console.log(`[Upload Lifecycle] Saving verification photo reference (base64) for user ${user._id}`); // storage id not logged
     await user.save();
 
     res.json({ success: true, message: 'Verification photo submitted successfully. Our team will review it soon.', verificationPhoto: user.verificationPhoto, photoVerificationStatus: user.photoVerificationStatus, profileCompletion: user.profileCompletion, profileCompletionBreakdown: user.profileCompletionBreakdown, missingFields: user.missingFields });

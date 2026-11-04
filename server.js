@@ -710,6 +710,11 @@ app.use('/api/legal', legalRoutes);
 const { liveLocationPollLimiter } = require('./routes/liveLocationRoutes');
 app.get('/api/live-location/:sessionId', liveLocationPollLimiter, require('./controllers/liveLocationController').get);
 
+// Admin playback of private verification videos. Public because the dashboard's <video> cannot
+// send a Bearer token: the short-lived signed token in the path, issued only to admins by
+// /api/admin-dashboard/verifications/pending, is the authorisation (utils/verificationMedia.js).
+app.get('/api/verification-media/:token', require('./utils/verificationMedia').createVerificationMediaHandler());
+
 // ── Protected routes ───────────────────────────────────────────────────────────
 app.use('/api/launch-region',     require('./routes/launchRegionRoutes'));
 app.use('/api/users',             authenticate, enforceLegalAcceptance, userRoutes);
