@@ -6,7 +6,11 @@ const RoomMessage = require('../models/RoomMessage');
 const redisService = require('../services/redisService');
 const { sendDataFcm } = require('../utils/fcmHelper');
 const { normalizeReaction, serializeReactions } = require('../utils/roomReactionConfig');
-const { TIER, buildDiscoveryProfile, scoreRoomForUser, compareScored } = require('../utils/roomDiscoveryRanking');
+const { buildDiscoveryProfile, scoreRoomForUser, assembleDiscovery } = require('../utils/roomDiscoveryRanking');
+const { parseDiscoveryParams, buildSearchFilter, matchesSearch, paginate } = require('../utils/roomSearch');
+const { CREATION_SOURCE_CURATED, CURATED_ROOMS } = require('../utils/curatedRoomConfig');
+const { validateRoomCreateInput } = require('../utils/roomCreateValidation');
+const { emitMembershipChanged, leaveSocketChannel } = require('../services/roomMembershipService');
 const { evaluateRoom } = require('../services/roomEngagementService');
 
 // Safe, non-blocking analytics hook
@@ -57,11 +61,17 @@ exports.createRoom = async (req, res) => {
     const { title, description, topic, capacity, discoveryMode, languages } = req.body;
     const userId = req.userId;
 
-    if (!title || title.trim() === '') {
+    if (!title || typeof title !== 'string' || title.trim() === '') {
       return res.status(400).json({ success: false, message: 'Title is required' });
     }
     if (title.trim().length > 30) {
       return res.status(400).json({ success: false, message: 'Title must be maximum 30 characters' });
+    }
+    // Phase 2.3: description <= 200 chars, languages <= 5 from the supported list.
+    // Both stay optional, so older apps (no description) are unaffected.
+    const checked = validateRoomCreateInput({ description, languages });
+    if (checked.error) {
+      return res.status(400).json({ success: false, message: checked.error });
     }
 
     const user = await User.findById(userId).select('questionnaire.city');
@@ -84,9 +94,9 @@ exports.createRoom = async (req, res) => {
       createdBy: userId,
       discoveryMode,
       title: title.trim(),
-      description: description ? description.trim() : '',
+      description: checked.description,
       topic,
-      languages: Array.isArray(languages) ? languages : [],
+      languages: checked.languages,
       capacity: finalCapacity,
       status: 'ACTIVE',
       memberCount: 1 // creator auto-joins below
@@ -94,14 +104,25 @@ exports.createRoom = async (req, res) => {
 
     await room.save();
 
-    const member = new RoomMember({
-      roomId: room._id,
-      userId,
-      role: 'HOST',
-      status: 'JOINED'
-    });
-
-    await member.save();
+    // Phase 2.3: the Room and its HOST membership must exist together. This codebase
+    // uses no multi-document transactions (the replica-set requirement is not
+    // verifiable from the app — see models/User.js), so a failed second write removes
+    // the Room again instead of leaving an orphan with memberCount 1 and no member.
+    try {
+      await new RoomMember({
+        roomId: room._id,
+        userId,
+        role: 'HOST',
+        status: 'JOINED'
+      }).save();
+    } catch (memberErr) {
+      try {
+        await HumrahRoom.deleteOne({ _id: room._id });
+      } catch (rollbackErr) {
+        console.error('[createRoom] rollback failed, orphan room', String(room._id), rollbackErr.message);
+      }
+      throw memberErr;
+    }
 
     // Sync topic to user profile idempotently
     try {
@@ -166,22 +187,43 @@ const getDistance = (lat1, lon1, lat2, lon2) => {
  *   - FULL / CLOSED / INACTIVE / at-capacity Rooms are never returned
  *   - member counts are the real denormalized values; nothing is fabricated
  */
-async function buildDiscoveryInventory({ userId, user, excludeIds, joinedRoomIds, preferredMode, seededRooms }) {
-  const MAX_RESULTS = 40;
+async function buildDiscoveryInventory({ userId, user, excludeIds, joinedRoomIds, preferredMode, seededRooms, search }) {
+  // Phase 2.2: the whole ranked list (paginated by the caller). Pre-2.2 this was
+  // capped at 40, which is now the default page size.
+  const MAX_RESULTS = 200;
   const joinedSet = new Set((joinedRoomIds || []).map(String));
+  // {} without search; otherwise the title/topic filter, applied INSIDE both queries.
+  const searchFilter = buildSearchFilter(search);
 
   // 1. Every Room that is structurally open to being joined right now.
   //    SUGGESTED is included — that is the state the System Room generator emits.
-  const candidates = await HumrahRoom.find({
-    status: { $in: ['ACTIVE', 'SUGGESTED'] },
-    discoveryMode: { $in: ['NEAR_ME', 'ALL_INDIA'] },
-  })
-    .sort({ createdAt: -1 })
-    .limit(120)
-    .lean();
+  //    PRIVATE Rooms are never candidates (discoveryMode filter).
+  //    Phase 2.2: curated Rooms are read by their own bounded query, so the newest-120
+  //    window of ordinary Rooms can never push them out.
+  const [recentRooms, curatedRooms] = await Promise.all([
+    HumrahRoom.find({
+      status: { $in: ['ACTIVE', 'SUGGESTED'] },
+      discoveryMode: { $in: ['NEAR_ME', 'ALL_INDIA'] },
+      creationSource: { $ne: CREATION_SOURCE_CURATED },
+      ...searchFilter,
+    })
+      .sort({ createdAt: -1 })
+      .limit(120)
+      .lean(),
+    HumrahRoom.find({
+      creationSource: CREATION_SOURCE_CURATED,
+      status: 'ACTIVE',
+      discoveryMode: 'ALL_INDIA',
+      ...searchFilter,
+    })
+      .sort({ createdAt: 1 })
+      .limit(Math.max(CURATED_ROOMS.length, 50))
+      .lean(),
+  ]);
+  const candidates = [...recentRooms, ...curatedRooms];
 
   const open = candidates.filter(r => !joinedSet.has(String(r._id)));
-  if (open.length === 0) return seededRooms || [];
+  if (open.length === 0) return (seededRooms || []).filter(r => matchesSearch(r, search));
 
   // 2. Real member counts (denormalized; falls back to one batch aggregation only
   //    for Rooms the memberCount backfill has not touched yet).
@@ -256,17 +298,12 @@ async function buildDiscoveryInventory({ userId, user, excludeIds, joinedRoomIds
     scored.push({ room, score, tier, reasons, memberCount, myStatus });
   }
 
-  scored.sort(compareScored);
-
-  // 5. Progressive fallback so the dashboard is not needlessly empty. Personalized
-  //    Rooms first; broader tiers are appended only while inventory is thin. Every
-  //    tier is a REAL, joinable Room — nothing synthetic is added.
-  const byTier = (t) => scored.filter(s => s.tier === t);
-  const ordered = [
-    ...byTier(TIER.PERSONAL),
-    ...byTier(TIER.RELEVANT),
-    ...byTier(TIER.BROWSE),
-  ].slice(0, MAX_RESULTS);
+  // 6. Progressive fallback so the dashboard is not needlessly empty. Personalized
+  //    Rooms first; broader tiers after. Phase 2.2: curated Rooms fill in when fewer
+  //    than two ordinary relevant Rooms exist, otherwise they come last
+  //    (roomDiscoveryRanking.assembleDiscovery). Every entry is a REAL, joinable
+  //    Room — nothing synthetic is added, and a Room id appears once.
+  const ordered = assembleDiscovery(scored).slice(0, MAX_RESULTS);
 
   // Preserve the distanceTier the geo path already computed for user-created Rooms.
   const seededById = new Map((seededRooms || []).map(r => [String(r.roomId), r]));
@@ -298,7 +335,9 @@ async function buildDiscoveryInventory({ userId, user, excludeIds, joinedRoomIds
       distanceTier: seeded?.distanceTier
         || distanceTierByRoom.get(String(room._id))
         || (room.discoveryMode === 'NEAR_ME' ? 'Near Me' : 'All India'),
-      lastMessageAt: null,
+      // Phase 2.2: the real time of the newest persisted message (null = none yet).
+      // Message CONTENT is never exposed to non-members, so lastMessage stays null.
+      lastMessageAt: room.lastMessageAt ? new Date(room.lastMessageAt).toISOString() : null,
       lastMessage: null,
       createdAt: room.createdAt,
     };
@@ -313,6 +352,13 @@ exports.discoverRooms = async (req, res) => {
   try {
     const { discoveryMode } = req.body;
     const userId = req.userId;
+
+    // Phase 2.2: optional search / topic / pagination fields (utils/roomSearch.js).
+    // Absent fields keep the pre-2.2 behaviour: the first 40 ranked Rooms.
+    const params = parseDiscoveryParams(req.body || {});
+    if (params.error) {
+      return res.status(400).json({ success: false, message: params.error });
+    }
 
     // R4.5: questionnaire is needed for relevance ranking (existing explicit fields only).
     // last_known_lat/lng are projected because the trusted-location fallback below
@@ -393,7 +439,7 @@ exports.discoverRooms = async (req, res) => {
               memberCount: countOf(room),
               status: room.status,
               distanceTier,
-              lastMessageAt: null,
+              lastMessageAt: room.lastMessageAt ? room.lastMessageAt.toISOString() : null,
               lastMessage: null,
               createdAt: room.createdAt
             };
@@ -422,7 +468,7 @@ exports.discoverRooms = async (req, res) => {
         memberCount: countOf(room),
         status: room.status,
         distanceTier: 'All India',
-        lastMessageAt: null,
+        lastMessageAt: room.lastMessageAt ? room.lastMessageAt.toISOString() : null,
         lastMessage: null,
         createdAt: room.createdAt
       }));
@@ -445,9 +491,12 @@ exports.discoverRooms = async (req, res) => {
       joinedRoomIds: myRoomIds,
       preferredMode: discoveryMode,
       seededRooms: discoveredRooms,
+      search: { query: params.query, topic: params.topic },
     });
 
-    return res.status(200).json({ success: true, rooms: ranked });
+    // Additive fields: hasMore / nextOffset. Existing clients read only success + rooms.
+    const { page, hasMore, nextOffset } = paginate(ranked, params.offset, params.limit);
+    return res.status(200).json({ success: true, rooms: page, hasMore, nextOffset });
 
   } catch (error) {
     console.error('[discoverRooms error]', error);
@@ -488,6 +537,16 @@ exports.joinRoom = async (req, res) => {
     const existingMember = await RoomMember.findOne({ roomId, userId });
     if (existingMember && existingMember.status === 'JOINED') {
       return res.status(400).json({ success: false, message: 'Already a member of this room' });
+    }
+    // Phase 2.3: a removed member cannot re-add themselves (KICKED used to flip back to
+    // JOINED below). Same generic reply as a block, so nothing is revealed.
+    if (existingMember && existingMember.status === 'KICKED') {
+      return res.status(403).json({ success: false, message: "You can't join this Room right now." });
+    }
+    // Phase 2.3: a PRIVATE Room is joinable only by someone invited to it. Answered as
+    // "not found" so a guessed id does not confirm that the Room exists.
+    if (room.discoveryMode === 'PRIVATE' && !(existingMember && existingMember.status === 'INVITED')) {
+      return res.status(404).json({ success: false, message: 'Room not found' });
     }
 
     // Current JOINED members (one query — also gives us the authoritative count).
@@ -549,6 +608,7 @@ exports.joinRoom = async (req, res) => {
     await room.save();
 
     logRoomEvent('ROOM_JOINED', { roomId, userId });
+    emitMembershipChanged(req.app.get('io'), room, 'JOINED');
 
     return res.status(200).json({
       success: true,
@@ -615,6 +675,10 @@ exports.leaveRoom = async (req, res) => {
     await room.save();
 
     logRoomEvent('ROOM_LEFT', { roomId, userId });
+    // Phase 2.3: stop Room broadcasts reaching a member who left (their open screen
+    // stayed subscribed until it closed), then tell the Room the real count.
+    leaveSocketChannel(req.app.get('io'), userId, roomId);
+    emitMembershipChanged(req.app.get('io'), room, 'LEFT');
     return res.status(200).json({ success: true, message: 'Successfully left room' });
 
   } catch (error) {
@@ -691,6 +755,8 @@ exports.getMyRooms = async (req, res) => {
         lastMessageAt,
         lastMessage,
         createdAt: room.createdAt,
+        // Phase 2.2 (additive): lets the app label curated Rooms "Hosted by Humrah".
+        creationSource: room.creationSource || 'USER',
       };
     });
 
@@ -729,6 +795,8 @@ exports.getRoomDetails = async (req, res) => {
       lastMessageAt: room.lastMessageAt ? room.lastMessageAt.toISOString() : null,
       createdAt: room.createdAt,
       createdBy: room.createdBy,
+      // Phase 2.2 (additive): 'CURATED' Rooms are hosted by Humrah and have no createdBy.
+      creationSource: room.creationSource || 'USER',
       // PHASE 2: the caller's own membership state ('JOINED' | 'INVITED'), so the
       // invitation screen can show "Open Room" vs "Join Room" instead of offering
       // Join to someone who already joined. Additive — existing clients ignore it.
@@ -756,10 +824,16 @@ exports.getRoomMessages = async (req, res) => {
     const member = await RoomMember.findOne({ roomId, userId, status: 'JOINED' });
     if (!member) return res.status(403).json({ success: false, message: 'Not a member' });
 
-    const messages = await RoomMessage.find({ roomId })
-      .sort({ createdAt: 1 })
+    // Phase 2.3: the NEWEST 100 (it returned the oldest 100, so a busy Room opened on
+    // stale history). Reversed so the reply stays oldest-first, as clients expect.
+    // Phase 2.5: sorted on createdAt only, so the { roomId, createdAt: -1 } index serves
+    // it and reads exactly 100 documents (an extra _id tiebreak forced an in-memory sort
+    // of every message in the Room).
+    const messages = (await RoomMessage.find({ roomId })
+      .sort({ createdAt: -1 })
       .limit(100)
-      .populate('senderId', 'firstName lastName');
+      .populate('senderId', 'firstName lastName'))
+      .reverse();
 
     const formattedMessages = messages.map(msg => ({
       _id: msg._id,

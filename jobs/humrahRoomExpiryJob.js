@@ -1,5 +1,11 @@
 const HumrahRoom = require('../models/HumrahRoom');
 const { suggestedCutoff, ROOM_LIFECYCLE_CONFIG } = require('../services/roomLifecycleConfig');
+const { CREATION_SOURCE_CURATED } = require('../utils/curatedRoomConfig');
+
+// Phase 2.2: curated Rooms (public topic Rooms hosted by Humrah) are durable. They
+// never go INACTIVE / CLOSED for being quiet. Every other Room's lifecycle below is
+// unchanged.
+const NOT_CURATED = { creationSource: { $ne: CREATION_SOURCE_CURATED } };
 
 exports.runHumrahRoomExpiry = async () => {
   try {
@@ -17,7 +23,8 @@ exports.runHumrahRoomExpiry = async () => {
     await HumrahRoom.updateMany(
       { 
         status: { $in: ['ACTIVE', 'FULL'] }, 
-        lastMessageAt: { $lt: twentyFourHoursAgo }
+        lastMessageAt: { $lt: twentyFourHoursAgo },
+        ...NOT_CURATED
       },
       { $set: { status: 'INACTIVE' } }
     );
@@ -26,7 +33,8 @@ exports.runHumrahRoomExpiry = async () => {
       { 
         status: { $in: ['ACTIVE', 'FULL'] }, 
         lastMessageAt: null,
-        createdAt: { $lt: twentyFourHoursAgo }
+        createdAt: { $lt: twentyFourHoursAgo },
+        ...NOT_CURATED
       },
       { $set: { status: 'INACTIVE' } }
     );
@@ -36,6 +44,7 @@ exports.runHumrahRoomExpiry = async () => {
     await HumrahRoom.updateMany(
       { 
         status: 'INACTIVE', 
+        ...NOT_CURATED,
         $or: [
           { lastMessageAt: { $lt: fortyEightHoursAgo } },
           { lastMessageAt: null, createdAt: { $lt: fortyEightHoursAgo } }

@@ -87,9 +87,14 @@ exports.initHumrahRoomSocket = (io) => {
       }
     });
 
+    // Phase 2.3: leaveRoom (REST) removes a member's sockets from `room:<id>`; this
+    // closure's activeRooms cannot see that, so presence and typing also require the
+    // socket to still be in the channel.
+    const inRoom = (roomId) => activeRooms.has(roomId) && socket.rooms.has(`room:${roomId}`);
+
     socket.on('room_heartbeat', async (data) => {
       const { roomId } = data || {};
-      if (!roomId || !activeRooms.has(roomId)) return;
+      if (!roomId || !inRoom(roomId)) return;
       await redisService.setWithJitter(`presence:room:${roomId}:${userId}`, { online: true, socketId: socket.id }, 180, 30);
     });
 
@@ -118,7 +123,7 @@ exports.initHumrahRoomSocket = (io) => {
     socket.on('typing_start', async (data) => {
       const { roomId } = data || {};
       // Only a member who actually joined this Room socket channel may signal typing.
-      if (!roomId || !activeRooms.has(roomId)) return;
+      if (!roomId || !inRoom(roomId)) return;
       try {
         const alreadyTyping = typingTimers.has(roomId);
         // Safety fallback: typing always expires on its own even if the client
@@ -133,7 +138,7 @@ exports.initHumrahRoomSocket = (io) => {
 
     socket.on('typing_stop', (data) => {
       const { roomId } = data || {};
-      if (!roomId || !activeRooms.has(roomId)) return;
+      if (!roomId || !inRoom(roomId)) return;
       if (typingTimers.has(roomId)) clearTyping(roomId);
     });
 

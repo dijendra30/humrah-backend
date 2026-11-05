@@ -53,6 +53,9 @@ async function findCandidateRooms(now = Date.now()) {
     status: { $in: ['ACTIVE', 'FULL'] },
     lastMessageAt: { $gt: horizon },
     memberCount: { $gte: AI_HOST_CONFIG.MIN_MEMBERS },
+    // Phase 2.2: never in curated Rooms. They are labelled "Hosted by Humrah", so an
+    // automated message there could read as Humrah staff speaking. Other Rooms unchanged.
+    creationSource: { $ne: 'CURATED' },
   })
     .select('_id')
     .sort({ lastMessageAt: 1 })

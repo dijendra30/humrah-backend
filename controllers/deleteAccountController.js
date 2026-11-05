@@ -40,6 +40,7 @@ const mongoose        = require('mongoose');
 const User            = require('../models/User');
 const { deleteImage } = require('../config/cloudinary');
 const quickConnectCleanup = require('../services/quickConnect/accountDeletion');
+const { releaseUserMemberships } = require('../services/roomMembershipService');
 
 // ── Lazy-load every model ─────────────────────────────────────────────────────
 // safeRequireModel returns null if the model file doesn't exist yet, so new
@@ -361,6 +362,16 @@ const deleteMyAccount = async (req, res) => {
       } catch (e) {
         console.error('[deleteAccount] gaming sessions step error:', e.message);
       }
+    }
+
+    // ── Step 22b: Humrah Rooms (Rooms Phase 2.3) ──────────────────────────────
+    // JOINED / INVITED memberships become LEFT and each Room's memberCount is
+    // recounted from RoomMember, so a deleted account is never counted as a
+    // participant. Other members, messages and the Rooms are untouched. Idempotent.
+    try {
+      stats.humrahRooms = await releaseUserMemberships(userIdObj, req.app?.get?.('io'));
+    } catch (e) {
+      console.error('[deleteAccount] humrah rooms step error:', e.message);
     }
 
     // ── Step 23: Movie sessions ────────────────────────────────────────────────

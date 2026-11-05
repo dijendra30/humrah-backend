@@ -14,7 +14,13 @@
 // -----------------------------------------------------------------------------
 'use strict';
 
+const { isCuratedRoom } = require('./curatedRoomConfig');
+
 const TIER = { PERSONAL: 'L1_PERSONAL', RELEVANT: 'L2_RELEVANT', BROWSE: 'L3_BROWSE' };
+
+// Phase 2.2: the discovery target — at least this many RELEVANT Rooms, filled from
+// curated Rooms when ordinary relevant inventory is thinner than this.
+const MIN_RELEVANT_ROOMS = 2;
 
 const norm = (v) => (typeof v === 'string' ? v.trim().toLowerCase() : '');
 const normArr = (a) => (Array.isArray(a) ? a.filter(x => typeof x === 'string').map(norm).filter(Boolean) : []);
@@ -106,6 +112,21 @@ function scoreRoomForUser(room, profile, ctx = {}) {
     score += Math.max(0, 12 - ageHours / 2);
   }
 
+  // 6. Genuine activity (Phase 2.2) — the createdAt of the newest REAL message, which
+  //    humrahRoomSocket.js stores as lastMessageAt only after the message is persisted.
+  //    Up to +20 for a message in the last hour, decaying to +8 at 24h; +4 within 72h.
+  //    Never inferred from members, presence or invitations.
+  const lastMessageAt = room.lastMessageAt ? new Date(room.lastMessageAt).getTime() : 0;
+  if (lastMessageAt) {
+    const idleHours = Math.max(0, ((ctx.now || Date.now()) - lastMessageAt) / 3600000);
+    if (idleHours <= 24) {
+      score += 20 - idleHours / 2;
+      reasons.push('active');
+    } else if (idleHours <= 72) {
+      score += 4;
+    }
+  }
+
   return { score: Math.round(score), tier, reasons };
 }
 
@@ -118,4 +139,41 @@ function compareScored(a, b) {
   return String(a.room._id).localeCompare(String(b.room._id));
 }
 
-module.exports = { TIER, buildDiscoveryProfile, scoreRoomForUser, compareScored };
+/**
+ * Phase 2.2 — final discovery order.
+ *
+ *   1. ordinary Rooms (USER / SYSTEM) whose topic or interest matches  (L1, then L2)
+ *   2. curated Rooms, only as many as needed to reach MIN_RELEVANT_ROOMS
+ *   3. other ordinary Rooms                                            (L3)
+ *   4. the remaining curated Rooms
+ *
+ * Curated Rooms are ordered by their own relevance (a topic match first). Every
+ * entry is a real, already-filtered Room; a Room id appears at most once.
+ *
+ * @param {Array<{room, score, tier}>} scored
+ * @returns same objects, in display order
+ */
+function assembleDiscovery(scored, { minRelevant = MIN_RELEVANT_ROOMS } = {}) {
+  const seen = new Set();
+  const unique = scored.filter(s => {
+    const id = String(s.room._id);
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+  const byTier = (list, t) => list.filter(s => s.tier === t).sort(compareScored);
+  const ordinary = unique.filter(s => !isCuratedRoom(s.room));
+  const curated = unique.filter(s => isCuratedRoom(s.room));
+
+  const relevant = [...byTier(ordinary, TIER.PERSONAL), ...byTier(ordinary, TIER.RELEVANT)];
+  const browse = byTier(ordinary, TIER.BROWSE);
+  const curatedOrdered = [
+    ...byTier(curated, TIER.PERSONAL),
+    ...byTier(curated, TIER.RELEVANT),
+    ...byTier(curated, TIER.BROWSE),
+  ];
+  const fill = Math.max(0, minRelevant - relevant.length);
+  return [...relevant, ...curatedOrdered.slice(0, fill), ...browse, ...curatedOrdered.slice(fill)];
+}
+
+module.exports = { TIER, MIN_RELEVANT_ROOMS, buildDiscoveryProfile, scoreRoomForUser, compareScored, assembleDiscovery };

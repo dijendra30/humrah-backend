@@ -8,11 +8,12 @@ const {
   roomCreateLimiter,
   roomJoinLimiter,
   roomReactionLimiter,
+  roomDiscoverLimiter,
 } = require('../middleware/roomGuards');
 
 router.post('/', authenticate, roomCreateLimiter, roomController.createRoom);
 router.get('/topics', authenticate, roomController.getTopics);
-router.post('/discover', authenticate, roomController.discoverRooms);
+router.post('/discover', authenticate, roomDiscoverLimiter, roomController.discoverRooms);
 router.get('/', authenticate, roomController.getMyRooms);
 
 // All :roomId routes validate the id shape first (malformed -> 400, not 500).

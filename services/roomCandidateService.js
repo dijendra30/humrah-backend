@@ -146,7 +146,12 @@ async function loadRoomCandidates(options = {}) {
   }
 
   // ── 3. Existing Room participation (two bounded queries, no N+1) ───────────
-  const liveRooms = await HumrahRoom.find({ status: { $in: ['SUGGESTED', 'ACTIVE', 'FULL'] } })
+  // Phase 2.2: curated Rooms are durable public Rooms, not a "live Room" the user is
+  // tied up in — counting them would exclude anyone who joined one from generation forever.
+  const liveRooms = await HumrahRoom.find({
+    status: { $in: ['SUGGESTED', 'ACTIVE', 'FULL'] },
+    creationSource: { $ne: 'CURATED' },
+  })
     .select('_id')
     .lean();
   const liveRoomIds = liveRooms.map(r => r._id);

@@ -88,10 +88,24 @@ const roomReactionLimiter = buildLimiter({
   message: 'You are reacting too quickly. Please slow down.',
 });
 
+// Rooms Phase 2.5 — discovery / search guard. POST /discover now also serves search,
+// topic browsing and paging (about 11 queries per call). Generous enough for typing
+// (the app debounces 350 ms) and scrolling (pages of 40), strict enough to stop a loop.
+const DISCOVER_LIMIT = num(process.env.ROOM_DISCOVER_RATE_LIMIT, 120);
+const DISCOVER_WINDOW = num(process.env.ROOM_DISCOVER_RATE_WINDOW_SECONDS, 60);
+
+const roomDiscoverLimiter = buildLimiter({
+  action: 'discover',
+  limit: DISCOVER_LIMIT,
+  windowSeconds: DISCOVER_WINDOW,
+  message: 'You are searching Rooms too quickly. Please slow down.',
+});
+
 module.exports = {
   validateRoomId,
   roomCreateLimiter,
   roomJoinLimiter,
   roomReactionLimiter,
-  _config: { CREATE_LIMIT, CREATE_WINDOW, JOIN_LIMIT, JOIN_WINDOW, REACTION_LIMIT, REACTION_WINDOW },
+  roomDiscoverLimiter,
+  _config: { CREATE_LIMIT, CREATE_WINDOW, JOIN_LIMIT, JOIN_WINDOW, REACTION_LIMIT, REACTION_WINDOW, DISCOVER_LIMIT, DISCOVER_WINDOW },
 };
