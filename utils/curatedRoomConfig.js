@@ -11,7 +11,9 @@
 //   - creationSource 'CURATED', no createdBy: there is no human host to pretend to be.
 //   - Seeded with memberCount 0, lastMessageAt null, NO messages, NO members.
 //     Every count shown for them is the real JOINED count.
-//   - Copy describes what the Room is for; it never claims activity or people.
+//   - Copy describes what the Room is for, in a person's voice; it never claims
+//     activity or people. Hosting is disclosed by creationSource ('CURATED'),
+//     which the app shows as "Hosted by Humrah", so the copy doesn't repeat it.
 //
 // CAPACITY: curated Rooms hold up to 25 (user-approved, 5 Nov 2026). User and
 // SYSTEM Rooms keep their existing 2–5 limit.
@@ -39,25 +41,25 @@ const isCuratedRoom = (room) => Boolean(room) && room.creationSource === CREATIO
 // title: <= 30 chars (HumrahRoom.title maxlength). description: <= 200 chars.
 const CURATED_ROOMS = Object.freeze([
   { key: 'just-meeting-new-people', topic: 'Just Meeting New People', title: 'Just Meeting New People',
-    description: 'A public Room hosted by Humrah for saying hello and getting to know new people. Be kind and keep it friendly.' },
+    description: 'New here, or just up for meeting someone new? Say hi and tell us a little about yourself.' },
   { key: 'chill-casual-conversations', topic: 'Chill & Casual Conversations', title: 'Chill & Casual Conversations',
-    description: 'A public Room hosted by Humrah for easy, low-pressure chat about anything and everything.' },
+    description: "No agenda. How your day went, a random thought, what you had for lunch. Whatever's on your mind." },
   { key: 'movies-series', topic: 'Movies & Series', title: 'Movies & Series',
-    description: 'A public Room hosted by Humrah for talking about films and shows: recommendations, reviews and what to watch next.' },
+    description: 'What are you watching right now? Recommendations, rewatches, and the endings worth arguing about.' },
   { key: 'music', topic: 'Music', title: 'Music',
-    description: 'A public Room hosted by Humrah for sharing songs, artists and gigs you love.' },
+    description: "Songs on repeat, artists you'd queue for, and gigs worth the trip." },
   { key: 'food-cooking', topic: 'Food & Cooking', title: 'Food & Cooking',
-    description: 'A public Room hosted by Humrah for recipes, favourite dishes and places to eat.' },
+    description: 'Recipes that actually work, the dish your mom makes best, and where to eat in a new city.' },
   { key: 'travel-exploring', topic: 'Travel & Exploring', title: 'Travel & Exploring',
-    description: 'A public Room hosted by Humrah for trips, travel tips and places worth exploring.' },
+    description: "Trips you've taken, trips you're planning, and the small places you'd only tell a friend about." },
   { key: 'gaming', topic: 'Gaming', title: 'Gaming',
-    description: 'A public Room hosted by Humrah for games you play, want to play, or want company for.' },
+    description: "What you're playing, what you're stuck on, and finding someone to play with." },
   { key: 'sports', topic: 'Sports', title: 'Sports',
-    description: 'A public Room hosted by Humrah for matches, teams and staying active together.' },
+    description: "Match days, the team you can't give up on, and getting out to play yourself." },
   { key: 'career-work', topic: 'Career & Work', title: 'Career & Work',
-    description: 'A public Room hosted by Humrah for work life, career questions and advice.' },
+    description: "Job hunts, first jobs, difficult bosses and good advice. Ask what you'd hesitate to ask at work." },
   { key: 'books-reading', topic: 'Books & Reading', title: 'Books & Reading',
-    description: 'A public Room hosted by Humrah for books you are reading and ones you would recommend.' },
+    description: "What's on your nightstand, what you couldn't finish, and the book you keep recommending." },
 ]);
 
 module.exports = {
