@@ -37,7 +37,11 @@ const humrahRoomSchema = new mongoose.Schema({
   lastMessageAt: { type: Date, default: null },
   // Phase 2.2: idempotency key of a curated Room (curatedRoomConfig.CURATED_ROOMS[].key).
   // Absent on every other Room; the partial unique index below ignores them.
-  curatedTopicKey: { type: String }
+  curatedTopicKey: { type: String },
+  // Room supply (services/roomSupplyService.js): a Humrah-hosted Room put away because
+  // there are enough user Rooms. Hidden from discovery, never deleted, its messages kept.
+  // Only ever set on an empty curated Room; no default, so other Rooms never carry it.
+  standby: { type: Boolean }
 }, { timestamps: true });
 
 humrahRoomSchema.index({ discoveryMode: 1, status: 1 });

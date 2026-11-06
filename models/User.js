@@ -531,6 +531,8 @@ const userSchema = new mongoose.Schema({
         supportsQuestions: { type: Boolean, default: false },
         // Ask a Question Phase 6: this build shows QUESTION_HELPFUL / QUESTION_LEVEL_UP pushes.
         supportsReplierLevel: { type: Boolean, default: false },
+        // Room supply: this build shows a ROOM_RECRUIT push and opens the Room preview.
+        supportsRoomRecruit: { type: Boolean, default: false },
       updatedAt: { type: Date, default: Date.now } 
     }], 
     default: [] 

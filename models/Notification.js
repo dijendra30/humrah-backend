@@ -22,8 +22,17 @@ const notificationSchema = new mongoose.Schema({
     type: String,
     // ROOM_REENGAGEMENT (R5.2): a Room whose conversation has stalled. Distinct
     // from ROOM_MESSAGE — there is no new message and no messageId.
-    enum: ['ADMIN_BROADCAST', 'SYSTEM', 'MATCH', 'ACTIVITY', 'ROOM_INVITATION', 'ROOM_MESSAGE', 'ROOM_REENGAGEMENT'],
+    // ROOM_RECRUIT (Room supply): someone joined a Humrah-hosted Room; tells a few
+    // people who might like it (services/roomRecruitService.js).
+    enum: ['ADMIN_BROADCAST', 'SYSTEM', 'MATCH', 'ACTIVITY', 'ROOM_INVITATION', 'ROOM_MESSAGE', 'ROOM_REENGAGEMENT', 'ROOM_RECRUIT'],
     default: 'ADMIN_BROADCAST'
+  },
+  // ROOM_RECRUIT only: 'INTEREST' (the topic is one of the person's interests) or
+  // 'COLD' (it isn't). Used for the per-Room daily caps. null for every other type.
+  audience: {
+    type: String,
+    enum: ['INTEREST', 'COLD', null],
+    default: null
   },
 
   // =============================================

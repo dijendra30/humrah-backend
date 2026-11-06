@@ -214,6 +214,8 @@ async function buildDiscoveryInventory({ userId, user, excludeIds, joinedRoomIds
       creationSource: CREATION_SOURCE_CURATED,
       status: 'ACTIVE',
       discoveryMode: 'ALL_INDIA',
+      // Room supply: a Humrah-hosted Room on standby is not shown (roomSupplyService).
+      standby: { $ne: true },
       ...searchFilter,
     })
       .sort({ createdAt: 1 })
@@ -452,7 +454,10 @@ exports.discoverRooms = async (req, res) => {
         status: 'ACTIVE',
         discoveryMode: 'ALL_INDIA',
         createdBy: { $nin: excludeIds },
-        _id: { $nin: myRoomIds }
+        _id: { $nin: myRoomIds },
+        // Room supply: Humrah-hosted Rooms have no createdBy, so they match the line
+        // above; one on standby must not come back through this list.
+        standby: { $ne: true }
       }).limit(50);
 
       const countOf = await memberCountResolver(rooms);
@@ -814,6 +819,67 @@ exports.getRoomDetails = async (req, res) => {
   } catch (error) {
     console.error('[getRoomDetails error]', error);
     res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+/**
+ * GET /api/rooms/:roomId/preview  (Room supply, additive)
+ *
+ * What a ROOM_RECRUIT notification opens: enough to decide whether to join. Readable by
+ *   - a JOINED or INVITED member of any Room, or
+ *   - anyone, for a public Humrah-hosted Room that is showing (not on standby),
+ *     unless they were removed from it or a block exists with someone in it.
+ * Everything else is "Room not found", so a guessed id reveals nothing.
+ * No member list, no messages, no engagement data. The count is the real JOINED count.
+ */
+exports.getRoomPreview = async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    const userId = req.userId;
+    const notFound = () => res.status(404).json({ success: false, message: 'Room not found' });
+
+    const room = await HumrahRoom.findById(roomId).lean();
+    if (!room) return notFound();
+    const member = await RoomMember.findOne({ roomId, userId }).select('status').lean();
+    const isMember = member && (member.status === 'JOINED' || member.status === 'INVITED');
+
+    if (!isMember) {
+      if (member && member.status === 'KICKED') return notFound();
+      if (room.creationSource !== CREATION_SOURCE_CURATED || room.discoveryMode !== 'ALL_INDIA' || room.standby === true) return notFound();
+      const joined = await RoomMember.find({ roomId, status: 'JOINED' }).select('userId').lean();
+      const ids = joined.map(m => String(m.userId));
+      if (ids.length > 0) {
+        const me = await User.findById(userId).select('blockedUsers').lean();
+        const iBlocked = (me?.blockedUsers || []).some(b => ids.includes(String(b)));
+        const theyBlocked = !iBlocked && !!(await User.exists({ _id: { $in: ids }, blockedUsers: userId }));
+        if (iBlocked || theyBlocked) return notFound();
+      }
+    }
+
+    const memberCount = await RoomMember.countDocuments({ roomId, status: 'JOINED' });
+    return res.status(200).json({
+      success: true,
+      room: {
+        roomId: room._id,
+        title: room.title,
+        description: room.description,
+        topic: room.topic,
+        imageUrl: resolveRoomTopicImage(room.topic),
+        languages: room.languages,
+        discoveryMode: room.discoveryMode,
+        capacity: room.capacity,
+        maxMembers: room.capacity,
+        status: room.status,
+        memberCount,
+        remainingCapacity: Math.max(0, (room.capacity || 0) - memberCount),
+        lastMessageAt: room.lastMessageAt ? new Date(room.lastMessageAt).toISOString() : null,
+        creationSource: room.creationSource || 'USER',
+        myMembershipStatus: isMember ? member.status : null,
+      },
+    });
+  } catch (error) {
+    console.error('[getRoomPreview error]', error.message);
+    return res.status(500).json({ success: false, message: 'Server error' });
   }
 };
 

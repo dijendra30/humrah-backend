@@ -608,6 +608,11 @@ const connectDB = async () => {
     // remains solely responsible for sending invitations.
     require('./jobs/systemRoomGenerationJob').startSystemRoomGenerationJob();
 
+    // Room supply: Humrah-hosted Rooms (5 minus user Rooms) and the notifications after
+    // someone joins one. Self-gated by ROOM_SUPPLY_ENABLED / ROOM_RECRUIT_ENABLED
+    // (both default false).
+    require('./jobs/roomSupplyJob').startRoomSupplyJobs();
+
     // R5.2: Room engagement engine. Self-gated by ROOM_ENGAGEMENT_ENABLED
     // (default false). Decides whether a QUIET Room warrants one re-engagement
     // notification; never changes Room lifecycle and never posts a chat message.

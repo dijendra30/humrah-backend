@@ -31,7 +31,7 @@ function normalizeCapabilityBool(value) {
 // Saves (or deduplicates) the FCM token for the authenticated user.
 router.post("/fcm-token", async (req, res) => {
   try {
-    const { fcmToken, androidVersion, appVersion, supportsHumrahRooms, supportsSportsDiscovery, supportsQuestions, supportsReplierLevel } = req.body;
+    const { fcmToken, androidVersion, appVersion, supportsHumrahRooms, supportsSportsDiscovery, supportsQuestions, supportsReplierLevel, supportsRoomRecruit } = req.body;
     if (!fcmToken || typeof fcmToken !== "string" || fcmToken.trim() === "") {
       return res.status(400).json({ success: false, message: "fcmToken is required" });
     }
@@ -66,6 +66,10 @@ router.post("/fcm-token", async (req, res) => {
       if (supportsReplierLevel !== undefined) {
         user.fcmDevices[existingDeviceIndex].supportsReplierLevel = normalizeCapabilityBool(supportsReplierLevel);
       }
+      // Room supply (ROOM_RECRUIT pushes): same rule.
+      if (supportsRoomRecruit !== undefined) {
+        user.fcmDevices[existingDeviceIndex].supportsRoomRecruit = normalizeCapabilityBool(supportsRoomRecruit);
+      }
     } else {
       user.fcmDevices.push({
         token: tokenStr,
@@ -75,6 +79,7 @@ router.post("/fcm-token", async (req, res) => {
         supportsSportsDiscovery: normalizeCapabilityBool(supportsSportsDiscovery),
         supportsQuestions: normalizeCapabilityBool(supportsQuestions),
         supportsReplierLevel: normalizeCapabilityBool(supportsReplierLevel),
+        supportsRoomRecruit: normalizeCapabilityBool(supportsRoomRecruit),
         updatedAt: new Date()
       });
     }

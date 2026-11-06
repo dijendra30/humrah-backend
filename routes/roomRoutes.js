@@ -20,6 +20,8 @@ router.get('/', authenticate, roomController.getMyRooms);
 router.post('/:roomId/join', authenticate, validateRoomId, roomJoinLimiter, roomController.joinRoom);
 router.post('/:roomId/leave', authenticate, validateRoomId, roomController.leaveRoom);
 router.get('/:roomId', authenticate, validateRoomId, roomController.getRoomDetails);
+// Room supply: what a ROOM_RECRUIT notification opens (additive).
+router.get('/:roomId/preview', authenticate, validateRoomId, roomController.getRoomPreview);
 router.get('/:roomId/messages', authenticate, validateRoomId, roomController.getRoomMessages);
 
 // Phase 2.1 — server-authoritative read state (JOINED members only).
