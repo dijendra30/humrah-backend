@@ -10,6 +10,7 @@ const {
   roomReactionLimiter,
   roomDiscoverLimiter,
 } = require('../middleware/roomGuards');
+const guards = require('../middleware/roomGuards');
 
 router.post('/', authenticate, roomCreateLimiter, roomController.createRoom);
 router.get('/topics', authenticate, roomController.getTopics);
@@ -23,6 +24,14 @@ router.get('/:roomId', authenticate, validateRoomId, roomController.getRoomDetai
 // Room supply: what a ROOM_RECRUIT notification opens (additive).
 router.get('/:roomId/preview', authenticate, validateRoomId, roomController.getRoomPreview);
 router.get('/:roomId/messages', authenticate, validateRoomId, roomController.getRoomMessages);
+
+// Phase 3.1 — chat actions and members (JOINED members only; rules in roomChatService).
+router.patch('/:roomId/messages/:messageId', authenticate, validateRoomId, guards.roomEditLimiter, roomController.editRoomMessage);
+router.delete('/:roomId/messages/:messageId', authenticate, validateRoomId, guards.roomDeleteLimiter, roomController.deleteRoomMessage);
+router.post('/:roomId/messages/:messageId/hide', authenticate, validateRoomId, guards.roomHideLimiter, roomController.hideRoomMessage);
+router.post('/:roomId/messages/:messageId/link-check', authenticate, validateRoomId, guards.roomLinkLimiter, roomController.checkRoomMessageLink);
+router.get('/:roomId/members', authenticate, validateRoomId, guards.roomMembersLimiter, roomController.getRoomMembers);
+router.post('/:roomId/members/:userId/remove', authenticate, validateRoomId, guards.roomRemoveLimiter, roomController.removeRoomMember);
 
 // Phase 2.1 — server-authoritative read state (JOINED members only).
 router.post('/:roomId/read', authenticate, validateRoomId, roomController.markRoomRead);

@@ -6,6 +6,7 @@ const RoomMessage = require('../models/RoomMessage');
 const redisService = require('../services/redisService');
 const { sendDataFcm } = require('../utils/fcmHelper');
 const { normalizeReaction, serializeReactions } = require('../utils/roomReactionConfig');
+const roomChat = require('../services/roomChatService');
 const { buildDiscoveryProfile, scoreRoomForUser, assembleDiscovery } = require('../utils/roomDiscoveryRanking');
 const { parseDiscoveryParams, buildSearchFilter, matchesSearch, paginate } = require('../utils/roomSearch');
 const { CREATION_SOURCE_CURATED, CURATED_ROOMS } = require('../utils/curatedRoomConfig');
@@ -884,43 +885,49 @@ exports.getRoomPreview = async (req, res) => {
 };
 
 exports.getRoomMessages = async (req, res) => {
+  // Phase 3.1: roomChatService.listMessages. Same reply for the same request (the newest
+  // 100, oldest first; 403 'Not a member'), plus additive fields per message and
+  // hasMore / nextBefore for paging with ?before=<messageId>&limit=<n>. Messages from
+  // anyone in a block pair with the reader, and ones they deleted for themselves, are left out.
   try {
-    const { roomId } = req.params;
-    const userId = req.userId;
-    const member = await RoomMember.findOne({ roomId, userId, status: 'JOINED' });
-    if (!member) return res.status(403).json({ success: false, message: 'Not a member' });
-
-    // Phase 2.3: the NEWEST 100 (it returned the oldest 100, so a busy Room opened on
-    // stale history). Reversed so the reply stays oldest-first, as clients expect.
-    // Phase 2.5: sorted on createdAt only, so the { roomId, createdAt: -1 } index serves
-    // it and reads exactly 100 documents (an extra _id tiebreak forced an in-memory sort
-    // of every message in the Room).
-    const messages = (await RoomMessage.find({ roomId })
-      .sort({ createdAt: -1 })
-      .limit(100)
-      .populate('senderId', 'firstName lastName'))
-      .reverse();
-
-    const formattedMessages = messages.map(msg => ({
-      _id: msg._id,
-      roomId: msg.roomId,
-      senderId: msg.senderId?._id || msg.senderId,
-      senderName: msg.senderId
-        ? (`${msg.senderId.firstName || ''} ${msg.senderId.lastName || ''}`.trim() || 'Member')
-        : 'Member',
-      messageType: msg.messageType,
-      content: msg.content,
-      clientMessageId: msg.clientMessageId || null,
-      reactions: serializeReactions(msg.reactions, userId),
-      createdAt: msg.createdAt
-    }));
-
-    res.status(200).json({ success: true, messages: formattedMessages });
+    const r = await roomChat.listMessages(req.userId, req.params.roomId, req.query || {});
+    if (!r.success) return res.status(r.status).json({ success: false, code: r.code, message: r.message });
+    return res.status(200).json({ success: true, messages: r.messages, hasMore: r.hasMore, nextBefore: r.nextBefore, scanned: r.scanned });
   } catch (error) {
     console.error('[getRoomMessages error]', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE 3.1 — edit, delete, delete for me, link check, members, remove member.
+// All rules live in services/roomChatService.js.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const chatHandler = (name, fn) => async (req, res) => {
+  try {
+    const r = await fn(req);
+    if (!r.success) return res.status(r.status).json({ success: false, code: r.code, message: r.message });
+    const { status, ...body } = r;
+    return res.status(status || 200).json(body);
+  } catch (error) {
+    console.error(`[${name} error]`, error.message);
+    return res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+exports.editRoomMessage = chatHandler('editRoomMessage', req =>
+  roomChat.editMessage(req.app.get('io'), req.userId, req.params.roomId, req.params.messageId, req.body || {}));
+exports.deleteRoomMessage = chatHandler('deleteRoomMessage', req =>
+  roomChat.deleteForEveryone(req.app.get('io'), req.userId, req.params.roomId, req.params.messageId));
+exports.hideRoomMessage = chatHandler('hideRoomMessage', req =>
+  roomChat.hideMessage(req.app.get('io'), req.userId, req.params.roomId, req.params.messageId));
+exports.checkRoomMessageLink = chatHandler('checkRoomMessageLink', req =>
+  roomChat.checkMessageLink(req.userId, req.params.roomId, req.params.messageId, req.body || {}));
+exports.getRoomMembers = chatHandler('getRoomMembers', req =>
+  roomChat.listMembers(req.userId, req.params.roomId));
+exports.removeRoomMember = chatHandler('removeRoomMember', req =>
+  roomChat.removeMember(req.app.get('io'), req.userId, req.params.roomId, req.params.userId));
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PHASE 2.1 — server-authoritative read state

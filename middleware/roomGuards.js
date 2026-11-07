@@ -101,11 +101,28 @@ const roomDiscoverLimiter = buildLimiter({
   message: 'You are searching Rooms too quickly. Please slow down.',
 });
 
+// Rooms Phase 3.1 — chat actions. Per user, per minute unless noted.
+const chatLimiter = (action, envName, limit, windowSeconds, message) => buildLimiter({
+  action, limit: num(process.env[envName], limit), windowSeconds, message,
+});
+const roomEditLimiter = chatLimiter('edit', 'ROOM_EDIT_RATE_LIMIT', 30, 60, 'You are editing messages too quickly. Please slow down.');
+const roomDeleteLimiter = chatLimiter('delete', 'ROOM_DELETE_RATE_LIMIT', 30, 60, 'You are deleting messages too quickly. Please slow down.');
+const roomHideLimiter = chatLimiter('hide', 'ROOM_HIDE_RATE_LIMIT', 60, 60, 'Please slow down.');
+const roomLinkLimiter = chatLimiter('link', 'ROOM_LINK_RATE_LIMIT', 30, 60, 'Please slow down.');
+const roomMembersLimiter = chatLimiter('members', 'ROOM_MEMBERS_RATE_LIMIT', 60, 60, 'Please slow down.');
+const roomRemoveLimiter = chatLimiter('remove', 'ROOM_REMOVE_RATE_LIMIT', 20, 3600, 'You are removing people too quickly. Please try again later.');
+
 module.exports = {
   validateRoomId,
   roomCreateLimiter,
   roomJoinLimiter,
   roomReactionLimiter,
   roomDiscoverLimiter,
+  roomEditLimiter,
+  roomDeleteLimiter,
+  roomHideLimiter,
+  roomLinkLimiter,
+  roomMembersLimiter,
+  roomRemoveLimiter,
   _config: { CREATE_LIMIT, CREATE_WINDOW, JOIN_LIMIT, JOIN_WINDOW, REACTION_LIMIT, REACTION_WINDOW, DISCOVER_LIMIT, DISCOVER_WINDOW },
 };

@@ -6,6 +6,7 @@ const User = require('../models/User');
 const redisService = require('../services/redisService');
 const { rateLimiter } = require('../utils/socketAuth');
 const { notifyAwayRoomMembers } = require('../services/roomMessageNotificationService');
+const roomChat = require('../services/roomChatService');
 
 // Phase 2.1: typing state is in-process and short-lived. Never persisted to Mongo,
 // never pushed via FCM, never part of unread state.
@@ -67,6 +68,8 @@ exports.initHumrahRoomSocket = (io) => {
         const roomChannel = `room:${roomId}`;
         socket.join(roomChannel);
         activeRooms.add(roomId);
+        // Phase 3.1: per-member delivery reads the viewer from the socket.
+        socket.data.userId = String(userId);
         console.log(`[ROOM_SOCKET] joined roomId=${roomId} socketId=${socket.id} userId=${userId}`);
 
         socket.to(roomChannel).emit('room_member_joined', {
@@ -203,16 +206,20 @@ exports.initHumrahRoomSocket = (io) => {
           return;
         }
 
-        const buildEmitData = async (m) => ({
-          _id: m._id.toString(),
-          roomId: m.roomId.toString(),
-          senderId: (m.senderId._id || m.senderId).toString(),
-          senderName: await resolveSenderName(socket),
-          content: m.content,
-          createdAt: m.createdAt.toISOString(),
-          messageType: m.messageType,
-          clientMessageId: m.clientMessageId || clientMessageId || null
-        });
+        // Phase 3.1: an optional reply. Checked before anything is saved.
+        const reply = await roomChat.resolveReplyTarget(userId, roomId, data.replyToId);
+        if (reply && reply.error) {
+          if (typeof callback === 'function') callback({ error: reply.error.message, code: reply.error.code });
+          return;
+        }
+
+        // The pre-3.1 fields, unchanged, plus additive ones (senderPhoto, replyTo, editedAt,
+        // editableUntil, deleted, deletionType) built for one viewer.
+        const buildEmitData = async (m, viewerId = userId) => {
+          const doc = typeof m.toObject === 'function' ? m.toObject() : m;
+          const formatted = await roomChat.formatForViewer(doc, viewerId, { senderNameOverride: await resolveSenderName(socket) });
+          return { ...formatted, clientMessageId: doc.clientMessageId || clientMessageId || null };
+        };
 
         // Idempotency — a retry after reconnect must not create a second row.
         if (clientMessageId) {
@@ -231,7 +238,8 @@ exports.initHumrahRoomSocket = (io) => {
             senderId: userId,
             messageType: 'TEXT',
             content: sanitizedContent,
-            clientMessageId
+            clientMessageId,
+            ...(reply ? { replyToId: reply.id } : {})
           }).save();
         } catch (e) {
           // Unique index race — the retry landed while the first write was in flight.
@@ -257,8 +265,23 @@ exports.initHumrahRoomSocket = (io) => {
         const roomChannel = `room:${roomId}`;
         // Sending stops this member's typing indicator immediately.
         clearTyping(roomId);
-        // Broadcast to ALL OTHER members in the room (the sender gets it via the ack)
-        socket.to(roomChannel).emit('room_message', emitData);
+        // Broadcast to ALL OTHER members in the room (the sender gets it via the ack).
+        // Phase 3.1: built per member, and never sent to anyone in a block pair with the sender.
+        // Only a reply's quote can differ between members (deleted-for-me, blocks), so any
+        // other message is built once for everyone. Awaited, so members get it before the
+        // sender's ack, exactly as before.
+        let shared = null;
+        const forViewer = async (viewerId) => {
+          if (!viewerId) return emitData;
+          if (reply) return buildEmitData(msg, viewerId);
+          if (!shared) shared = buildEmitData(msg, null);
+          return shared;
+        };
+        await roomChat.emitToRoomViewers(io, roomId, 'room_message', forViewer,
+        { aboutUserId: userId, exceptSocketId: socket.id }).catch(err => {
+          console.error('[ROOM_SOCKET] per-member broadcast failed, plain broadcast:', err.message);
+          socket.to(roomChannel).emit('room_message', emitData);
+        });
         console.log(`[ROOM_SOCKET] room_message persisted messageId=${emitData._id} roomId=${roomId} senderId=${userId}`);
 
         // Ack back to sender with the full persisted message

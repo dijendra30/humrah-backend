@@ -32,10 +32,24 @@ const roomMessageSchema = new mongoose.Schema({
       userIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
     }],
     default: [],
-  }
+  },
+  // Phase 3.1 (all optional; absent on older messages, which read as "not a reply,
+  // never edited, not deleted").
+  // A reply: the TEXT message in the same Room this one answers.
+  replyToId: { type: mongoose.Schema.Types.ObjectId, ref: 'RoomMessage', default: undefined },
+  // Set by its author's edit (within 15 minutes of sending).
+  editedAt: { type: Date, default: undefined },
+  // Deleted for everyone. The text is kept for moderation but never returned.
+  deletedAt: { type: Date, default: undefined },
+  deletedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: undefined },
+  // 'USER' = its author, 'HOST' = the host of a user Room (moderation).
+  deletionType: { type: String, enum: ['USER', 'HOST'], default: undefined },
 }, { timestamps: true });
 
 roomMessageSchema.index({ roomId: 1, createdAt: -1 });
+// Phase 3.1: history pages walk (createdAt, _id) newest first, so equal timestamps are
+// never skipped or repeated between pages, and the sort is served by this index.
+roomMessageSchema.index({ roomId: 1, createdAt: -1, _id: -1 });
 // Dedupe a given sender's retries within a room. partialFilterExpression (not
 // `sparse`) so the unique constraint applies ONLY when clientMessageId is a real
 // string — messages without one (system notifications, legacy clients) are exempt
