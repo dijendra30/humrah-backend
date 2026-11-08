@@ -6,7 +6,8 @@
 //   GET  /me                                           → current admin, CSRF token, session timing
 //   POST /logout                                       → session revoked, cookie cleared
 //   POST /socket-token                                 → 2-minute token for the founder-chat socket handshake
-//   GET  /security-events                              → SUPER_ADMIN: recent security log
+//   GET  /security-events                              → owner: recent security log
+//   GET/POST /members, PATCH/DELETE /members/:id       → owner: limited-access dashboard members
 //
 // No request field can choose where a code is sent; that is ADMIN_OTP_DESTINATION on the server.
 'use strict';
@@ -18,7 +19,8 @@ const login = require('../services/adminAuth/adminLoginService');
 const sessions = require('../services/adminAuth/adminSessionService');
 const identity = require('../services/adminAuth/adminIdentity');
 const securityLog = require('../services/adminAuth/adminSecurityLog');
-const { adminSessionGate, requireRole, originAllowed, ADMIN_SOCKET_SCOPE } = require('../middleware/adminSessionGate');
+const { adminSessionGate, requireOwner, originAllowed, ADMIN_SOCKET_SCOPE } = require('../middleware/adminSessionGate');
+const members = require('../services/adminAuth/adminMemberService');
 
 const router = express.Router();
 
@@ -68,12 +70,12 @@ router.post('/verify-otp', handle(async (req, res) => {
   return sendResult(res, result);
 }));
 
-const requireSession = adminSessionGate({ adminOnly: true, cookieOnly: true });
+const requireSession = adminSessionGate({ adminOnly: true, cookieOnly: true, checkSections: false });
 
 router.get('/me', requireSession, handle(async (req, res) => {
   res.json({
     success: true,
-    admin: identity.safeAdminProfile(req.user),
+    admin: identity.safeAdminProfile(req.user, req.adminAccess),
     csrfToken: sessions.csrfTokenOf(req.adminSession),
     session: sessions.describe(req.adminSession),
   });
@@ -103,7 +105,7 @@ router.post('/socket-token', requireSession, handle(async (req, res) => {
   res.json({ success: true, token, expiresInSeconds: ttl });
 }));
 
-router.get('/security-events', requireSession, requireRole('SUPER_ADMIN'), handle(async (req, res) => {
+router.get('/security-events', requireSession, requireOwner, handle(async (req, res) => {
   const AdminSecurityEvent = require('../models/AdminSecurityEvent');
   const limit = Math.min(200, Math.max(1, Number.parseInt(req.query.limit, 10) || 50));
   const filter = {};
@@ -111,5 +113,11 @@ router.get('/security-events', requireSession, requireRole('SUPER_ADMIN'), handl
   const events = await AdminSecurityEvent.find(filter).sort({ at: -1 }).limit(limit).select('-ipHash -emailHash').lean();
   res.json({ success: true, events });
 }));
+
+// ── Limited-access members (owner only; writes also need CSRF via the gate + a recent sign-in) ──
+router.get('/members', requireSession, requireOwner, handle(async (req, res) => sendResult(res, await members.list())));
+router.post('/members', requireSession, requireOwner, handle(async (req, res) => sendResult(res, await members.add(req.user, req.adminSession, body(req), req))));
+router.patch('/members/:id', requireSession, requireOwner, handle(async (req, res) => sendResult(res, await members.update(req.user, req.adminSession, req.params.id, body(req), req))));
+router.delete('/members/:id', requireSession, requireOwner, handle(async (req, res) => sendResult(res, await members.remove(req.user, req.adminSession, req.params.id, req))));
 
 module.exports = router;

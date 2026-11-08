@@ -1,6 +1,9 @@
 // services/adminAuth/adminOtpMailer.js — delivers Admin Dashboard codes.
 // Uses the email providers Humrah already runs (Resend, which the old admin OTP used, or Brevo).
-// The recipient is ALWAYS config.otpDestination; callers cannot pass one in.
+// Recipient (never taken from a request):
+//   owners/admins (ADMIN_ALLOWED_EMAILS) → config.otpDestination, the protected owner code mailbox
+//   limited members                    → the member's own email as stored by an owner (AdminMember)
+// so a member can never receive an owner's code.
 // The code is never logged.
 'use strict';
 
@@ -72,9 +75,10 @@ async function sendViaBrevo({ to, subject, html }) {
 /**
  * @returns {Promise<{ ok:true, provider, messageId } | { ok:false, provider, reason }>}
  */
-async function sendAdminOtp({ otp, adminEmail, requestedAt = new Date() }) {
+async function sendAdminOtp({ otp, adminEmail, requestedAt = new Date(), toMember = false }) {
   const cfg = config.get();
-  const to = cfg.otpDestination; // fixed by the server
+  // adminEmail comes from the User record of an authorised identity, never from the request body.
+  const to = toMember ? config.normEmail(adminEmail) : cfg.otpDestination;
   const provider = cfg.emailProvider;
   const body = render({ otp, adminEmail, requestedAt, ttlMinutes: Math.round(cfg.otpTtlMs / 60000) });
   const msg = { to, subject: SUBJECT, ...body };

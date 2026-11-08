@@ -22,6 +22,7 @@ const sessions = require('../services/adminAuth/adminSessionService');
 const identity = require('../services/adminAuth/adminIdentity');
 const securityLog = require('../services/adminAuth/adminSecurityLog');
 const { safeEqualHex } = require('../services/adminAuth/adminAuthCrypto');
+const { sectionForPath, OWNER } = require('../services/adminAuth/adminPermissions');
 
 const DASHBOARD_SCOPE = 'admin-dashboard';
 const ADMIN_SOCKET_SCOPE = 'admin-socket';
@@ -78,7 +79,8 @@ async function resolveCookieSession(req, res, raw) {
   const { session } = r;
   const User = require('../models/User');
   const user = await User.findById(session.userId).select('-password');
-  if (!identity.sessionStillAuthorised(user, session)) {
+  const access = await identity.sessionAccess(user, session);
+  if (!access) {
     await sessions.revoke(session, 'ACCESS_REVOKED');
     sessions.clearCookie(res);
     securityLog.record('ADMIN_ACCESS_REVOKED', req, { email: session.email, authorised: true, userId: session.userId });
@@ -94,10 +96,30 @@ async function resolveCookieSession(req, res, raw) {
     }
   }
   await sessions.touch(session);
-  return { session, user };
+  return { session, user, access };
 }
 
-function attach(req, user, session) {
+/** null when this admin may use the API path, otherwise the section key that is missing. */
+function missingSection(req, access) {
+  const section = sectionForPath(req.originalUrl || req.url);
+  if (section === OWNER) return access.isOwner ? null : OWNER;
+  return access.sections.includes(section) ? null : section;
+}
+
+function denySection(req, res, access, section) {
+  securityLog.record('SECTION_FORBIDDEN', req, { email: req.user?.email, authorised: true, userId: req.user?._id, details: { section, role: access.kind } });
+  return res.status(403).json({
+    success: false,
+    code: section === OWNER ? 'ADMIN_OWNER_ONLY' : 'ADMIN_SECTION_FORBIDDEN',
+    section,
+    message: section === OWNER
+      ? 'Only the account owner can use this area.'
+      : "You don't have permission to access this section.",
+  });
+}
+
+function attach(req, user, session, access) {
+  req.adminAccess = access;
   req.user = user;
   req.userId = user._id;
   req.adminSession = session;
@@ -106,11 +128,12 @@ function attach(req, user, session) {
 }
 
 /**
- * @param {{ adminOnly?: boolean, cookieOnly?: boolean }} opts
+ * @param {{ adminOnly?: boolean, cookieOnly?: boolean, checkSections?: boolean }} opts
  *   adminOnly  — refuse non-admin accounts with 403 (all admin prefixes)
  *   cookieOnly — only the dashboard session is accepted (the /api/admin/auth session endpoints)
+ *   checkSections — enforce the section/owner map (services/adminAuth/adminPermissions.js)
  */
-function adminSessionGate({ adminOnly = true, cookieOnly = false } = {}) {
+function adminSessionGate({ adminOnly = true, cookieOnly = false, checkSections = true } = {}) {
   return async function adminGate(req, res, next) {
     if (req.method === 'OPTIONS') return next();
     try {
@@ -133,13 +156,30 @@ function adminSessionGate({ adminOnly = true, cookieOnly = false } = {}) {
         }
         // Full verification (signature, expiry, tokenVersion, phone session, account status).
         const { authenticate } = require('./auth');
-        return authenticate(req, res, () => {
-          if (adminOnly && !identity.isAdminRole(req.user?.role)) {
-            securityLog.record('FORBIDDEN_ADMIN_API_ACCESS', req, { userId: req.user?._id, details: { role: String(req.user?.role || '') } });
-            return deny(res, 403, 'ADMIN_FORBIDDEN', 'You do not have permission to access this resource.');
+        return authenticate(req, res, async () => {
+          try {
+            if (adminOnly && !identity.isAdminRole(req.user?.role)) {
+              securityLog.record('FORBIDDEN_ADMIN_API_ACCESS', req, { userId: req.user?._id, details: { role: String(req.user?.role || '') } });
+              return deny(res, 403, 'ADMIN_FORBIDDEN', 'You do not have permission to access this resource.');
+            }
+            // Dashboard members signing in on the phone get exactly their dashboard sections.
+            const phone = await identity.phoneAccess(req.user);
+            if (phone.managed) {
+              if (!phone.access) {
+                securityLog.record('FORBIDDEN_ADMIN_API_ACCESS', req, { userId: req.user._id, details: { reason: 'member_removed' } });
+                return deny(res, 403, 'ADMIN_FORBIDDEN', 'You do not have permission to access this resource.');
+              }
+              const missing = checkSections ? missingSection(req, phone.access) : null;
+              if (missing) return denySection(req, res, phone.access, missing);
+              req.adminAccess = phone.access;
+            }
+            req.adminAuthResolved = true;
+            return next();
+          } catch (err) {
+            console.error('[admin-gate] phone access error:', err && err.name);
+            if (!res.headersSent) deny(res, 500, 'SERVER_ERROR', 'Authentication failed.');
+            return undefined;
           }
-          req.adminAuthResolved = true;
-          return next();
         });
       }
 
@@ -151,7 +191,9 @@ function adminSessionGate({ adminOnly = true, cookieOnly = false } = {}) {
 
       const resolved = await resolveCookieSession(req, res, raw);
       if (!resolved) return undefined;
-      attach(req, resolved.user, resolved.session);
+      attach(req, resolved.user, resolved.session, resolved.access);
+      const missing = checkSections ? missingSection(req, resolved.access) : null;
+      if (missing) return denySection(req, res, resolved.access, missing);
       return next();
     } catch (err) {
       console.error('[admin-gate] error:', err && err.name, err && err.message);
@@ -161,6 +203,12 @@ function adminSessionGate({ adminOnly = true, cookieOnly = false } = {}) {
   };
 }
 
+/** Owner guard (ADMIN_ALLOWED_EMAILS + SUPER_ADMIN) for a resolved dashboard session. */
+const requireOwner = (req, res, next) => {
+  if (req.adminAccess && req.adminAccess.isOwner) return next();
+  return denySection(req, res, req.adminAccess || { kind: 'unknown' }, OWNER);
+};
+
 /** Role guard for a resolved admin session (e.g. SUPER_ADMIN-only endpoints in the auth router). */
 const requireRole = (...roles) => (req, res, next) => {
   if (roles.map(r => r.toUpperCase()).includes(String(req.user?.role || '').toUpperCase())) return next();
@@ -168,4 +216,4 @@ const requireRole = (...roles) => (req, res, next) => {
   return deny(res, 403, 'ADMIN_FORBIDDEN', 'You do not have permission to access this resource.');
 };
 
-module.exports = { adminSessionGate, requireRole, ADMIN_ONLY_PREFIXES, SHARED_DASHBOARD_PREFIXES, DASHBOARD_SCOPE, ADMIN_SOCKET_SCOPE, originAllowed };
+module.exports = { adminSessionGate, requireRole, requireOwner, missingSection, ADMIN_ONLY_PREFIXES, SHARED_DASHBOARD_PREFIXES, DASHBOARD_SCOPE, ADMIN_SOCKET_SCOPE, originAllowed };

@@ -71,6 +71,8 @@ function load(env = process.env) {
     sessionTtlMs: int(env.ADMIN_SESSION_TTL_HOURS, 8, 1, 72) * 60 * 60 * 1000,
     sessionIdleMs: int(env.ADMIN_SESSION_IDLE_MINUTES, 30, 5, 1440) * 60 * 1000,
     socketTokenTtlSeconds: 120,
+    // Changing admin access needs a sign-in at most this recent (owner step-up).
+    sensitiveReauthMs: int(env.ADMIN_SENSITIVE_REAUTH_MINUTES, 15, 5, 240) * 60 * 1000,
 
     cookieSecure,
     // __Host- cookies must be Secure, Path=/ and carry no Domain: bound to api.humrah.in only.

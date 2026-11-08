@@ -1,14 +1,16 @@
-// services/adminAuth/adminIdentity.js — who counts as an authorised dashboard administrator.
+// services/adminAuth/adminIdentity.js — who may use the Admin Dashboard, and with which sections.
 //
-// Two keys, both server-side:
-//   1. the normalised email is in ADMIN_ALLOWED_EMAILS, and
-//   2. the existing User account with that email has an admin role (SAFETY_ADMIN / SUPER_ADMIN),
-//      is ACTIVE, and is not suspended or banned.
-// Removing either (env allowlist, role, status) revokes access on the very next request.
-// Nothing the browser sends (role, flags, destination) is consulted.
+// An account gets dashboard access through exactly one of:
+//   • ADMIN_ALLOWED_EMAILS (server env)  → owner (role SUPER_ADMIN) or admin (role SAFETY_ADMIN): all sections
+//   • an ACTIVE AdminMember record added by an owner → member: only the sections the owner granted
+// and in every case the User account itself must be ACTIVE, not suspended/banned, with an admin role.
+// Members are always SAFETY_ADMIN accounts. Everything is re-read on every request, so removing an
+// email, a member, a section, a role or suspending the account takes effect immediately.
+// Nothing the browser sends (role, flags, sections, destination) is consulted.
 'use strict';
 
 const config = require('../../config/adminAuthConfig');
+const { SECTION_KEYS } = require('./adminPermissions');
 
 const ADMIN_ROLES = Object.freeze(['SAFETY_ADMIN', 'SUPER_ADMIN']);
 const isAdminRole = role => ADMIN_ROLES.includes(String(role || '').toUpperCase());
@@ -29,26 +31,60 @@ function accountEligible(user) {
 
 /** Lazily required so this module can be loaded before models are registered. */
 const User = () => require('../../models/User');
+const AdminMember = () => require('../../models/AdminMember');
 
-/** The eligible admin User for an email, or null. */
+const FULL = kind => Object.freeze({ kind, isOwner: kind === 'owner', sections: SECTION_KEYS.slice() });
+
+/**
+ * Dashboard access for an account, or null.
+ * @returns {Promise<null | { kind:'owner'|'admin'|'member', isOwner:boolean, sections:string[], memberId?:string }>}
+ */
+async function accessForUser(user) {
+  if (!accountEligible(user)) return null;
+  const email = config.normEmail(user.email);
+  if (isAllowlisted(email)) return FULL(String(user.role).toUpperCase() === 'SUPER_ADMIN' ? 'owner' : 'admin');
+  const m = await AdminMember().findOne({ email }).lean();
+  if (!m || m.status !== 'ACTIVE') return null;
+  if (String(m.userId) !== String(user._id)) return null;
+  if (String(user.role).toUpperCase() !== 'SAFETY_ADMIN') return null; // members can never be SUPER_ADMIN
+  if (email === config.get().otpDestination) return null;             // the owner code mailbox is never a member
+  const sections = (m.sections || []).filter(s => SECTION_KEYS.includes(s));
+  if (!sections.length) return null;
+  return { kind: 'member', isOwner: false, sections, memberId: String(m._id) };
+}
+
+/**
+ * Phone (Android app) admin tokens. Accounts that are managed members — active OR removed — get
+ * exactly their member access (none once removed), so the app can't be used to go around the
+ * dashboard limits. Unmanaged admin accounts keep their existing role-based access.
+ * @returns {Promise<{ managed:boolean, access:object|null }>}
+ */
+async function phoneAccess(user) {
+  const email = config.normEmail(user && user.email);
+  if (!email || isAllowlisted(email)) return { managed: false, access: null };
+  const m = await AdminMember().findOne({ email }).select('_id').lean();
+  if (!m) return { managed: false, access: null };
+  return { managed: true, access: await accessForUser(user) };
+}
+
+/** The User of an authorised dashboard identity (owner, admin or member), or null. */
 async function findEligibleAdmin(email) {
   const e = config.normEmail(email);
-  if (!isAllowlisted(e)) return null;
   const user = await User().findOne({ email: e }).select('-password');
-  return accountEligible(user) ? user : null;
+  if (!user) return null;
+  return (await accessForUser(user)) ? user : null;
 }
 
-/** Re-check for an existing session: same account, still allowlisted, still eligible, same tokenVersion. */
-function sessionStillAuthorised(user, session) {
-  if (!user || !session) return false;
-  if (String(user._id) !== String(session.userId)) return false;
-  if (config.normEmail(user.email) !== session.email) return false;
-  if (!isAllowlisted(user.email)) return false;
-  if ((user.tokenVersion ?? 0) !== (session.tv ?? 0)) return false;
-  return accountEligible(user);
+/** Re-check for an existing session. Returns the access object, or null when the session must end. */
+async function sessionAccess(user, session) {
+  if (!user || !session) return null;
+  if (String(user._id) !== String(session.userId)) return null;
+  if (config.normEmail(user.email) !== session.email) return null;
+  if ((user.tokenVersion ?? 0) !== (session.tv ?? 0)) return null;
+  return accessForUser(user);
 }
 
-function safeAdminProfile(user) {
+function safeAdminProfile(user, access) {
   return {
     _id: String(user._id),
     id: String(user._id),
@@ -57,7 +93,8 @@ function safeAdminProfile(user) {
     lastName: user.lastName || '',
     role: user.role,
     isSuperAdmin: String(user.role).toUpperCase() === 'SUPER_ADMIN',
+    access: access ? { kind: access.kind, isOwner: access.isOwner, sections: access.sections } : null,
   };
 }
 
-module.exports = { ADMIN_ROLES, isAdminRole, isAllowlisted, accountEligible, findEligibleAdmin, sessionStillAuthorised, safeAdminProfile };
+module.exports = { ADMIN_ROLES, isAdminRole, isAllowlisted, accountEligible, accessForUser, phoneAccess, findEligibleAdmin, sessionAccess, safeAdminProfile };

@@ -11,7 +11,7 @@ const mailer = require('./adminOtpMailer');
 const securityLog = require('./adminSecurityLog');
 const sessions = require('./adminSessionService');
 
-const GENERIC_SENT = 'If this email belongs to an authorised administrator, a verification code has been sent to the Humrah support mailbox.';
+const GENERIC_SENT = 'If this email belongs to an authorised administrator, a verification code has been sent to its registered admin mailbox.';
 const CHALLENGE_RE = /^[A-Za-z0-9_-]{20,64}$/;
 const OTP_RE = /^\d{6}$/;
 
@@ -49,7 +49,8 @@ async function supersedeOlder(email) {
 
 async function deliver(req, challenge, otp, user, kind) {
   if (!user) { await decoyDelay(); return { ok: true }; }
-  const sent = await mailer.sendAdminOtp({ otp, adminEmail: user.email, requestedAt: challenge.otpIssuedAt });
+  const access = await identity.accessForUser(user);
+  const sent = await mailer.sendAdminOtp({ otp, adminEmail: user.email, requestedAt: challenge.otpIssuedAt, toMember: !!access && access.kind === 'member' });
   if (!sent.ok) {
     await AdminLoginChallenge.updateOne({ _id: challenge._id, status: 'PENDING' }, { $set: { status: 'DELIVERY_FAILED', closedAt: new Date() } });
     securityLog.record('OTP_DELIVERY_FAILED', req, { email: user.email, authorised: true, userId: user._id, details: { provider: sent.provider, reason: sent.reason } });
@@ -273,7 +274,8 @@ async function verifyOtp(req, body) {
   if (!sessIp.allowed) return rateLimited(req, email, true, sessIp.retryAfterSeconds, 'session-ip');
 
   const created = await sessions.create(user, req);
-  securityLog.record('LOGIN_SUCCEEDED', req, { email: user.email, authorised: true, userId: user._id, details: { role: user.role } });
+  const access = await identity.accessForUser(user);
+  securityLog.record('LOGIN_SUCCEEDED', req, { email: user.email, authorised: true, userId: user._id, details: { role: access ? access.kind : user.role } });
 
   return {
     status: 200,
@@ -281,7 +283,7 @@ async function verifyOtp(req, body) {
     body: {
       success: true,
       message: 'Signed in.',
-      admin: identity.safeAdminProfile(user),
+      admin: identity.safeAdminProfile(user, access),
       csrfToken: created.csrfToken,
       session: sessions.describe(created.session),
     },

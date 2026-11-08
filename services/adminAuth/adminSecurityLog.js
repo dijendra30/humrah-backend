@@ -9,14 +9,16 @@ const RETENTION_MS = 180 * 24 * 60 * 60 * 1000;
 
 // Only these keys survive into `details`; values are clipped. Nothing sensitive is ever passed in,
 // this is a second line of defence.
-const SAFE_DETAIL_KEYS = new Set(['reason', 'code', 'attemptsRemaining', 'retryAfterSeconds', 'provider', 'role', 'requiredRole', 'scope', 'sendCount', 'challenge']);
+const SAFE_DETAIL_KEYS = new Set(['reason', 'code', 'attemptsRemaining', 'retryAfterSeconds', 'provider', 'role', 'requiredRole', 'scope', 'sendCount', 'challenge',
+  'section', 'sections', 'member', 'previousSections', 'createdStaffAccount', 'by']);
 
 function cleanDetails(details) {
   if (!details || typeof details !== 'object') return undefined;
   const out = {};
   for (const [k, v] of Object.entries(details)) {
     if (!SAFE_DETAIL_KEYS.has(k)) continue;
-    out[k] = typeof v === 'string' ? v.slice(0, 120) : (typeof v === 'number' || typeof v === 'boolean' ? v : undefined);
+    if (Array.isArray(v)) out[k] = v.filter(x => typeof x === 'string').join(',').slice(0, 200);
+    else out[k] = typeof v === 'string' ? v.slice(0, 120) : (typeof v === 'number' || typeof v === 'boolean' ? v : undefined);
   }
   return Object.keys(out).length ? out : undefined;
 }
