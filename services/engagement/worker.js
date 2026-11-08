@@ -24,6 +24,8 @@ const planner = require('./planner');
 const queueProcessor = require('./queueProcessor');
 const frequency = require('./frequency');
 const delivery = require('./delivery');
+const control = require('./control');
+const EngagementWorkerLock = require('../../models/EngagementWorkerLock');
 const log = require('./log');
 
 const workerId = `${os.hostname()}:${process.pid}:${crypto.randomBytes(3).toString('hex')}`;
@@ -37,6 +39,8 @@ async function tick(opts = {}) {
   if (mongoose.connection.readyState !== 1) { log.warn('tick_skipped', { reason: 'DB_NOT_CONNECTED' }); return out; }
   const shouldStop = () => state.stopping;
   const budgetMs = Math.max(10000, Math.floor(cfg.intervalMs * 0.6));
+  const errors = [];
+  await heartbeat({ runningSince: out.at, intervalSeconds: cfg.intervalMs / 1000 });
 
   try {
     const now = Date.now();
@@ -49,21 +53,53 @@ async function tick(opts = {}) {
       state.perfRefreshedAt = now;
       out.maintenance.templatePerformance = await require('./templateStore').refreshPerformance(new Date(now));
     }
-  } catch (err) { log.error('maintenance_error', { err: log.errTag(err) }); }
+  } catch (err) { errors.push(`MAINTENANCE:${log.errTag(err)}`); log.error('maintenance_error', { err: log.errTag(err) }); }
 
-  if (cfg.plannerEnabled && !shouldStop()) {
+  // Phase 3: the dashboard's emergency stop (database switch, every instance). Checked
+  // again before every claim and every send inside the queue processor.
+  out.deliveryStopped = await control.isDeliveryStopped();
+  if (out.deliveryStopped) log.info('tick_delivery_stopped', {});
+
+  if (cfg.plannerEnabled && !shouldStop() && !out.deliveryStopped) {
     try { out.planner = await planner.runPlanner({ cfg, workerId, shouldStop }); }
-    catch (err) { log.error('planner_error', { err: log.errTag(err) }); }
+    catch (err) { errors.push(`PLANNER:${log.errTag(err)}`); log.error('planner_error', { err: log.errTag(err) }); }
   }
 
-  if (cfg.queueEnabled && !shouldStop()) {
+  if (cfg.queueEnabled && !shouldStop() && !out.deliveryStopped) {
     try {
       out.queue = await queueProcessor.processDue({ cfg, workerId, sender, budgetMs, shouldStop });
       if (out.queue.claimed) log.info('queue_done', out.queue);
-    } catch (err) { log.error('queue_error', { err: log.errTag(err) }); }
+    } catch (err) { errors.push(`QUEUE:${log.errTag(err)}`); log.error('queue_error', { err: log.errTag(err) }); }
   }
   state.lastTick = { at: out.at, planner: out.planner ? { ran: out.planner.ran, queued: out.planner.queued || 0, reason: out.planner.reason || null } : null, queue: out.queue };
+
+  const end = new Date();
+  const hb = {
+    runningSince: null,
+    lastTickAt: end,
+    lastTickMs: end - out.at,
+    deliveryStopped: out.deliveryStopped,
+    lastPlanner: out.planner ? { ran: !!out.planner.ran, reason: out.planner.reason || null, users: out.planner.users || 0, queued: out.planner.queued || 0 } : null,
+    lastQueue: out.queue ? { claimed: out.queue.claimed, sent: out.queue.SENT || 0, retry: out.queue.RETRY || 0, failed: (out.queue.FAILED || 0) + (out.queue.DEAD_LETTER || 0), errors: out.queue.ERROR || 0 } : null,
+  };
+  if (errors.length || (out.queue && out.queue.ERROR)) Object.assign(hb, { lastErrorAt: end, lastErrorCodes: errors.length ? errors.slice(0, 5) : ['QUEUE:ITEM_ERRORS'] });
+  else hb.lastOkAt = end;
+  await heartbeat(hb);
   return out;
+}
+
+/**
+ * Phase 3: a persisted heartbeat (EngagementWorkerLock _id 'heartbeat'), so the dashboard
+ * can tell "disabled", "idle", "processing", "erroring" and "not running" apart on any
+ * instance. Codes and counts only. Never throws.
+ */
+async function heartbeat(fields) {
+  try {
+    // Merge into the stored summary (lastOkAt / lastErrorAt survive across ticks).
+    const prev = await EngagementWorkerLock.findById('heartbeat').select('lastSummary').lean();
+    const merged = { ...((prev && prev.lastSummary) || {}), ...fields };
+    await EngagementWorkerLock.updateOne({ _id: 'heartbeat' }, { $set: { owner: workerId, lastRunAt: new Date(), lastSummary: merged } }, { upsert: true });
+  } catch (err) { log.warn('heartbeat_write_failed', { err: log.errTag(err) }); }
 }
 
 function schedule(delayMs) {

@@ -26,6 +26,7 @@ const frequency = require('./frequency');
 const eligibility = require('./eligibility');
 const quietHours = require('./quietHours');
 const { BY_EVENT_TYPE } = require('./sources');
+const control = require('./control');
 const log = require('./log');
 
 function retryDelayMs(cfg, attemptCount) {
@@ -83,6 +84,13 @@ async function processOne(doc, { now, cfg, sender }) {
     if (tooLate) return cancel(doc, 'QUIET_HOURS_EXPIRED', now);
     await transition(doc._id, 'PROCESSING', 'PENDING', { guard: { lockedBy: doc.lockedBy }, set: { ...unlock, nextAttemptAt: new Date(next) } });
     return { result: 'DEFERRED' };
+  }
+
+  // Phase 3: last check of the emergency stop right before sending. Stopped → hand the
+  // notification back untouched (not an attempt); it waits for a resume.
+  if (await control.isDeliveryStopped()) {
+    await transition(doc._id, 'PROCESSING', 'PENDING', { guard: { lockedBy: doc.lockedBy }, set: { ...unlock } });
+    return { result: 'STOPPED' };
   }
 
   const tokens = eligibility.deviceTokens(user);
@@ -173,6 +181,7 @@ async function processDue({ cfg, workerId, sender, now = () => Date.now(), budge
   const startedAt = now();
   const summary = { claimed: 0, SENT: 0, RETRY: 0, DEFERRED: 0, CANCELLED: 0, FAILED: 0, DEAD_LETTER: 0, LEASE_LOST: 0, ERROR: 0, cancelReasons: {} };
   while (summary.claimed < cfg.maxSendsPerTick && !shouldStop() && now() - startedAt < budgetMs) {
+    if (await control.isDeliveryStopped()) { summary.stopped = true; break; }   // Phase 3 emergency stop
     const t = now();
     const doc = await claimNext(t, workerId, cfg);
     if (!doc) break;

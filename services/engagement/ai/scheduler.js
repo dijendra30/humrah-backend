@@ -52,6 +52,7 @@ async function findGaps(cfg, engCfg) {
 async function runOnce({ now = Date.now() } = {}) {
   const cfg = aiConfig.get();
   if (!cfg.enabled || !cfg.scheduleEnabled) return { ran: false, reason: 'DISABLED' };
+  if (await require('../control').isAiPaused()) return { ran: false, reason: 'AI_PAUSED' };
   const gaps = await findGaps(cfg, engagementConfig.get());
   const out = { ran: true, gaps: gaps.length, batches: [] };
   const day = Math.floor(now / 86400000);

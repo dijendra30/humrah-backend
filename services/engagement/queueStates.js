@@ -12,9 +12,12 @@ const ALLOWED = Object.freeze({
   PENDING:     ['PROCESSING', 'CANCELLED'],
   PROCESSING:  ['SENT', 'PENDING', 'FAILED', 'DEAD_LETTER', 'CANCELLED'],
   SENT:        [],
-  FAILED:      [],
+  // Phase 3: an admin may requeue a FAILED / DEAD_LETTER notification that definitely never
+  // reached FCM (adminQueries.requeue enforces: not possibly delivered, slot released, the
+  // 72 h slot re-reserved atomically first). Nothing else uses these transitions.
+  FAILED:      ['PENDING'],
   CANCELLED:   [],
-  DEAD_LETTER: [],
+  DEAD_LETTER: ['PENDING'],
 });
 const TERMINAL = Object.freeze(['SENT', 'FAILED', 'CANCELLED', 'DEAD_LETTER']);
 

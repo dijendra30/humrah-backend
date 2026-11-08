@@ -28,11 +28,11 @@ async function getStatus() {
       { $group: {
         _id: null,
         created: { $sum: 1 },
-        attempted: { $sum: { $cond: [{ $ne: ['$firstAttemptAt', null] }, 1, 0] } },
-        fcmAccepted: { $sum: { $cond: [{ $ne: ['$fcmAcceptedAt', null] }, 1, 0] } },
-        failed: { $sum: { $cond: [{ $ne: ['$failedAt', null] }, 1, 0] } },
-        opened: { $sum: { $cond: [{ $ne: ['$openedAt', null] }, 1, 0] } },
-        featureOpened: { $sum: { $cond: [{ $ne: ['$featureOpenedAt', null] }, 1, 0] } },
+        attempted: { $sum: { $cond: [{ $ifNull: ['$firstAttemptAt', false] }, 1, 0] } },
+        fcmAccepted: { $sum: { $cond: [{ $ifNull: ['$fcmAcceptedAt', false] }, 1, 0] } },
+        failed: { $sum: { $cond: [{ $ifNull: ['$failedAt', false] }, 1, 0] } },
+        opened: { $sum: { $cond: [{ $ifNull: ['$openedAt', false] }, 1, 0] } },
+        featureOpened: { $sum: { $cond: [{ $ifNull: ['$featureOpenedAt', false] }, 1, 0] } },
       } },
     ]),
   ]);

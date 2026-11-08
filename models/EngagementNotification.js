@@ -16,7 +16,9 @@
 //      │                  │  ├──▶ DEAD_LETTER     (retries exhausted, or outcome unknown after a crash)
 //      └──▶ CANCELLED ◀───┘                       (user no longer eligible / event gone / preference off)
 //
-// SENT, FAILED, CANCELLED and DEAD_LETTER are terminal.
+// SENT, FAILED, CANCELLED and DEAD_LETTER are terminal for the worker. Phase 3: an admin
+// may requeue FAILED / DEAD_LETTER → PENDING only if it never reached FCM (see
+// services/engagement/adminQueries.requeue).
 //
 // Privacy: no coordinates, distances, other users' ids or names are stored here.
 // `eventRef.id` is the id of a PUBLIC object (a sports plan, a Room, a question) or a
@@ -90,6 +92,10 @@ const engagementNotificationSchema = new mongoose.Schema({
   errorDetail:       { type: String, default: null, maxlength: 200 },
   possiblyDelivered: { type: Boolean, default: false },
   slotOutcome:       { type: String, enum: ['HELD', 'CONSUMED', 'RELEASED'], default: 'HELD' },
+  // Phase 3: admin requeue of a FAILED / DEAD_LETTER notification that never reached FCM.
+  requeueCount: { type: Number, default: 0, min: 0 },
+  requeuedAt:   { type: Date, default: null },
+  requeuedBy:   { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
 
   // Analytics — each a separate fact; none implies another.
   queuedAt:        { type: Date, default: null },

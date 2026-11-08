@@ -141,9 +141,9 @@ async function refreshPerformance(now = new Date()) {
     { $group: {
       _id: { k: '$templateKey', v: '$templateVersion' },
       queued: { $sum: 1 },
-      fcmAccepted: { $sum: { $cond: [{ $ne: ['$fcmAcceptedAt', null] }, 1, 0] } },
-      opened: { $sum: { $cond: [{ $ne: ['$openedAt', null] }, 1, 0] } },
-      featureOpened: { $sum: { $cond: [{ $ne: ['$featureOpenedAt', null] }, 1, 0] } },
+      fcmAccepted: { $sum: { $cond: [{ $ifNull: ['$fcmAcceptedAt', false] }, 1, 0] } },
+      opened: { $sum: { $cond: [{ $ifNull: ['$openedAt', false] }, 1, 0] } },
+      featureOpened: { $sum: { $cond: [{ $ifNull: ['$featureOpenedAt', false] }, 1, 0] } },
     } },
   ]);
   for (const r of rows) {
@@ -156,7 +156,9 @@ async function refreshPerformance(now = new Date()) {
   return rows.length;
 }
 
-const LIST_FILTERS = { status: EngagementTemplate.STATUSES, category: null, language: aiConfig.LANGUAGES, purpose: null };
+const LIST_FILTERS = { status: EngagementTemplate.STATUSES, category: null, language: aiConfig.LANGUAGES, purpose: null, tone: aiConfig.TONES, provider: aiConfig.PROVIDERS };
+const escapeRegex = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const ymd = s => (typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) && Number.isFinite(Date.parse(`${s}T00:00:00Z`)) ? Date.parse(`${s}T00:00:00Z`) - 5.5 * 3600 * 1000 : null);
 /** Admin listing with strict filters and bounded pages. */
 async function list(query = {}) {
   const filter = {};
@@ -164,9 +166,21 @@ async function list(query = {}) {
     const v = query[k];
     if (v === undefined) continue;
     if (typeof v !== 'string' || !/^[A-Za-z_]{1,40}$/.test(v)) return { ok: false, code: 'INVALID_FILTER', field: k };
-    const val = k === 'category' || k === 'status' ? v.toUpperCase() : v;
+    const val = k === 'category' || k === 'status' ? v.toUpperCase() : (k === 'tone' || k === 'provider' ? v.toLowerCase() : v);
     if (allowed && !allowed.includes(val)) return { ok: false, code: 'INVALID_FILTER', field: k };
     filter[k] = val;
+  }
+  // Phase 3: text search in the copy (escaped, bounded) and a created-date range (Asia/Kolkata days).
+  if (query.q !== undefined) {
+    if (typeof query.q !== 'string' || query.q.length > 60) return { ok: false, code: 'INVALID_FILTER', field: 'q' };
+    const q = query.q.trim();
+    if (q) filter.$or = [{ title: { $regex: escapeRegex(q), $options: 'i' } }, { body: { $regex: escapeRegex(q), $options: 'i' } }];
+  }
+  if (query.from !== undefined || query.to !== undefined) {
+    const from = query.from !== undefined ? ymd(query.from) : null;
+    const to = query.to !== undefined ? ymd(query.to) : null;
+    if ((query.from !== undefined && from === null) || (query.to !== undefined && to === null)) return { ok: false, code: 'INVALID_FILTER', field: 'date' };
+    filter.createdAt = { ...(from !== null ? { $gte: new Date(from) } : {}), ...(to !== null ? { $lt: new Date(to + 24 * 3600 * 1000) } : {}) };
   }
   const limit = Math.min(Math.max(parseInt(query.limit, 10) || 20, 1), 50);
   const page = Math.min(Math.max(parseInt(query.page, 10) || 1, 1), 1000);

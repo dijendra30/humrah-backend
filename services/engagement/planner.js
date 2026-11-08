@@ -32,6 +32,27 @@ const templateStore = require('./templateStore');
 const log = require('./log');
 
 const LOCK_ID = 'planner';
+const control = require('./control');
+const EngagementPlannerDaily = require('../../models/EngagementPlannerDaily');
+
+const IST_MS = 5.5 * 3600 * 1000;
+/** Asia/Kolkata calendar day (India has no DST) → { key 'YYYY-MM-DD', start Date }. */
+function istDay(ms) {
+  const d = new Date(ms + IST_MS);
+  const key = d.toISOString().slice(0, 10);
+  return { key, start: new Date(Date.parse(`${key}T00:00:00.000Z`) - IST_MS) };
+}
+
+/** Phase 3: per-day planner counters for the dashboard (one $inc upsert per batch). Never throws. */
+async function recordDaily(s, now) {
+  try {
+    const { key, start } = istDay(now);
+    const inc = { evaluated: s.users, queued: s.queued, deferred: s.deferred, evaluationErrors: s.errors };
+    for (const [k, v] of Object.entries(s.skipped || {})) if (/^[A-Z_]{1,40}$/.test(k)) inc[`skipped.${k}`] = v;
+    for (const [k, v] of Object.entries(s.categories || {})) if (/^[A-Z_]{1,40}$/.test(k)) inc[`categories.${k}`] = v;
+    await EngagementPlannerDaily.updateOne({ _id: key }, { $inc: inc, $setOnInsert: { day: start } }, { upsert: true, setDefaultsOnInsert: false });
+  } catch (err) { log.warn('planner_daily_write_failed', { err: log.errTag(err) }); }
+}
 
 /**
  * Phase 2: ACTIVE templates, loaded ONCE per planner run (never per user, never from an
@@ -186,6 +207,7 @@ async function runPlanner({ cfg, workerId, now = () => Date.now(), shouldStop = 
 
     const shared = {};   // per-run memo (e.g. the Room candidates)
     for (let b = 0; b < cfg.maxBatchesPerTick && !shouldStop(); b++) {
+      if (await control.isDeliveryStopped()) { log.info('planner_delivery_stopped', {}); break; }   // Phase 3 emergency stop
       const t = now();
       const query = {
         status: 'ACTIVE', role: 'USER', deletionRequestedAt: null, 'fcmTokens.0': { $exists: true },
@@ -199,6 +221,7 @@ async function runPlanner({ cfg, workerId, now = () => Date.now(), shouldStop = 
         break;
       }
       const s = await planBatch(users, { now: t, cfg, shared });
+      await recordDaily(s, t);
       cursor = users[users.length - 1]._id;
       total.batches++; total.users += s.users; total.queued += s.queued; total.deferred += s.deferred; total.errors += s.errors;
       for (const [k, v] of Object.entries(s.skipped)) total.skipped[k] = (total.skipped[k] || 0) + v;
@@ -215,4 +238,4 @@ async function runPlanner({ cfg, workerId, now = () => Date.now(), shouldStop = 
   }
 }
 
-module.exports = { runPlanner, planUser, planBatch, acquireLease, releaseLease, loadTemplatePool, LOCK_ID };
+module.exports = { runPlanner, planUser, planBatch, acquireLease, releaseLease, loadTemplatePool, recordDaily, istDay, LOCK_ID };

@@ -65,6 +65,8 @@ async function closeInterruptedBatches(now, cfg) {
 async function begin(input, { trigger = 'MANUAL', requestedBy = null, now = Date.now() } = {}) {
   const cfg = aiConfig.get();
   if (!cfg.enabled) return { ok: false, code: 'AI_GENERATION_DISABLED', status: 503 };
+  // Phase 3: the dashboard's AI pause (database switch). Delivery is unaffected.
+  if (await require('../control').isAiPaused()) return { ok: false, code: 'AI_GENERATION_PAUSED', status: 503 };
   const v = validator.validateRequest(input, cfg);
   if (!v.ok) return { ok: false, code: v.code, field: v.field, status: 400 };
   const req = v.value;
