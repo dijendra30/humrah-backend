@@ -694,6 +694,10 @@ app.use('/', appLinksRoutes);
 
 // ✅ Public App Configuration (must be before authenticated routes)
 app.use('/api/app-config', require('./routes/appConfig.route'));
+// App Update Management: the app's update check works signed in or not (an optional session is
+// read inside the route). Must stay ABOVE the app.use('/api', authenticate, …) catch-alls below,
+// or a signed-out app — or one with an expired session — would get a 401 instead of its answer.
+app.use('/api/app-updates', require('./routes/appUpdates'));
 
 // Health check must stay public and before broad authenticated /api routes.
 // ── Public routes ──────────────────────────────────────────────────────────────
@@ -783,9 +787,8 @@ app.use('/api/sports-plans',      authenticate, enforceLegalAcceptance, require(
 // Ask a Question (Phase 2 backend). Behind QUESTIONS_ENABLED (default off): while off every user route answers 404 QUESTIONS_DISABLED.
 app.use('/api/questions',         authenticate, enforceLegalAcceptance, require('./routes/questions'));
 app.use('/api/admin/questions',   authenticate, adminOnly, require('./routes/adminQuestions'));
-// App Update Management: the app's check works signed in or not (optional session inside the
-// route); the admin API is admin-only, with super-admin-only changes checked per route.
-app.use('/api/app-updates',       require('./routes/appUpdates'));
+// App Update Management admin API: admin-only, super-admin-only changes checked per route.
+// (The app's public check is mounted above, before the '/api' catch-alls.)
 app.use('/api/admin/app-updates', authenticate, adminOnly, require('./routes/adminAppUpdates'));
 // Quick Connect (Phase 4 backend foundation). Behind QUICK_CONNECT_ENABLED (default off): while off every route answers 404 QUICK_CONNECT_DISABLED.
 app.use('/api/quick-connect',     authenticate, enforceLegalAcceptance, require('./routes/quickConnect'));
