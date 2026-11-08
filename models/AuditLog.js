@@ -108,6 +108,14 @@ const auditLogSchema = new mongoose.Schema({
       'QUESTION_RESTRICTION_REMOVED',
       'QUESTION_DATA_EXPORTED',
 
+      // App Update Management (additive)
+      'APP_RELEASE_CREATED',
+      'APP_RELEASE_UPDATED',
+      'APP_RELEASE_SCHEDULED',
+      'APP_RELEASE_PUBLISHED',
+      'APP_RELEASE_PAUSED',
+      'APP_RELEASE_WITHDRAWN',
+
       // Other
       'UNAUTHORIZED_ACCESS_ATTEMPT'
     ]
@@ -116,7 +124,7 @@ const auditLogSchema = new mongoose.Schema({
   // Target (what the action was performed on)
   targetType: {
     type: String,
-    enum: ['USER', 'REPORT', 'CHAT', 'MESSAGE', 'BOOKING', 'ADMIN', 'SYSTEM', 'POST', 'QUESTION', 'QUESTION_ANSWER', 'QUESTION_REPORT', 'QUESTION_MODERATION'],
+    enum: ['USER', 'REPORT', 'CHAT', 'MESSAGE', 'BOOKING', 'ADMIN', 'SYSTEM', 'POST', 'QUESTION', 'QUESTION_ANSWER', 'QUESTION_REPORT', 'QUESTION_MODERATION', 'APP_RELEASE'],
     required: true
   },
   

@@ -783,6 +783,10 @@ app.use('/api/sports-plans',      authenticate, enforceLegalAcceptance, require(
 // Ask a Question (Phase 2 backend). Behind QUESTIONS_ENABLED (default off): while off every user route answers 404 QUESTIONS_DISABLED.
 app.use('/api/questions',         authenticate, enforceLegalAcceptance, require('./routes/questions'));
 app.use('/api/admin/questions',   authenticate, adminOnly, require('./routes/adminQuestions'));
+// App Update Management: the app's check works signed in or not (optional session inside the
+// route); the admin API is admin-only, with super-admin-only changes checked per route.
+app.use('/api/app-updates',       require('./routes/appUpdates'));
+app.use('/api/admin/app-updates', authenticate, adminOnly, require('./routes/adminAppUpdates'));
 // Quick Connect (Phase 4 backend foundation). Behind QUICK_CONNECT_ENABLED (default off): while off every route answers 404 QUICK_CONNECT_DISABLED.
 app.use('/api/quick-connect',     authenticate, enforceLegalAcceptance, require('./routes/quickConnect'));
 
