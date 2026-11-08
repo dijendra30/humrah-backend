@@ -44,6 +44,11 @@ async function tick(opts = {}) {
       claims: await queueProcessor.recoverStaleClaims(now),
       reservations: await frequency.recoverOrphans(now, cfg),
     };
+    // Phase 2: template performance counters, at most hourly per instance (one aggregation).
+    if (!state.perfRefreshedAt || now - state.perfRefreshedAt >= 3600 * 1000) {
+      state.perfRefreshedAt = now;
+      out.maintenance.templatePerformance = await require('./templateStore').refreshPerformance(new Date(now));
+    }
   } catch (err) { log.error('maintenance_error', { err: log.errTag(err) }); }
 
   if (cfg.plannerEnabled && !shouldStop()) {

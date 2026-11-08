@@ -28,7 +28,7 @@ async function collect(ctx) {
       eventType: 'CATALOG',
       eventRef: { kind: 'Catalog', id: entry.key },
       eventKey: `CATALOG:${entry.key}`,
-      templateKey: entry.templateKey,
+      purpose: entry.purpose,
       vars: {},
       // An entry backed by a fact about the user's own account is more relevant than
       // an unconditional one.

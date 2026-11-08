@@ -146,6 +146,18 @@ function get() {
     systemQuietEnd:     envHHMM('ENGAGEMENT_QUIET_END', '08:00'),
     defaultTimeZone,
 
+    // Templates (Phase 2). Built-ins are the reviewed Phase 1 English copy, kept as the
+    // fallback. Language mode 'en_only' keeps Phase 1 behaviour; 'preferred' maps the
+    // user's stated languages to en / hi / hinglish (personalisation.languageFor).
+    builtinTemplatesEnabled: envBool('ENGAGEMENT_BUILTIN_TEMPLATES_ENABLED', true),
+    languageMode: (() => {
+      const v = raw('ENGAGEMENT_LANGUAGE_MODE');
+      if (v === null) return 'en_only';
+      if (['en_only', 'preferred'].includes(v.toLowerCase())) return v.toLowerCase();
+      warnOnce('lang', 'ENGAGEMENT_LANGUAGE_MODE must be en_only or preferred; using en_only.');
+      return 'en_only';
+    })(),
+
     // Categories and scoring
     enabledCategories: envCategories('ENGAGEMENT_CATEGORIES_ENABLED', DEFAULT_ENABLED_CATEGORIES),
     priorities:        envPriorities('ENGAGEMENT_CATEGORY_PRIORITIES'),

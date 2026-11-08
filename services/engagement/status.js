@@ -11,6 +11,15 @@ const worker = require('./worker');
 async function getStatus() {
   const cfg = config.get();
   const since = new Date(Date.now() - 7 * 24 * 3600 * 1000);
+  const EngagementTemplate = require('../../models/EngagementTemplate');
+  const [templatesByStatus] = await Promise.all([
+    EngagementTemplate.aggregate([{ $group: { _id: '$status', n: { $sum: 1 } } }]),
+  ]);
+  const ai = require('../../config/engagementAiConfig').get();
+  const extra = {
+    templates: { ...Object.fromEntries(templatesByStatus.map(r => [r._id, r.n])), builtinFallback: cfg.builtinTemplatesEnabled, languageMode: cfg.languageMode },
+    aiGeneration: { enabled: ai.enabled, scheduleEnabled: ai.scheduleEnabled, primary: ai.primary, fallback: ai.fallback, approvalPolicy: ai.approvalPolicy },
+  };
   const [byStatus, lock, week] = await Promise.all([
     EngagementNotification.aggregate([{ $group: { _id: '$status', n: { $sum: 1 } } }]),
     EngagementWorkerLock.findById('planner').select('leaseUntil cycleStartedAt cycleCompletedAt lastRunAt lastSummary').lean(),
@@ -29,6 +38,7 @@ async function getStatus() {
   ]);
   const w = week[0] || {};
   return {
+    ...extra,
     config: {
       enabled: cfg.enabled, plannerEnabled: cfg.plannerEnabled, queueEnabled: cfg.queueEnabled,
       intervalSeconds: cfg.intervalMs / 1000, batchSize: cfg.batchSize, maxSendsPerTick: cfg.maxSendsPerTick,

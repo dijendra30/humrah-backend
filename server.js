@@ -646,6 +646,13 @@ const connectDB = async () => {
     } catch (err) {
       console.error('[ENGAGEMENT] worker not started:', err && err.name);
     }
+    // Phase 2: scheduled AI template generation — its own timer, independent of the worker.
+    // Needs ENGAGEMENT_AI_ENABLED and ENGAGEMENT_AI_SCHEDULE_ENABLED (both default false).
+    try {
+      require('./services/engagement/ai/scheduler').start();
+    } catch (err) {
+      console.error('[ENGAGEMENT_AI] scheduler not started:', err && err.name);
+    }
 
     await runStartupCleanup();
     scheduleDailyCleanup();
@@ -874,6 +881,7 @@ const gracefulShutdown = async (signal) => {
   console.log(`\n${signal} signal received: closing HTTP server`);
   // Stop scheduling engagement ticks at once (server.close waits for open sockets).
   try { require('./services/engagement/worker').stop().catch(() => {}); } catch (_) { /* never block shutdown */ }
+  try { require('./services/engagement/ai/scheduler').stop().catch(() => {}); } catch (_) { /* never block shutdown */ }
   server.close(async () => {
     try {
       // Let an in-progress engagement tick finish (bounded) before the DB closes.

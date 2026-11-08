@@ -47,6 +47,8 @@ const engagementNotificationSchema = new mongoose.Schema({
   // Content (rendered from a template; Phase 2 may supply other templates).
   templateKey:     { type: String, required: true, maxlength: 80 },
   templateVersion: { type: Number, default: 1 },
+  // Phase 2: language of the template used ('en' | 'hi' | 'hinglish'); null on Phase 1 rows.
+  language:        { type: String, default: null, maxlength: 10 },
   title:           { type: String, required: true, maxlength: 80 },
   body:            { type: String, required: true, maxlength: 200 },
 

@@ -27,9 +27,25 @@ const quietHours = require('./quietHours');
 const personalisation = require('./personalisation');
 const { collectAll } = require('./sources');
 const selection = require('./selection');
+const templates = require('./templates');
+const templateStore = require('./templateStore');
 const log = require('./log');
 
 const LOCK_ID = 'planner';
+
+/**
+ * Phase 2: ACTIVE templates, loaded ONCE per planner run (never per user, never from an
+ * AI provider). If the load fails, planning continues with the built-in templates only.
+ */
+async function loadTemplatePool(cfg) {
+  try {
+    const stored = await templateStore.loadActiveTemplates();
+    return templates.buildPool(stored, { builtinsEnabled: cfg.builtinTemplatesEnabled });
+  } catch (err) {
+    log.error('template_pool_load_failed', { err: log.errTag(err) });
+    return templates.buildPool([], { builtinsEnabled: cfg.builtinTemplatesEnabled });
+  }
+}
 const { ObjectId } = mongoose.Types;
 
 const bump = (obj, k) => { obj[k] = (obj[k] || 0) + 1; };
@@ -73,6 +89,7 @@ async function planUser(user, state, { now, cfg, shared }) {
   const scheduledAt = quietHours.nextPermittedTime(user, now, cfg);
   if (scheduledAt.getTime() - now > cfg.maxDeferMs) return { outcome: 'SKIPPED', reason: 'QUIET_HOURS_TOO_LONG' };
 
+  if (shared && !shared.templatePool) shared.templatePool = await loadTemplatePool(cfg);
   const ctx = await personalisation.buildContext(user, { now, cfg, shared });
   const { opportunities, errors } = await collectAll(ctx);
   for (const e of errors) log.error('source_error', { source: e.source, err: log.errTag(e.err) });
@@ -96,6 +113,7 @@ async function planUser(user, state, { now, cfg, shared }) {
       category: chosen.category,
       templateKey: chosen.rendered.templateKey,
       templateVersion: chosen.rendered.templateVersion,
+      language: chosen.rendered.language,
       title: chosen.rendered.title,
       body: chosen.rendered.body,
       eventType: chosen.eventType,
@@ -116,9 +134,14 @@ async function planUser(user, state, { now, cfg, shared }) {
     throw err;
   }
   const deferred = scheduledAt.getTime() > now;
+  if (chosen.rendered.templateDocId) {
+    try { await templateStore.recordUsage(chosen.rendered.templateDocId, new Date(now)); }
+    catch (err) { log.warn('template_usage_record_failed', { err: log.errTag(err) }); }
+  }
   log.info('notification_queued', {
     notificationId: String(notificationId), category: chosen.category, eventType: chosen.eventType,
-    templateKey: chosen.rendered.templateKey, score: chosen.score, deferred, candidates: opportunities.length,
+    templateKey: chosen.rendered.templateKey, templateVersion: chosen.rendered.templateVersion, language: chosen.rendered.language,
+    score: chosen.score, deferred, candidates: opportunities.length,
   });
   return { outcome: 'QUEUED', reason: chosen.category, deferred };
 }
@@ -192,4 +215,4 @@ async function runPlanner({ cfg, workerId, now = () => Date.now(), shouldStop = 
   }
 }
 
-module.exports = { runPlanner, planUser, planBatch, acquireLease, releaseLease, LOCK_ID };
+module.exports = { runPlanner, planUser, planBatch, acquireLease, releaseLease, loadTemplatePool, LOCK_ID };

@@ -75,12 +75,14 @@ async function collect(ctx) {
       eventType: 'HUMRAH_ROOM',
       eventRef: { kind: 'HumrahRoom', id: String(room._id) },
       eventKey: `HUMRAH_ROOM:${room._id}`,
-      templateKey: 'rooms.active_topic',
-      vars: { roomTopic: canonicalizeTopic(room.topic) },
+      purpose: 'active_room',
+      vars: { topic_label: canonicalizeTopic(room.topic) },
       relevance: Math.max(0.6, 1 - ageH / (ctx.cfg.roomActiveWithinMs / HOUR) * 0.4),
       relevantUntil: new Date(ctx.now + 24 * HOUR),
     });
   }
+  // How many matching public Rooms this user could join (only shown when >= 2).
+  for (const o of out) o.vars.public_room_count = out.length;
   return out;
 }
 

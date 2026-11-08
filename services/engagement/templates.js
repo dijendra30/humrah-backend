@@ -1,151 +1,142 @@
 // services/engagement/templates.js
 // -----------------------------------------------------------------------------
-// Notification content. The worker never builds a string itself: it asks for a template
-// by key and renders it with validated variables.
+// Notification content: the template pool and the strict renderer.
 //
-// Phase 1 ships a fixed, reviewed set of templates (BUILT_IN below). Phase 2 (AI Template
-// Studio) plugs in through setTemplateProvider(): any provider that returns templates of
-// the same shape is validated by the same render() — so a generated template can never
-// reach a phone with a missing or unexpected variable.
+// The worker never builds a string itself. For an opportunity (category + purpose +
+// backend-verified variables) it picks a template from the pool and renders it:
 //
-// Rules render() enforces:
-//   - every {placeholder} in the title/body is declared in `vars`, and every declared
-//     variable is supplied and passes its validator (enum, or a bounded safe string);
-//   - no braces survive rendering; control characters are refused;
-//   - title <= 65 and body <= 180 characters after rendering;
-//   - the template's category matches the category asked for.
-// On any failure it returns { ok: false, reason } — the opportunity is dropped, nothing
-// is sent with a broken message.
+//   pool = ACTIVE templates from MongoDB (AI-generated or admin-revised, approved by an
+//          admin — templateStore.loadActivePool, once per planner run)
+//        + the BUILT_IN templates below (the reviewed Phase 1 copy, English) as the
+//          safe fallback, unless ENGAGEMENT_BUILTIN_TEMPLATES_ENABLED=false.
+//
+// Order for one opportunity: stored templates in the user's language, built-ins in that
+// language, then the same for English (the fallback language). Within a group, templates
+// this user received recently go last, and the rest rotate deterministically by
+// hash(user, event, template) — so different people see different copy and nothing is
+// random. If no template can be rendered with the variables the backend supplied, the
+// opportunity is skipped (NO_APPROVED_TEMPLATE); nothing unapproved is ever sent.
+//
+// render() enforces, for every template (stored or built-in):
+//   every {{placeholder}} is a registry variable allowed for the purpose and present in
+//   the backend's validated values; no braces or control characters survive; the
+//   rendered title <= 65 and body <= 180 characters; the category/purpose match.
 // -----------------------------------------------------------------------------
 'use strict';
 
+const crypto = require('crypto');
+const { SPORT_LABELS, purposeSpec, prepareAll, placeholdersIn, PLACEHOLDER } = require('./variables');
+const { CONTROL_RE } = require('./textSafety');
+
 const TITLE_MAX = 65;
 const BODY_MAX = 180;
+const FALLBACK_LANGUAGE = 'en';
 
-const SPORT_LABELS = Object.freeze({
-  badminton: 'badminton', football: 'football', cricket: 'cricket', basketball: 'basketball',
-  tennis: 'tennis', table_tennis: 'table tennis', running: 'running', cycling: 'cycling',
-  gym: 'gym', yoga: 'yoga',
+const builtin = (id, category, purpose, tone, title, body) => Object.freeze({
+  templateId: `builtin.${id}`, version: 1, category, purpose, language: 'en', tone, title, body, source: 'BUILT_IN', status: 'ACTIVE',
 });
 
-// A short public label: letters, digits, spaces and a little punctuation.
-const SAFE_LABEL = /^[\p{L}\p{N}][\p{L}\p{N} &'’,.\-]{0,39}$/u;
-
+// The Phase 1 copy, unchanged in wording; placeholders moved to the {{registry}} names.
 const BUILT_IN = Object.freeze([
-  {
-    key: 'nearby.new_members', version: 1, category: 'NEARBY',
-    title: 'Something new is happening nearby',
-    body: 'New people have joined Humrah in your area. Explore your community.',
-    vars: {},
-  },
-  {
-    key: 'sports.plan_interest', version: 1, category: 'SPORTS',
-    title: 'Find your next sports buddy',
-    body: 'A {sportLabel} plan near you has open spots. Explore sports sessions that match your interests.',
-    vars: { sportLabel: { type: 'enum', values: Object.values(SPORT_LABELS) } },
-  },
-  {
-    key: 'rooms.active_topic', version: 1, category: 'ROOMS',
-    title: 'Conversations are happening',
-    body: 'People are chatting in a {roomTopic} Room. Discover active Humrah Rooms and join a discussion.',
-    vars: { roomTopic: { type: 'label' } },
-  },
-  {
-    key: 'community.nearby_questions', version: 1, category: 'COMMUNITY',
-    title: 'New conversations in your community',
-    body: 'People in your area are asking questions on Humrah. Share what you know.',
-    vars: {},
-  },
-  {
-    key: 'informative.rooms_intro', version: 1, category: 'INFORMATIVE',
-    title: 'Have you tried Humrah Rooms?',
-    body: 'Rooms are small group chats about topics you like. Find one that fits you.',
-    vars: {},
-  },
-  {
-    key: 'informative.questions_intro', version: 1, category: 'INFORMATIVE',
-    title: 'Got a question about your area?',
-    body: 'Ask a Question lets you get tips from people near you on Humrah.',
-    vars: {},
-  },
-  {
-    key: 'social.make_plan', version: 1, category: 'SOCIAL',
-    title: 'Fancy doing something this week?',
-    body: 'Make a plan on Humrah and see who would like to join you.',
-    vars: {},
-  },
-  {
-    key: 'funny.sofa_break', version: 1, category: 'FUNNY',
-    title: 'Your sofa says you deserve a break',
-    body: 'We agree. See what is happening on Humrah today.',
-    vars: {},
-  },
+  builtin('nearby.new_members', 'NEARBY', 'new_members', 'friendly',
+    'Something new is happening nearby', 'New people have joined Humrah in your area. Explore your community.'),
+  builtin('sports.open_plan', 'SPORTS', 'open_plan', 'friendly',
+    'Find your next sports buddy', 'A {{sport_label}} plan near you has open spots. Explore sports sessions that match your interests.'),
+  builtin('rooms.active_room', 'ROOMS', 'active_room', 'friendly',
+    'Conversations are happening', 'People are chatting in a {{topic_label}} Room. Discover active Humrah Rooms and join a discussion.'),
+  builtin('community.nearby_questions', 'COMMUNITY', 'nearby_questions', 'community',
+    'New conversations in your community', 'People in your area are asking questions on Humrah. Share what you know.'),
+  builtin('informative.rooms_intro', 'INFORMATIVE', 'rooms_intro', 'informative',
+    'Have you tried Humrah Rooms?', 'Rooms are small group chats about topics you like. Find one that fits you.'),
+  builtin('informative.questions_intro', 'INFORMATIVE', 'questions_intro', 'informative',
+    'Got a question about your area?', 'Ask a Question lets you get tips from people near you on Humrah.'),
+  builtin('social.make_plan', 'SOCIAL', 'make_plan', 'warm',
+    'Fancy doing something this week?', 'Make a plan on Humrah and see who would like to join you.'),
+  builtin('funny.light_nudge', 'FUNNY', 'light_nudge', 'funny',
+    'Your sofa says you deserve a break', 'We agree. See what is happening on Humrah today.'),
 ]);
 
-const builtInProvider = {
-  name: 'built-in',
-  getTemplate: key => BUILT_IN.find(t => t.key === key) || null,
-  listTemplates: () => BUILT_IN,
-};
-
-let provider = builtInProvider;
-
-/** Phase 2 hook. A provider must expose getTemplate(key) and listTemplates(). */
-function setTemplateProvider(p) {
-  if (!p || typeof p.getTemplate !== 'function' || typeof p.listTemplates !== 'function') {
-    throw new TypeError('A template provider needs getTemplate(key) and listTemplates().');
+/**
+ * Render one template with backend values. `values` must come from variables.prepareAll().
+ * @returns {{ok:true, title, body, templateKey, templateVersion, language} | {ok:false, reason}}
+ */
+function render(t, values) {
+  if (!t || typeof t.title !== 'string' || typeof t.body !== 'string') return { ok: false, reason: 'TEMPLATE_INVALID' };
+  const spec = purposeSpec(t.category, t.purpose);
+  if (!spec) return { ok: false, reason: 'TEMPLATE_PURPOSE_UNKNOWN' };
+  const used = placeholdersIn(`${t.title} ${t.body}`);
+  for (const n of used) {
+    if (!spec.vars.includes(n)) return { ok: false, reason: 'TEMPLATE_VAR_NOT_ALLOWED' };
+    if (typeof values[n] !== 'string' || !values[n]) return { ok: false, reason: 'TEMPLATE_VAR_MISSING' };
   }
-  provider = p;
+  const fill = s => s.replace(PLACEHOLDER, (_, n) => values[n]).replace(/\s+/g, ' ').trim();
+  const title = fill(t.title);
+  const body = fill(t.body);
+  if (!title || !body) return { ok: false, reason: 'TEMPLATE_EMPTY' };
+  if (/[{}]/.test(title) || /[{}]/.test(body)) return { ok: false, reason: 'TEMPLATE_UNRESOLVED' };
+  if (CONTROL_RE.test(title) || CONTROL_RE.test(body)) return { ok: false, reason: 'TEMPLATE_CONTROL_CHARS' };
+  if (title.length > TITLE_MAX || body.length > BODY_MAX) return { ok: false, reason: 'TEMPLATE_TOO_LONG' };
+  return { ok: true, title, body, templateKey: t.templateId, templateVersion: Number(t.version) || 1, language: t.language || FALLBACK_LANGUAGE, source: t.source || 'AI', templateDocId: t._id || null };
 }
-function resetTemplateProvider() { provider = builtInProvider; }
 
-const PLACEHOLDER = /\{([A-Za-z][A-Za-z0-9]{0,30})\}/g;
-// eslint-disable-next-line no-control-regex
-const CONTROL = new RegExp('[\\u0000-\\u001f\\u007f-\\u009f\\u200b-\\u200f\\u2028-\\u202e]');
+const groupKey = (category, purpose, language) => `${category}|${purpose}|${language}`;
 
-function validVar(spec, value) {
-  if (typeof value !== 'string') return false;
-  const v = value.trim();
-  if (!v) return false;
-  if (spec.type === 'enum') return Array.isArray(spec.values) && spec.values.includes(v);
-  if (spec.type === 'label') return SAFE_LABEL.test(v) && !CONTROL.test(v);
-  return false;
+/** Build the pool from stored ACTIVE templates (lean docs) and, optionally, the built-ins. */
+function buildPool(stored = [], { builtinsEnabled = true } = {}) {
+  const stored_ = new Map();
+  const builtins = new Map();
+  for (const t of stored) {
+    const k = groupKey(t.category, t.purpose, t.language);
+    if (!stored_.has(k)) stored_.set(k, []);
+    stored_.get(k).push({ ...t, source: t.source || 'AI' });
+  }
+  if (builtinsEnabled) {
+    for (const t of BUILT_IN) {
+      const k = groupKey(t.category, t.purpose, t.language);
+      if (!builtins.has(k)) builtins.set(k, []);
+      builtins.get(k).push(t);
+    }
+  }
+  return { stored: stored_, builtins, size: stored.length, builtinsEnabled };
+}
+
+const DEFAULT_POOL = buildPool([], { builtinsEnabled: true });
+
+const rank = (userId, eventKey, t) => crypto.createHash('sha1').update(`${userId}|${eventKey}|${t.templateId}|${t.version}`).digest('hex');
+
+function ordered(list, ctx, eventKey) {
+  const recent = (ctx && ctx.history && ctx.history.recentTemplateKeys) || new Set();
+  const uid = ctx && ctx.userId ? String(ctx.userId) : '';
+  return [...list]
+    .map(t => ({ t, recent: recent.has(t.templateId) ? 1 : 0, r: rank(uid, eventKey, t) }))
+    .sort((a, b) => a.recent - b.recent || (a.r < b.r ? -1 : a.r > b.r ? 1 : 0))
+    .map(x => x.t);
 }
 
 /**
- * @returns {{ok:true, title, body, templateKey, templateVersion} | {ok:false, reason}}
+ * Pick and render a template for one opportunity.
+ * @param {object} op   { category, purpose, eventKey, vars }  (vars = raw backend values)
+ * @param {object} ctx  { userId, language, history }
+ * @param {object} [pool]
  */
-function render(templateKey, category, vars = {}) {
-  let t;
-  try { t = provider.getTemplate(templateKey); } catch (_) { t = null; }
-  if (!t) return { ok: false, reason: 'TEMPLATE_MISSING' };
-  if (t.category !== category) return { ok: false, reason: 'TEMPLATE_CATEGORY_MISMATCH' };
-  if (typeof t.title !== 'string' || typeof t.body !== 'string') return { ok: false, reason: 'TEMPLATE_INVALID' };
-
-  const declared = t.vars && typeof t.vars === 'object' ? t.vars : {};
-  const used = new Set();
-  for (const s of [t.title, t.body]) for (const m of s.matchAll(PLACEHOLDER)) used.add(m[1]);
-  for (const name of used) if (!declared[name]) return { ok: false, reason: 'TEMPLATE_UNDECLARED_VAR' };
-  for (const [name, spec] of Object.entries(declared)) {
-    if (!validVar(spec, vars[name])) return { ok: false, reason: 'TEMPLATE_VAR_INVALID' };
+function resolve(op, ctx, pool = DEFAULT_POOL) {
+  if (!op || !purposeSpec(op.category, op.purpose)) return { ok: false, reason: 'TEMPLATE_PURPOSE_UNKNOWN' };
+  const values = prepareAll(op.vars);
+  const languages = [...new Set([(ctx && ctx.language) || FALLBACK_LANGUAGE, FALLBACK_LANGUAGE])];
+  let lastReason = 'NO_APPROVED_TEMPLATE';
+  for (const lang of languages) {
+    const k = groupKey(op.category, op.purpose, lang);
+    for (const group of [pool.stored.get(k) || [], pool.builtins.get(k) || []]) {
+      for (const t of ordered(group, ctx, op.eventKey)) {
+        const r = render(t, values);
+        if (r.ok) return r;
+        lastReason = r.reason;
+      }
+    }
   }
-
-  const fill = s => s.replace(PLACEHOLDER, (_, name) => String(vars[name]).trim());
-  const title = fill(t.title).trim();
-  const body = fill(t.body).trim();
-  if (!title || !body) return { ok: false, reason: 'TEMPLATE_EMPTY' };
-  if (/[{}]/.test(title) || /[{}]/.test(body)) return { ok: false, reason: 'TEMPLATE_UNRESOLVED' };
-  if (CONTROL.test(title) || CONTROL.test(body)) return { ok: false, reason: 'TEMPLATE_CONTROL_CHARS' };
-  if (title.length > TITLE_MAX || body.length > BODY_MAX) return { ok: false, reason: 'TEMPLATE_TOO_LONG' };
-  return { ok: true, title, body, templateKey: t.key, templateVersion: Number(t.version) || 1 };
+  return { ok: false, reason: lastReason === 'TEMPLATE_VAR_MISSING' ? 'NO_TEMPLATE_FOR_AVAILABLE_VARIABLES' : lastReason };
 }
 
 module.exports = {
-  render,
-  setTemplateProvider,
-  resetTemplateProvider,
-  SPORT_LABELS,
-  BUILT_IN,
-  TITLE_MAX,
-  BODY_MAX,
+  render, resolve, buildPool, DEFAULT_POOL, BUILT_IN, SPORT_LABELS, TITLE_MAX, BODY_MAX, FALLBACK_LANGUAGE, groupKey,
 };

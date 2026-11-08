@@ -65,12 +65,42 @@ async function blockedIds(user) {
 async function historyFor(userId) {
   const rows = await EngagementNotification.find({ userId })
     .sort({ createdAt: -1 }).limit(20)
-    .select('category status openedAt createdAt').lean();
+    .select('category status openedAt createdAt templateKey').lean();
   const lastDelivered = rows.find(r => r.status === 'SENT');
   return {
     lastCategory: lastDelivered ? lastDelivered.category : null,
     openedCategories: new Set(rows.filter(r => r.openedAt).map(r => r.category)),
+    // Phase 2: templates this user saw recently are tried last (variety, not randomness).
+    recentTemplateKeys: new Set(rows.slice(0, 10).map(r => r.templateKey).filter(Boolean)),
   };
+}
+
+/**
+ * Phase 2: the template language for this recipient. Humrah stores the languages a user
+ * SPEAKS (questionnaire.preferredLanguages, legacy languagePreference), not a notification
+ * language, so this is a fixed, documented mapping — and off unless
+ * ENGAGEMENT_LANGUAGE_MODE=preferred:
+ *   English only → en;  Hindi without English → hi;  Hindi and English → hinglish;
+ *   anything else / nothing → en.
+ * Selection always falls back to English templates when none exist in this language.
+ */
+function languageFor(user, cfg) {
+  if (!cfg || cfg.languageMode !== 'preferred') return 'en';
+  const q = (user && user.questionnaire) || {};
+  const langs = new Set([...lowerList(q.preferredLanguages), ...lowerList([q.languagePreference])]);
+  if (langs.has('both')) { langs.add('hindi'); langs.add('english'); }
+  const hindi = langs.has('hindi');
+  const english = langs.has('english');
+  if (hindi && english) return 'hinglish';
+  if (hindi) return 'hi';
+  return 'en';
+}
+
+/** The recipient's own coarse city label — only while their location may be used at all. */
+function areaLabelFor(user, point) {
+  if (!point) return null;
+  const city = user && user.liveLocation && user.liveLocation.city;
+  return typeof city === 'string' && city.trim() ? city.trim() : null;   // validated again by variables.prepareValue
 }
 
 /**
@@ -95,7 +125,9 @@ async function buildContext(user, { now, cfg, shared }) {
     interestWords: new Set([...lowerList(q.hobbies), ...lowerList(q.interests), ...lowerList(q.conversationInterests), ...lowerList(q.humrahRoomInterests)]),
     blocked,
     history,
+    language: languageFor(user, cfg),
+    areaLabel: areaLabelFor(user, loc.point),
   };
 }
 
-module.exports = { buildContext, locationFor, _internal: { validPoint, blockedIds, historyFor } };
+module.exports = { buildContext, locationFor, languageFor, areaLabelFor, _internal: { validPoint, blockedIds, historyFor } };

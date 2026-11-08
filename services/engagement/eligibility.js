@@ -26,6 +26,9 @@ const USER_FIELDS = [
   'fcmTokens', 'blockedUsers', 'questionnaire.interests', 'questionnaire.hobbies',
   'questionnaire.conversationInterests', 'questionnaire.humrahRoomInterests',
   'liveLocation.coordinates', 'liveLocation.lat', 'liveLocation.lng', 'last_location_updated_at',
+  // Phase 2: the recipient's OWN coarse city label ({{area_label}}) and stated languages.
+  // Used only to fill and pick templates for this recipient; never sent to an AI provider.
+  'liveLocation.city', 'questionnaire.preferredLanguages', 'questionnaire.languagePreference',
   'createdAt',
 ].join(' ');
 

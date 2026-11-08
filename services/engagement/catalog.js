@@ -17,11 +17,13 @@
 const MAX_SEASON_MS = 31 * 24 * 3600 * 1000;
 
 const CATALOG = Object.freeze([
-  { key: 'rooms_intro', category: 'INFORMATIVE', templateKey: 'informative.rooms_intro', requires: 'NEVER_JOINED_ROOM' },
-  { key: 'questions_intro', category: 'INFORMATIVE', templateKey: 'informative.questions_intro', requires: 'NEVER_ASKED_QUESTION' },
-  { key: 'make_plan', category: 'SOCIAL', templateKey: 'social.make_plan', requires: null },
-  { key: 'sofa_break', category: 'FUNNY', templateKey: 'funny.sofa_break', requires: null },
-  // SEASONAL: intentionally empty in Phase 1.
+  // `purpose` is the template purpose (variables.PURPOSES) the copy is chosen for.
+  { key: 'rooms_intro', category: 'INFORMATIVE', purpose: 'rooms_intro', requires: 'NEVER_JOINED_ROOM' },
+  { key: 'questions_intro', category: 'INFORMATIVE', purpose: 'questions_intro', requires: 'NEVER_ASKED_QUESTION' },
+  { key: 'make_plan', category: 'SOCIAL', purpose: 'make_plan', requires: null },
+  { key: 'light_nudge', category: 'FUNNY', purpose: 'light_nudge', requires: null },
+  // SEASONAL: intentionally empty. A seasonal entry needs approved dates AND a purpose,
+  // and only then can templates be generated for it (validator.validateRequest).
 ]);
 
 const REQUIREMENTS = Object.freeze(['NEVER_JOINED_ROOM', 'NEVER_ASKED_QUESTION']);
@@ -32,7 +34,7 @@ function validateCatalog(entries = CATALOG) {
   const invalid = [];
   for (const e of entries) {
     const okBase = e && typeof e.key === 'string' && /^[a-z0-9_]{1,40}$/.test(e.key)
-      && typeof e.templateKey === 'string'
+      && typeof e.purpose === 'string' && /^[a-z0-9_]{1,40}$/.test(e.purpose)
       && ['INFORMATIVE', 'SOCIAL', 'FUNNY', 'SEASONAL'].includes(e.category)
       && (e.requires === null || e.requires === undefined || REQUIREMENTS.includes(e.requires));
     let okDates = true;

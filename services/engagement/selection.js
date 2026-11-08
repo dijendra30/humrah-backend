@@ -11,7 +11,10 @@
 //   4. score = categoryPriority × relevance × (0.8 if it repeats the last category)
 //                                         × (1.1 if the user opened this category before);
 //   5. order by score, then priority, then eventKey (so equal inputs → equal output);
-//   6. take the first whose template renders cleanly.
+//   6. take the first for which an ACTIVE (approved) template — or the built-in fallback —
+//      renders cleanly with the backend's verified variables (templates.resolve; Phase 2).
+//      No template → the opportunity is skipped (NO_APPROVED_TEMPLATE), never sent with
+//      unapproved or broken copy. The template never changes WHO is chosen or WHY.
 // Returns the choice (or null) and a reason code for every rejected opportunity.
 // -----------------------------------------------------------------------------
 'use strict';
@@ -56,8 +59,9 @@ function choose(opportunities, ctx, { cfg, scheduledAt, notifiedKeys }) {
 
   candidates.sort((a, b) => (b.score - a.score) || (b.priority - a.priority) || (a.op.eventKey < b.op.eventKey ? -1 : a.op.eventKey > b.op.eventKey ? 1 : 0));
 
+  const pool = (ctx.shared && ctx.shared.templatePool) || templates.DEFAULT_POOL;
   for (const c of candidates) {
-    const rendered = templates.render(c.op.templateKey, c.op.category, c.op.vars || {});
+    const rendered = templates.resolve(c.op, ctx, pool);
     if (!rendered.ok) { rejected.push({ eventKey: c.op.eventKey, reason: rendered.reason }); continue; }
     return { chosen: { ...c.op, score: c.score, priority: c.priority, rendered }, rejected };
   }

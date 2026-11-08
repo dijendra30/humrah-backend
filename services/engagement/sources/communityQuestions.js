@@ -48,8 +48,8 @@ async function collect(ctx) {
     // Keyed by the newest question: a later batch of new questions is a new event.
     eventRef: { kind: 'Question', id: String(newest._id) },
     eventKey: `COMMUNITY_QUESTIONS:${newest._id}`,
-    templateKey: 'community.nearby_questions',
-    vars: {},
+    purpose: 'nearby_questions',
+    vars: { question_count: visible.length, area_label: ctx.areaLabel },
     relevance: Math.min(1, 0.6 + 0.1 * visible.length),
     relevantUntil: new Date(new Date(newest.expiresAt).getTime() - cfg.questionMinRemainingMs),
   }];

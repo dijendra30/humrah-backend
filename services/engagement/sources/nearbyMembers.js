@@ -32,8 +32,9 @@ async function collect(ctx) {
     eventType: 'NEARBY_NEW_MEMBERS',
     eventRef: { kind: 'AreaDigest', id: `W${bucket}` },
     eventKey: `NEARBY_NEW_MEMBERS:W${bucket}`,
-    templateKey: 'nearby.new_members',
-    vars: {},
+    purpose: 'new_members',
+    // A count (>= the minimum, never an identity) and the recipient's own area label.
+    vars: { new_member_count: count, area_label: ctx.areaLabel },
     relevance: Math.min(1, 0.6 + count / 50),
     relevantUntil: new Date(now + 3 * DAY),
   }];

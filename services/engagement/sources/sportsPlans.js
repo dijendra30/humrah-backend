@@ -13,7 +13,7 @@ const mongoose = require('mongoose');
 const SportsPlan = require('../../../models/SportsPlan');
 const SportsDiscoveryDelivery = require('../../../models/SportsDiscoveryDelivery');
 const User = require('../../../models/User');
-const { SPORT_LABELS } = require('../templates');
+const { SPORT_LABELS } = require('../variables');
 
 const MIN = 60 * 1000;
 
@@ -65,12 +65,14 @@ async function collect(ctx) {
       eventType: 'SPORTS_PLAN',
       eventRef: { kind: 'SportsPlan', id: String(plan._id) },
       eventKey: `SPORTS_PLAN:${plan._id}`,
-      templateKey: 'sports.plan_interest',
-      vars: { sportLabel: label },
+      purpose: 'open_plan',
+      vars: { sport_label: label, area_label: ctx.areaLabel },
       relevance: namedSport ? 1 : 0.75,
       relevantUntil: new Date(new Date(plan.startTime).getTime() - 30 * MIN),
     });
   }
+  // How many usable open plans this user could see right now (only shown when >= 2).
+  for (const o of out) o.vars.open_plan_count = out.length;
   return out;
 }
 
