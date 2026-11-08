@@ -89,6 +89,8 @@ const auditLogSchema = new mongoose.Schema({
       'DELETE_BROADCAST',
       'SEND_BROADCAST',
       'AI_REPHRASE_BROADCAST',
+      'SCHEDULE_BROADCAST',
+      'CANCEL_BROADCAST_SCHEDULE',
       
       // Ask a Question admin actions (additive)
       'QUESTION_REVIEWED',

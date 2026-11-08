@@ -67,15 +67,23 @@ router.get('/dashboard/stats', authenticate, adminOnly, async (req, res) => {
  */
 router.get('/users', authenticate, adminOnly, async (req, res) => {
   try {
-    const { page = 1, limit = 50, search } = req.query;
-    
+    const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, Number.parseInt(req.query.limit, 10) || 50));
+    const search = typeof req.query.search === 'string' ? req.query.search.trim().slice(0, 80) : '';
+    const status = typeof req.query.status === 'string' ? req.query.status : '';
+
     const query = { role: 'USER' };
-    
-    if (search) {
+    if (['ACTIVE', 'SUSPENDED', 'BANNED', 'PENDING_VERIFICATION'].includes(status)) query.status = status;
+
+    if (/^[a-f0-9]{24}$/i.test(search)) {
+      query._id = search; // an exact user ID
+    } else if (search) {
+      // literal match: the admin's text is escaped, never run as a regular expression
+      const rx = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       query.$or = [
-        { firstName: { $regex: search, $options: 'i' } },
-        { lastName: { $regex: search, $options: 'i' } },
-        { email: { $regex: search, $options: 'i' } }
+        { firstName: { $regex: rx, $options: 'i' } },
+        { lastName: { $regex: rx, $options: 'i' } },
+        { email: { $regex: rx, $options: 'i' } }
       ];
     }
 
@@ -286,6 +294,12 @@ router.post('/users/suspend', authenticate, adminOnly, auditLog('SUSPEND_USER', 
         success: false,
         message: 'User ID, reason, and duration are required'
       });
+    }
+    if (duration !== 'permanent' && !/^([1-9]|[1-9]\d|[1-2]\d\d|3[0-5]\d|36[0-5])d$/.test(String(duration))) {
+      return res.status(400).json({ success: false, message: 'Duration must be between 1d and 365d, or permanent' });
+    }
+    if (typeof reason !== 'string' || reason.trim().length < 3 || reason.length > 500) {
+      return res.status(400).json({ success: false, message: 'Reason must be 3–500 characters' });
     }
 
     const user = await User.findById(userId);

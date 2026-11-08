@@ -71,6 +71,13 @@ router.post('/:id/schedule',
   ctrl.scheduleBroadcast
 );
 
+// Cancel a schedule (back to DRAFT)
+router.post('/:id/cancel-schedule',
+  validateBroadcastId,
+  auditLog('CANCEL_BROADCAST_SCHEDULE', 'SYSTEM'),
+  ctrl.cancelSchedule
+);
+
 // Alias PATCH to PUT for draft updates
 router.patch('/:id',
   validateBroadcastId,

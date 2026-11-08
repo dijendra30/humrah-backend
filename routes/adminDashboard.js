@@ -425,10 +425,23 @@ router.post('/verifications/:userId/:action', authenticate, adminOnly, async (re
 // 3. Companion Applications (Simplified)
 router.get('/companions/applications', authenticate, adminOnly, async (req, res) => {
   try {
-    // Assuming there is a field or status for companion applications
-    const companions = await User.find({ role: 'COMPANION', status: 'PENDING_APPROVAL' })
-      .select('firstName lastName email profilePhoto companionDetails status');
-    res.json({ success: true, applications: companions });
+    // Companions are app users whose userType is COMPANION (set from their questionnaire).
+    // There is no approval step in the backend, so this is a directory, not an approval queue.
+    const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, Number.parseInt(req.query.limit, 10) || 25));
+    const query = { role: 'USER', userType: 'COMPANION' };
+    const search = typeof req.query.search === 'string' ? req.query.search.trim().slice(0, 80) : '';
+    if (search) {
+      const rx = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      query.$or = [{ firstName: rx }, { lastName: rx }, { email: rx }];
+    }
+    const [companions, total] = await Promise.all([
+      User.find(query)
+        .select('firstName lastName email profilePhoto status photoVerificationStatus verified createdAt lastActive ratingStats')
+        .sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).lean(),
+      User.countDocuments(query),
+    ]);
+    res.json({ success: true, applications: companions, companions, pagination: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) } });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Failed to fetch companion applications' });
   }
@@ -461,6 +474,8 @@ router.get('/reports/all', authenticate, adminOnly, async (req, res) => {
       description: t.note,
       status: t.status,
       riskLevel: t.riskLevel,
+      resolvedAt: t.resolvedAt || null,
+      resolutionNotes: t.resolutionNotes || '',
       geminiSummary: t.geminiSummary,
       createdAt: t.createdAt,
       raw: t
@@ -474,8 +489,10 @@ router.get('/reports/all', authenticate, adminOnly, async (req, res) => {
       reportedUser: r.reportedUserId,
       reason: r.reason,
       description: r.description,
-      status: 'OPEN', // UserReports don't have status out of the box, map as OPEN
+      status: r.status || 'OPEN', // older reports have no status field yet
       riskLevel: 'LOW',
+      resolvedAt: r.resolvedAt || null,
+      resolutionNotes: r.resolutionNotes || '',
       createdAt: r.createdAt,
       raw: r
     }));
@@ -493,7 +510,16 @@ router.get('/reports/all', authenticate, adminOnly, async (req, res) => {
 router.post('/reports/:type/:id/status', authenticate, adminOnly, async (req, res) => {
   try {
     const { type, id } = req.params;
-    const { status, resolutionNotes } = req.body;
+    const { status } = req.body;
+    const resolutionNotes = typeof req.body.resolutionNotes === 'string' ? req.body.resolutionNotes : '';
+
+    if (!/^[a-f0-9]{24}$/i.test(String(id))) return res.status(400).json({ success: false, message: 'Invalid report id' });
+    if (type !== 'SAFETY_TICKET' && type !== 'USER_REPORT') return res.status(400).json({ success: false, message: 'Unknown report type' });
+    const allowed = type === 'SAFETY_TICKET' ? SafetyTicket.schema.path('status').enumValues : UserReport.schema.path('status').enumValues;
+    if (typeof status !== 'string' || !allowed.includes(status)) {
+      return res.status(400).json({ success: false, message: 'Invalid status for this report type' });
+    }
+    if (resolutionNotes.length > 2000) return res.status(400).json({ success: false, message: 'Resolution notes must be 2000 characters or less.' });
 
     if (type === 'SAFETY_TICKET') {
       const ticket = await SafetyTicket.findById(id);
@@ -524,10 +550,31 @@ router.post('/reports/:type/:id/status', authenticate, adminOnly, async (req, re
         });
       }
     } else {
-      // For UserReports, since they don't have a status schema natively, we'll just log it.
-      // Or we can delete it if "CLOSED". For now, we'll return a mock success or delete.
-      if (status === 'CLOSED' || status === 'RESOLVED_BY_ADMIN') {
-        await UserReport.findByIdAndDelete(id);
+      // User reports keep their record (safety history, report counts); only the status changes.
+      const report = await UserReport.findById(id);
+      if (!report) return res.status(404).json({ success: false, message: 'Report not found' });
+      if (['RESOLVED_BY_ADMIN', 'CLOSED'].includes(status)) {
+        if (!resolutionNotes.trim()) {
+          return res.status(400).json({ success: false, message: 'Resolution notes are required when resolving or closing a report.' });
+        }
+        report.resolvedBy = req.user._id;
+        report.resolvedAt = new Date();
+        report.resolutionNotes = resolutionNotes.trim();
+      }
+      report.status = status;
+      report.statusUpdatedAt = new Date();
+      await report.save();
+      if (AuditLog && AuditLog.logAction) {
+        await AuditLog.logAction({
+          actorId: req.user._id,
+          actorRole: req.user.role || 'SAFETY_ADMIN',
+          actorEmail: req.user.email,
+          action: 'UPDATE_REPORT_STATUS',
+          targetType: 'REPORT',
+          targetId: report._id,
+          details: { status, type: 'USER_REPORT' },
+          ipAddress: req.ip
+        }).catch(() => {});
       }
     }
 
@@ -755,10 +802,30 @@ router.get('/profile-completion/stats', authenticate, adminOnly, async (req, res
 // ==========================================
 router.post('/broadcast/profile-completion', authenticate, adminOnly, async (req, res) => {
   try {
-    const { targetType, percentage, minCompletion, maxCompletion, title, message } = req.body;
-    
+    const { targetType } = req.body;
+    const pct = v => (Number.isInteger(Number(v)) && Number(v) >= 0 && Number(v) <= 100 ? Number(v) : null);
+    const percentage = pct(req.body.percentage);
+    const minCompletion = pct(req.body.minCompletion);
+    const maxCompletion = pct(req.body.maxCompletion);
+    const title = typeof req.body.title === 'string' ? req.body.title.trim() : '';
+    const message = typeof req.body.message === 'string' ? req.body.message.trim() : '';
+    const TARGETS = ['EXACT_PERCENTAGE', 'GREATER_THAN_OR_EQUAL', 'LESS_THAN', 'RANGE', 'COMPLETE_USERS', 'INCOMPLETE_USERS'];
+    if (!TARGETS.includes(targetType)) return res.status(400).json({ success: false, message: 'Choose who should receive this message.' });
+    if (['EXACT_PERCENTAGE', 'GREATER_THAN_OR_EQUAL', 'LESS_THAN'].includes(targetType) && percentage === null) {
+      return res.status(400).json({ success: false, message: 'Percentage must be a whole number from 0 to 100.' });
+    }
+    if (targetType === 'RANGE' && (minCompletion === null || maxCompletion === null || minCompletion > maxCompletion)) {
+      return res.status(400).json({ success: false, message: 'Enter a valid range (0–100, minimum not above maximum).' });
+    }
+    if (title.length < 1 || title.length > 65) return res.status(400).json({ success: false, message: 'Title is required (up to 65 characters).' });
+    if (message.length < 1 || message.length > 240) return res.status(400).json({ success: false, message: 'Message is required (up to 240 characters).' });
+
+    // The same push sent twice within 2 minutes is almost always a double click.
+    const recentDuplicate = await Broadcast.findOne({ audienceType: 'CUSTOM', title, message, createdAt: { $gte: new Date(Date.now() - 2 * 60 * 1000) } }).select('_id').lean();
+    if (recentDuplicate) return res.status(409).json({ success: false, message: 'This message was just sent. Wait two minutes before sending it again.' });
+
     let filter = { role: 'USER' };
-    
+
     if (targetType === 'EXACT_PERCENTAGE') {
       filter.profileCompletion = percentage;
     } else if (targetType === 'GREATER_THAN_OR_EQUAL') {
@@ -785,13 +852,16 @@ router.post('/broadcast/profile-completion', authenticate, adminOnly, async (req
     const customTargetText = targetType === 'EXACT_PERCENTAGE' ? `EXACT_${percentage}%` : (targetType === 'RANGE' ? `RANGE_${minCompletion}-${maxCompletion}%` : targetType);
 
     // Create Broadcast record
+    // Recorded as SENDING (never DRAFT: a DRAFT could be sent a second time from Broadcasts).
     const broadcast = await Broadcast.create({
       title,
       message,
       audienceType: 'CUSTOM', // Required ENUM
       totalRecipients: recipientCount,
       createdBy: req.user._id, // Required ObjectId
-      targetState: customTargetText // Storing custom metadata safely without breaking schema
+      targetState: customTargetText, // Storing custom metadata safely without breaking schema
+      status: 'SENDING',
+      sentAt: new Date()
     });
     
     // Create Notification records
@@ -837,12 +907,16 @@ router.post('/broadcast/profile-completion', authenticate, adminOnly, async (req
           }
         }
         console.log(`[BROADCAST FCM] Delivered: ${successCount}, Failed: ${failCount}, Total: ${recipientCount}`);
+        await Broadcast.updateOne({ _id: broadcast._id }, {
+          $set: { status: failCount > 0 && successCount === 0 ? 'FAILED' : 'SENT', deliveredCount: successCount, failedCount: failCount },
+        });
       } catch (err) {
         console.error('[BROADCAST FCM] Global error in background dispatcher:', err);
+        await Broadcast.updateOne({ _id: broadcast._id }, { $set: { status: 'FAILED' } }).catch(() => {});
       }
     })();
-    
-    res.json({ success: true, message: `Broadcast sent to ${recipientCount} users`, broadcast });
+
+    res.status(202).json({ success: true, status: 'SENDING', message: `Sending to ${recipientCount} users. Delivery results appear in Broadcast History.`, broadcast });
   } catch (error) {
     console.error('Broadcast error details:', error.errors || error);
     res.status(500).json({ success: false, message: 'Failed to send broadcast' });
@@ -851,7 +925,7 @@ router.post('/broadcast/profile-completion', authenticate, adminOnly, async (req
 
 router.get('/broadcast/history', authenticate, adminOnly, async (req, res) => {
   try {
-    const broadcasts = await Broadcast.find().sort({ createdAt: -1 });
+    const broadcasts = await Broadcast.find().sort({ createdAt: -1 }).limit(200).lean();
     res.json({ success: true, broadcasts });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Failed to fetch broadcast history' });

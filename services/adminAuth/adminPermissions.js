@@ -17,7 +17,7 @@ const SECTIONS = Object.freeze({
   reports:        { label: 'Reports & safety', prefixes: ['/api/admin-dashboard/reports', '/api/safety/admin'] },
   support:        { label: 'Support (Founder Inbox)', prefixes: ['/api/founder/admin', '/api/founder/chats'] },
   verifications:  { label: 'Verifications', prefixes: ['/api/admin-dashboard/verifications', '/api/verification/admin', '/api/users/admin', '/api/admin-dashboard/companions'] },
-  broadcasts:     { label: 'Broadcasts & profile completion', prefixes: ['/api/admin/broadcasts', '/api/admin-dashboard/broadcast', '/api/admin-dashboard/profile-completion', '/api/admin-dashboard/restore-profile-completion'] },
+  broadcasts:     { label: 'Broadcasts & profile completion', prefixes: ['/api/admin/broadcasts', '/api/admin-dashboard/broadcast', '/api/admin-dashboard/profile-completion'] },
   events:         { label: 'Events', prefixes: ['/api/official-events/admin', '/api/event-requests/admin', '/api/admin/places'] },
   content:        { label: 'Home banners & prompts', prefixes: ['/api/home-banners/admin', '/api/admin/prompts'] },
   launch_regions: { label: 'Launch regions', prefixes: ['/api/admin/launch-regions'] },
@@ -30,6 +30,7 @@ const SECTION_KEYS = Object.freeze(Object.keys(SECTIONS));
 const OWNER_ONLY_PREFIXES = Object.freeze([
   '/api/admin/admins', '/api/admin/audit-logs', '/api/admin/branding', '/api/admin/sports-discovery',
   '/api/payment/admin', '/api/auth/create-admin', '/api/admin/auth/members', '/api/admin/auth/security-events',
+  '/api/admin-dashboard/restore-profile-completion', // bulk rewrite of every user's completion score
 ]);
 
 const OWNER = 'owner';

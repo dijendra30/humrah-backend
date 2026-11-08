@@ -142,14 +142,32 @@ function buildAudienceSummary(filters, count) {
 // SEND ORCHESTRATION
 // =============================================
 
+/**
+ * Sends every SCHEDULED broadcast whose time has come. Each one is claimed atomically
+ * (SCHEDULED → SENDING), so overlapping runs or several instances never send twice.
+ */
+async function sendDueScheduled(now = new Date()) {
+  const due = await Broadcast.find({ status: 'SCHEDULED', scheduledFor: { $lte: now } }).select('_id').limit(20).lean();
+  let started = 0;
+  for (const d of due) {
+    const claimed = await Broadcast.findOneAndUpdate(
+      { _id: d._id, status: 'SCHEDULED', scheduledFor: { $lte: now } },
+      { $set: { status: 'SENDING', sentAt: new Date() } },
+    );
+    if (!claimed) continue;
+    started++;
+    sendToAudience(d._id).catch(err => console.error(`[BroadcastService] Scheduled send failed for ${d._id}:`, err.message));
+  }
+  return started;
+}
+
 async function sendToAudience(broadcastId) {
   const broadcast = await Broadcast.findById(broadcastId);
   if (!broadcast) throw new Error('Broadcast not found');
   
   if (broadcast.status === 'DRAFT') {
-    broadcast.status = 'SENDING';
-    broadcast.sentAt = new Date();
-    await broadcast.save();
+    const claimed = await Broadcast.findOneAndUpdate({ _id: broadcastId, status: 'DRAFT' }, { $set: { status: 'SENDING', sentAt: new Date() } });
+    if (!claimed) throw new Error('Broadcast was already claimed by another send');
   } else if (broadcast.status !== 'SENDING') {
     throw new Error(`Cannot send broadcast with status "${broadcast.status}". Only DRAFT or SENDING broadcasts can be sent.`);
   }
@@ -354,5 +372,6 @@ module.exports = {
   buildAudienceQuery,
   getAudienceCount,
   sendToAudience,
+  sendDueScheduled,
   retryFailedSends,
 };

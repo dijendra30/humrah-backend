@@ -292,7 +292,7 @@ exports.sendBroadcast = async (req, res) => {
     }
 
     if (broadcast.status !== 'DRAFT') {
-      return res.status(400).json({
+      return res.status(409).json({
         success: false,
         message: `Cannot send broadcast with status "${broadcast.status}". Only DRAFT broadcasts can be sent.`,
       });
@@ -316,6 +316,16 @@ exports.sendBroadcast = async (req, res) => {
       });
     }
 
+    // Claim it atomically: only one request can move this broadcast out of DRAFT.
+    const claimed = await Broadcast.findOneAndUpdate(
+      { _id: broadcast._id, status: 'DRAFT' },
+      { $set: { status: 'SENDING', sentAt: new Date() } },
+      { new: true },
+    );
+    if (!claimed) {
+      return res.status(409).json({ success: false, message: 'This broadcast is already being sent.' });
+    }
+
     console.log(`[Broadcast] Sending broadcast ${broadcast._id} to ${audienceInfo.count} recipients by admin ${req.user.email}`);
 
     // Send asynchronously — respond immediately so admin doesn't wait
@@ -324,8 +334,9 @@ exports.sendBroadcast = async (req, res) => {
       console.error(`[Broadcast] Async send failed for ${broadcast._id}:`, err.message);
     });
 
-    return res.json({
+    return res.status(202).json({
       success: true,
+      status: 'SENDING',
       message: `Broadcast is being sent to ${audienceInfo.count} recipient(s). Check broadcast details for delivery status.`,
       broadcastId: broadcast._id,
       estimatedRecipients: audienceInfo.count,
@@ -548,7 +559,7 @@ exports.getDrafts = async (req, res) => {
 exports.getHistory = async (req, res) => {
   try {
     const { page = 1, limit = 20 } = req.query;
-    const query = { status: { $in: ['SENDING', 'SENT', 'FAILED', 'CANCELLED'] } };
+    const query = { status: { $in: ['SCHEDULED', 'SENDING', 'SENT', 'FAILED', 'CANCELLED'] } };
     const skip = (parseInt(page, 10) - 1) * parseInt(limit, 10);
     
     const [broadcasts, total] = await Promise.all([
@@ -597,7 +608,7 @@ exports.getAnalytics = async (req, res) => {
     let openedCount = 0;
     let clickedCount = 0;
     let pendingCount = 0;
-    let failedCount = broadcast.failedCount || 0;
+    let failedFromNotifications = 0; // combined with broadcast.failedCount below without double counting
     
     const deliveryTimeline = [];
     const openTimeline = [];
@@ -610,7 +621,7 @@ exports.getAnalytics = async (req, res) => {
         deliveredCount++;
         deliveryTimeline.push({ time: n.deliveredAt });
       } else if (n.failureReason) {
-        failedCount++;
+        failedFromNotifications++;
         failureBreakdown[n.failureReason] = (failureBreakdown[n.failureReason] || 0) + 1;
       } else {
         pendingCount++;
@@ -636,7 +647,7 @@ exports.getAnalytics = async (req, res) => {
         delivery: {
           totalRecipients: broadcast.totalRecipients,
           delivered: deliveredCount,
-          failed: failedCount,
+          failed: Math.max(broadcast.failedCount || 0, failedFromNotifications),
           pending: pendingCount,
           deliveryRate: broadcast.totalRecipients > 0 ? ((deliveredCount / broadcast.totalRecipients) * 100).toFixed(1) : 0
         },
@@ -678,16 +689,29 @@ exports.scheduleBroadcast = async (req, res) => {
       return res.status(400).json({ success: false, message: 'scheduledFor date is required' });
     }
 
-    const broadcast = await Broadcast.findById(req.params.id);
-    if (!broadcast) return res.status(404).json({ success: false, message: 'Broadcast not found' });
-    
-    if (broadcast.status !== 'DRAFT') {
-      return res.status(400).json({ success: false, message: 'Only DRAFT broadcasts can be scheduled' });
+    const when = new Date(scheduledFor);
+    const now = Date.now();
+    if (Number.isNaN(when.getTime())) {
+      return res.status(400).json({ success: false, message: 'scheduledFor must be a valid date and time' });
+    }
+    if (when.getTime() < now + 60 * 1000) {
+      return res.status(400).json({ success: false, message: 'Pick a time at least one minute in the future' });
+    }
+    if (when.getTime() > now + 90 * 24 * 60 * 60 * 1000) {
+      return res.status(400).json({ success: false, message: 'Broadcasts can be scheduled up to 90 days ahead' });
     }
 
-    broadcast.status = 'SCHEDULED';
-    broadcast.scheduledFor = new Date(scheduledFor);
-    await broadcast.save();
+    const exists = await Broadcast.findById(req.params.id).select('status').lean();
+    if (!exists) return res.status(404).json({ success: false, message: 'Broadcast not found' });
+
+    const broadcast = await Broadcast.findOneAndUpdate(
+      { _id: req.params.id, status: 'DRAFT' },
+      { $set: { status: 'SCHEDULED', scheduledFor: when } },
+      { new: true },
+    );
+    if (!broadcast) {
+      return res.status(409).json({ success: false, message: 'Only DRAFT broadcasts can be scheduled' });
+    }
 
     console.log(`[Broadcast] Scheduled ${broadcast._id} for ${broadcast.scheduledFor}`);
     
@@ -695,5 +719,28 @@ exports.scheduleBroadcast = async (req, res) => {
   } catch (err) {
     console.error('[Broadcast] scheduleBroadcast error:', err.message);
     return res.status(500).json({ success: false, message: 'Failed to schedule broadcast' });
+  }
+};
+
+/**
+ * POST /api/admin/broadcasts/:id/cancel-schedule
+ * A scheduled broadcast that hasn't started goes back to DRAFT (editable, sendable, deletable).
+ */
+exports.cancelSchedule = async (req, res) => {
+  try {
+    const broadcast = await Broadcast.findOneAndUpdate(
+      { _id: req.params.id, status: 'SCHEDULED' },
+      { $set: { status: 'DRAFT' }, $unset: { scheduledFor: 1 } },
+      { new: true },
+    );
+    if (!broadcast) {
+      const exists = await Broadcast.findById(req.params.id).select('status').lean();
+      if (!exists) return res.status(404).json({ success: false, message: 'Broadcast not found' });
+      return res.status(409).json({ success: false, message: `Only scheduled broadcasts can be cancelled (this one is ${exists.status}).` });
+    }
+    return res.json({ success: true, message: 'Schedule cancelled. The broadcast is a draft again.', broadcast });
+  } catch (err) {
+    console.error('[Broadcast] cancelSchedule error:', err.message);
+    return res.status(500).json({ success: false, message: 'Failed to cancel schedule' });
   }
 };

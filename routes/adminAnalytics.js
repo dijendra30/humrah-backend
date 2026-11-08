@@ -36,10 +36,10 @@ router.get('/kpis', authenticate, adminOnly, async (req, res) => {
       activeBroadcasts
     ] = await Promise.all([
       User.countDocuments({ role: 'USER' }),
-      User.countDocuments({ lastActive: { $gte: fifteenMinutesAgo } }),
-      User.countDocuments({ createdAt: { $gte: todayIST } }),
-      User.countDocuments({ 'subscription.isPremium': true }),
-      User.countDocuments({ photoVerificationStatus: 'approved' }),
+      User.countDocuments({ role: 'USER', lastActive: { $gte: fifteenMinutesAgo } }),
+      User.countDocuments({ role: 'USER', createdAt: { $gte: todayIST } }),
+      User.countDocuments({ role: 'USER', 'subscription.isPremium': true }),
+      User.countDocuments({ role: 'USER', photoVerificationStatus: 'approved' }),
       User.countDocuments({ userType: 'COMPANION' }),
       User.countDocuments({ userType: 'COMPANION', status: 'PENDING_APPROVAL' }),
       RandomBooking ? RandomBooking.countDocuments() : Promise.resolve(0),
@@ -116,13 +116,14 @@ router.get('/growth', authenticate, adminOnly, async (req, res) => {
     ]);
 
     const verificationStatus = await User.aggregate([
+      { $match: { role: 'USER' } },
       { $group: { _id: "$photoVerificationStatus", count: { $sum: 1 } } }
     ]);
 
     res.json({
       success: true,
       data: {
-        dailyRegistrations: dailyRegistrations.map(d => ({ date: d._id, users: d.count })),
+        dailyRegistrations: dailyRegistrations.map(d => ({ date: d._id, users: d.users })),
         verificationStatus: verificationStatus.map(d => ({ name: d._id || 'unverified', value: d.count }))
       }
     });
@@ -170,8 +171,7 @@ router.get('/bookings', authenticate, adminOnly, async (req, res) => {
       {
         $group: {
           _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt", timezone: "Asia/Kolkata" } },
-          bookings: { $sum: 1 },
-          revenue: { $sum: 0 } // RandomBookings do not store totalAmount currently
+          bookings: { $sum: 1 } // revenue isn't stored on RandomBooking, so no revenue series is reported
         }
       },
       { $sort: { _id: 1 } }
@@ -184,7 +184,7 @@ router.get('/bookings', authenticate, adminOnly, async (req, res) => {
     res.json({
       success: true,
       data: {
-        bookingTrends: bookingTrends.map(d => ({ date: d._id, bookings: d.count, revenue: d.revenue || 0 })),
+        bookingTrends: bookingTrends.map(d => ({ date: d._id, bookings: d.bookings })),
         statusDist: statusDist.map(d => ({ name: d._id || 'unknown', value: d.count }))
       }
     });

@@ -24,6 +24,20 @@ const EncryptionKey      = require('./models/EncryptionKey');
 })();
 
 // ══════════════════════════════════════════════════════════════════════════════
+// EVERY MINUTE — Scheduled admin broadcasts
+// Before this, nothing ever sent a SCHEDULED broadcast. Each due broadcast is claimed
+// atomically (SCHEDULED → SENDING) inside sendDueScheduled, so it is sent exactly once.
+// ══════════════════════════════════════════════════════════════════════════════
+cron.schedule('* * * * *', async () => {
+  try {
+    const n = await require('./services/broadcastService').sendDueScheduled();
+    if (n) console.log(`[CRON] Started ${n} scheduled broadcast(s)`);
+  } catch (err) {
+    console.error('[CRON] Scheduled broadcast tick error:', err.message);
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
 // EVERY MINUTE — Surprise Meetup reservation expiry
 //
 // Safety net: if the in-process setTimeout was lost (server restart, crash),
