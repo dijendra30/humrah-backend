@@ -12,6 +12,10 @@ const { sessionRejection, SESSION_FIELDS } = require('../utils/sessionGuard');
  */
 const authenticate = async (req, res, next) => {
   try {
+    // The admin gate (middleware/adminSessionGate.js) already authenticated this request — a
+    // dashboard session cookie or a verified admin phone token. Don't look it up twice.
+    if (req.adminAuthResolved && req.user) return next();
+
     // Get token from Authorization header
     const authHeader = req.header('Authorization');
     const token = authHeader?.startsWith('Bearer ')
@@ -32,6 +36,11 @@ const authenticate = async (req, res, next) => {
       return res.status(500).json({ success: false, message: 'Server configuration error' });
     }
     const decoded = jwt.verify(token, JWT_SECRET);
+
+    // Founder-chat socket tokens (2 min, admin dashboard) are for socket handshakes only.
+    if (decoded.scope === 'admin-socket') {
+      return res.status(401).json({ success: false, message: 'Invalid token' });
+    }
 
     // Fetch user from database (CRITICAL: get fresh data including role).
     // The session fields come from a separate lean read so req.user stays exactly as

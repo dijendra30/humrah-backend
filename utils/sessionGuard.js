@@ -8,6 +8,11 @@ const jwt = require('jsonwebtoken');
 
 const SESSION_FIELDS  = '+activeSessionId +activeSessionStartedAt';
 const DASHBOARD_SCOPE = 'admin-dashboard';
+const ADMIN_SOCKET_SCOPE = 'admin-socket';
+
+// Old Admin Dashboard JWTs (24 h, kept in localStorage) are retired by the cookie-session sign-in.
+// They keep working only while ADMIN_LEGACY_DASHBOARD_TOKENS=on (deployment transition).
+const legacyDashboardTokensAllowed = () => require('../config/adminAuthConfig').get().legacyDashboardTokens;
 
 /**
  * Null when the token is current, otherwise why it is not:
@@ -18,7 +23,9 @@ function sessionRejection(decoded, user) {
   if ((decoded.tv ?? 0) !== (user.tokenVersion ?? 0)) return 'TOKEN_REVOKED';
 
   // The web admin dashboard is its own session, separate from the phone.
-  if (decoded.scope === DASHBOARD_SCOPE) return null;
+  if (decoded.scope === DASHBOARD_SCOPE) return legacyDashboardTokensAllowed() ? null : 'TOKEN_REVOKED';
+  // Dashboard socket tokens are bound to an admin session (checked in verifySocketSession).
+  if (decoded.scope === ADMIN_SOCKET_SCOPE) return null;
 
   if (decoded.sid) return decoded.sid === user.activeSessionId ? null : 'SESSION_REPLACED';
 
@@ -56,6 +63,10 @@ async function verifySocketSession(rawToken, User, select = '') {
   const reason = sessionRejection(decoded, user);
   if (reason === 'SESSION_REPLACED') throw new Error('Authentication error: Session replaced');
   if (reason) throw new Error('Authentication error: Session expired');
+  if (decoded.scope === ADMIN_SOCKET_SCOPE) {
+    const live = await require('../services/adminAuth/adminSessionService').isLiveById(decoded.asid);
+    if (!live) throw new Error('Authentication error: Session expired');
+  }
   return { decoded, user };
 }
 
@@ -67,4 +78,4 @@ function tagSocket(socket, decoded) {
   socket.data.scope      = decoded.scope || null;
 }
 
-module.exports = { sessionRejection, verifySocketSession, tagSocket, SESSION_FIELDS, DASHBOARD_SCOPE };
+module.exports = { sessionRejection, verifySocketSession, tagSocket, SESSION_FIELDS, DASHBOARD_SCOPE, ADMIN_SOCKET_SCOPE };

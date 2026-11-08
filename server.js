@@ -53,10 +53,19 @@ const ALLOWED_ORIGINS = [
   'https://www.humrah.in',
 ];
 
+// Admin Dashboard sign-in config (env only). Its origins are the ONLY ones allowed to send the
+// HttpOnly admin session cookie (credentialed CORS); every other origin stays credential-less.
+const adminAuthConfig = require('./config/adminAuthConfig').get();
+if (!adminAuthConfig.enabled) {
+  console.warn('[ADMIN_AUTH] Admin dashboard sign-in is DISABLED — missing/invalid:', adminAuthConfig.problems.join(', '));
+}
+const isAdminDashboardOrigin = origin => !!origin && adminAuthConfig.dashboardOrigins.includes(String(origin).replace(/\/+$/, '').toLowerCase());
+
 const corsOptions = {
   origin: (origin, callback) => {
     if (!origin) return callback(null, true);
     if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+    if (isAdminDashboardOrigin(origin)) return callback(null, true);
     if (origin.endsWith('.vercel.app') || origin === 'https://admin.humrah.in') return callback(null, true);
     if (process.env.NODE_ENV !== 'production' && origin.startsWith('http://localhost')) {
       return callback(null, true);
@@ -64,7 +73,7 @@ const corsOptions = {
     return callback(new Error(`CORS blocked: ${origin}`));
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token'],
   credentials: false,
 };
 
@@ -111,7 +120,8 @@ app.use(helmet({
   referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
 }));
 
-app.use(cors(corsOptions));
+// credentials: true only for the admin dashboard origin(s) — never for *.vercel.app or the public site.
+app.use(cors((req, callback) => callback(null, { ...corsOptions, credentials: isAdminDashboardOrigin(req.header('Origin')) })));
 app.use(mongoSanitize());
 app.use(hpp());
 app.use(globalLimiter);
@@ -711,9 +721,22 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// Admin Dashboard email-OTP sign-in. Public by design and ABOVE the admin gate.
+app.use('/api/admin/auth', require('./routes/adminAuth'));
+app.use('/api/admin-dashboard-auth', require('./routes/adminDashboardAuth')); // retired: answers 410 ADMIN_LOGIN_MOVED
+
+// ── Admin gate ─────────────────────────────────────────────────────────────────
+// Every admin API prefix passes through this gate BEFORE its router (see middleware/adminSessionGate.js
+// and ADMIN_ROUTE_AUDIT.md). Dashboard session cookie or an admin's phone token only; normal-user
+// tokens get 403, no credentials get 401. Must stay above every mount it covers (incl. /api/auth/create-admin).
+{
+  const { adminSessionGate, ADMIN_ONLY_PREFIXES, SHARED_DASHBOARD_PREFIXES } = require('./middleware/adminSessionGate');
+  app.use(ADMIN_ONLY_PREFIXES, adminSessionGate({ adminOnly: true }));
+  app.use(SHARED_DASHBOARD_PREFIXES, adminSessionGate({ adminOnly: false }));
+}
+
 app.use('/api/auth',  authRoutes);
 app.use('/api/auth',  passwordResetRoutes);
-app.use('/api/admin-dashboard-auth', require('./routes/adminDashboardAuth'));
 app.use('/api/legal', legalRoutes);
 
 const { liveLocationPollLimiter } = require('./routes/liveLocationRoutes');
