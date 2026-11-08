@@ -31,6 +31,7 @@ const OWNER_ONLY_PREFIXES = Object.freeze([
   '/api/admin/admins', '/api/admin/audit-logs', '/api/admin/branding', '/api/admin/sports-discovery',
   '/api/payment/admin', '/api/auth/create-admin', '/api/admin/auth/members', '/api/admin/auth/security-events',
   '/api/admin-dashboard/restore-profile-completion', // bulk rewrite of every user's completion score
+  '/api/admin/engagement-notifications', // read-only worker status (route also needs SUPER_ADMIN)
 ]);
 
 const OWNER = 'owner';

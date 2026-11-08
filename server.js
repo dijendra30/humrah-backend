@@ -639,6 +639,14 @@ const connectDB = async () => {
     // startup banner so an operator can see the flag state without reading env.
     require('./services/meetup/meetupConfig').logMeetupStartupBanner();
 
+    // Personal Engagement Notifications (Phase 1). Self-gated by ENGAGEMENT_WORKER_ENABLED
+    // (default false): with it unset this only logs one OFF line. Never throws.
+    try {
+      require('./services/engagement/worker').start();
+    } catch (err) {
+      console.error('[ENGAGEMENT] worker not started:', err && err.name);
+    }
+
     await runStartupCleanup();
     scheduleDailyCleanup();
   } catch (err) {
@@ -767,6 +775,8 @@ app.use('/api/verification',      authenticate, enforceLegalAcceptance, require(
 app.use('/api/chats',             authenticate, enforceLegalAcceptance, require('./routes/chats')); // ✅ Unified Chat Inbox
 app.use('/api/settings',          authenticate, enforceLegalAcceptance, settingsRoutes);
 app.use('/api/notifications',     authenticate, enforceLegalAcceptance, require('./routes/notifications'));
+// Personal Engagement Notifications: the app reports opens of the user's OWN notifications.
+app.use('/api/engagement-notifications', authenticate, enforceLegalAcceptance, require('./routes/engagementNotifications'));
 app.use('/api/profile-assistant', authenticate, profileAssistantRoutes);
 // Sports discovery (Phase 5D): read-only status for operators. It can only read (one GET route),
 // is super-admin only, and is mounted inside a try so it can never stop the server from starting.
@@ -775,6 +785,13 @@ try {
   app.use('/api/admin/sports-discovery', authenticate, sportsDiscoverySuperAdmin, require('./routes/sportsDiscoveryAdmin'));
 } catch (err) {
   console.error('[SPORTS_DISCOVERY] status route not mounted:', err && err.name);
+}
+// Personal Engagement Notifications: read-only operator status, super-admin only.
+try {
+  const { superAdminOnly } = require('./middleware/auth');
+  app.use('/api/admin/engagement-notifications', authenticate, superAdminOnly, require('./routes/engagementNotificationsAdmin'));
+} catch (err) {
+  console.error('[ENGAGEMENT] status route not mounted:', err && err.name);
 }
 app.use('/api/admin',             authenticate, require('./routes/admin'));
 app.use('/api/admin/branding',    require('./routes/branding.route'));
@@ -855,8 +872,12 @@ server.timeout = 120000;
 
 const gracefulShutdown = async (signal) => {
   console.log(`\n${signal} signal received: closing HTTP server`);
+  // Stop scheduling engagement ticks at once (server.close waits for open sockets).
+  try { require('./services/engagement/worker').stop().catch(() => {}); } catch (_) { /* never block shutdown */ }
   server.close(async () => {
     try {
+      // Let an in-progress engagement tick finish (bounded) before the DB closes.
+      try { await require('./services/engagement/worker').stop({ timeoutMs: 5000 }); } catch (_) { /* never block shutdown */ }
       await mongoose.connection.close();
       console.log('MongoDB connection closed');
       
