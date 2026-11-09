@@ -244,35 +244,46 @@ const ZERO_TOL_NORMALIZED = [
 // OPENAI MODERATION LAYER
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// ── OpenAI Concurrency = 1 ──────
+// ── OpenAI request pool (Phase 4.2) ──────
+// Was a process-wide queue with concurrency 1: every moderated request in the server waited
+// behind every other one (N concurrent saves ⇒ the last waited N × the provider latency), and an
+// entry stayed queued for up to 60 s even after its caller had given up at 5 s, holding the
+// single slot. Now: a bounded pool, a real per-entry wait deadline (an entry that cannot start in
+// time is removed and rejected at once), a queue cap, and single-flight for identical input.
+// Failures still reach the callers as errors, exactly as before (⇒ the same fail-closed or
+// PENDING_REVIEW handling) — this changes waiting, never the safety decision.
+const _num = (name, def, min, max) => { const n = parseInt(process.env[name], 10); return Number.isFinite(n) && n >= min && n <= max ? n : def; };
+const OPENAI_CONCURRENCY   = _num('OPENAI_MODERATION_CONCURRENCY', 4, 1, 32);
+const OPENAI_QUEUE_MAX     = _num('OPENAI_MODERATION_QUEUE_MAX', 200, 0, 10000);
+const OPENAI_QUEUE_WAIT_MS = _num('OPENAI_MODERATION_QUEUE_WAIT_MS', 10000, 0, 120000);
 const _openAiQueue = [];
-let   _openAiRunning = false;
+let   _openAiActive = 0;
+const _openAiInflight = new Map();   // input text → Promise (identical concurrent checks share one call)
 
-function _enqueueOpenAI(fn) {
+function _enqueueOpenAI(fn, waitMs = OPENAI_QUEUE_WAIT_MS) {
   return new Promise((resolve, reject) => {
-    // Enqueue with a max wait time before it's considered a zombie
-    const expiresAt = Date.now() + 60000; 
-    _openAiQueue.push({ fn, resolve, reject, expiresAt });
-    if (!_openAiRunning) _drainOpenAIQueue();
+    if (_openAiActive < OPENAI_CONCURRENCY) { _runOpenAI({ fn, resolve, reject }); return; }
+    if (_openAiQueue.length >= OPENAI_QUEUE_MAX) { reject(new Error('OpenAI moderation queue full')); return; }
+    const entry = { fn, resolve, reject };
+    entry.timer = setTimeout(() => {
+      const i = _openAiQueue.indexOf(entry);
+      if (i >= 0) { _openAiQueue.splice(i, 1); reject(new Error('TIMEOUT_ZOMBIE')); }
+    }, waitMs);
+    _openAiQueue.push(entry);
   });
 }
 
-async function _drainOpenAIQueue() {
-  _openAiRunning = true;
-  while (_openAiQueue.length > 0) {
-    const { fn, resolve, reject, expiresAt } = _openAiQueue.shift();
-    
-    if (Date.now() > expiresAt) {
-      reject(new Error('TIMEOUT_ZOMBIE'));
-      continue;
-    }
-
-    try { resolve(await fn()); } catch (e) { reject(e); }
-    // No artificial delay between calls here anymore, unless we hit a 429
-    // Concurrency is naturally 1 because of the while loop awaiting `fn()`
+async function _runOpenAI(entry) {
+  _openAiActive++;
+  try { entry.resolve(await entry.fn()); } catch (e) { entry.reject(e); } finally {
+    _openAiActive--;
+    const next = _openAiQueue.shift();
+    if (next) { clearTimeout(next.timer); _runOpenAI(next); }
   }
-  _openAiRunning = false;
 }
+
+/** Test hook. */
+function _openAiPoolState() { return { active: _openAiActive, queued: _openAiQueue.length, inflight: _openAiInflight.size, limit: OPENAI_CONCURRENCY }; }
 
 async function _callOpenAI(input) {
   try {
@@ -290,7 +301,13 @@ async function _callOpenAI(input) {
 let openAiUnavailableUntil = 0;
 let cloudflareUnavailableUntil = 0;
 
-async function checkWithOpenAI(fieldTexts) {
+/**
+ * @param {object} fieldTexts { field: text }
+ * @param {object} [opts] { queueWaitMs } — how long this call may wait for a pool slot. Callers
+ *   with their own deadline (the questionnaire's 5 s race) pass it, so an abandoned call does
+ *   not linger in the queue.
+ */
+async function checkWithOpenAI(fieldTexts, opts = {}) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     if (process.env.NODE_ENV === 'production')
@@ -305,6 +322,18 @@ async function checkWithOpenAI(fieldTexts) {
 
   const input = Object.entries(fieldTexts).map(([f, t]) => `[${f}]: ${t}`).join('\n---\n');
 
+  // Single-flight: an identical check already in flight (double-tap, retry, worker + request)
+  // shares that one provider call and its result.
+  const shared = _openAiInflight.get(input);
+  if (shared) return shared;
+  const p = _checkWithOpenAIQueued(input, opts.queueWaitMs);
+  _openAiInflight.set(input, p);
+  const forget = () => { if (_openAiInflight.get(input) === p) _openAiInflight.delete(input); };
+  p.then(forget, forget);
+  return p;
+}
+
+function _checkWithOpenAIQueued(input, queueWaitMs) {
   return _enqueueOpenAI(async () => {
     try {
       const res    = await _callOpenAI(input);
@@ -341,7 +370,7 @@ async function checkWithOpenAI(fieldTexts) {
       err.providerResponseBody = err.response?.data;
       throw err;
     }
-  });
+  }, queueWaitMs);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -814,4 +843,6 @@ module.exports = {
   buildAutoCleanSuccessResponse,
   LEVEL,
   MODERATED_TEXT_FIELDS,
+  _openAiPoolState,
+  _resetOpenAiCooldownForTests: () => { openAiUnavailableUntil = 0; cloudflareUnavailableUntil = 0; },
 };

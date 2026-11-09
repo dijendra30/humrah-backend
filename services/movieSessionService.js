@@ -785,7 +785,7 @@ async function generateSystemSessions(userCtx, lat, lng) {
 
   console.log(`\n🤖 generateSystemSessions START`);
   console.log(`   IST hour=${istHour}, target=${AFTER_7PM ? 'TOMORROW' : 'TODAY'} (${targetDateStr})`);
-  console.log(`   lat=${lat}, lng=${lng}, lang=${userCtx?.languagePreference}, city=${userCtx?.city}`);
+  console.log(`   hasCoords=${lat != null && lng != null}, lang=${userCtx?.languagePreference}, city=${userCtx?.city}`);
 
   const [movies, theatres] = await Promise.all([
     fetchTrendingMovies(),
@@ -1189,7 +1189,7 @@ async function getNearbyTheatres(userId, queryLat, queryLng, radius = 8000) {
     return { success: false, message: 'Location unavailable. Please enable location in settings.' };
   }
 
-  console.log(`[theatres] ${loc.source} loc: (${loc.lat}, ${loc.lng})`);
+  console.log(`[theatres] location source: ${loc.source}`);
   const theatres = await fetchNearbyTheatres(loc.lat, loc.lng, parseInt(radius));
   return { success: true, locationSource: loc.source, theatres };
 }
@@ -1213,7 +1213,7 @@ async function getNearbySessions(userId, queryLat, queryLng) {
 
   const userLang = userCtx?.languagePreference || DEFAULT_LANGUAGE;
   const userCity = (userCtx?.city || '').trim().toLowerCase();
-  console.log(`\n📡 getNearbySessions — lang="${userLang}" city="${userCity}" loc=(${loc.lat},${loc.lng}) via ${loc.source}`);
+  console.log(`\n📡 getNearbySessions — lang="${userLang}" city="${userCity}" loc via ${loc.source}`);
 
   // City-scoped base query — NEVER show cross-city sessions
   // expiresAt > now ensures past-slot sessions (e.g. 11 AM at 2 PM) are excluded.

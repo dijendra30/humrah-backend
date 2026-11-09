@@ -971,40 +971,41 @@ router.put('/me/questionnaire', authenticate, async (req, res) => {
         if (violations.length > 0) {
           finalDecision = 'REJECT'; // Humrah rules triggered
         } else {
-          // OpenAI Layer
-          const aiResult = await Promise.race([
-            checkWithOpenAI(textsForAI),
-            new Promise((resolve) => setTimeout(() => resolve({ safe: true, _timeout: true }), 5000))
-          ]).catch((err) => {
-            openAiFailed = true;
-            oaiError = err;
-            return { safe: true, _error: err.message };
-          });
-          
-          if (aiResult._timeout) openAiFailed = true;
-          openAiRes = aiResult;
-          
-          if (!aiResult.safe) {
-            finalDecision = 'REJECT';
-          } else {
-            // Llama Guard Layer (Only if OpenAI passes)
-            const llamaResult = await Promise.race([
-              checkWithLlamaGuard(textsForAI),
-              new Promise((resolve) => setTimeout(() => resolve({ safe: true, _timeout: true }), 5000))
-            ]).catch((err) => {
+          // Phase 4.2: both AI layers run IN PARALLEL (they were sequential: up to 5 s + 5 s).
+          // The decision is exactly the previous one: OpenAI unsafe ⇒ REJECT; otherwise Llama
+          // Guard unsafe ⇒ REJECT; both unavailable ⇒ PENDING_REVIEW. Each still has its own 5 s
+          // budget, and the OpenAI call may not wait in its queue longer than that budget.
+          const withBudget = (promise) => {
+            let timer;
+            return Promise.race([
+              promise,
+              new Promise((resolve) => { timer = setTimeout(() => resolve({ safe: true, _timeout: true }), 5000); })
+            ]).finally(() => clearTimeout(timer));
+          };
+          const [aiResult, llamaResult] = await Promise.all([
+            withBudget(checkWithOpenAI(textsForAI, { queueWaitMs: 5000 })).catch((err) => {
+              openAiFailed = true;
+              oaiError = err;
+              return { safe: true, _error: err.message };
+            }),
+            withBudget(checkWithLlamaGuard(textsForAI)).catch((err) => {
               llamaFailed = true;
               llamaError = err;
               return { safe: true, _error: err.message };
-            });
-            
-            if (llamaResult._timeout) llamaFailed = true;
-            llamaRes = llamaResult;
-            
-            if (!llamaResult.safe) {
-              finalDecision = 'REJECT';
-            }
+            }),
+          ]);
+
+          if (aiResult._timeout) openAiFailed = true;
+          if (llamaResult._timeout) llamaFailed = true;
+          openAiRes = aiResult;
+          llamaRes = llamaResult;
+
+          if (!aiResult.safe) {
+            finalDecision = 'REJECT';
+          } else if (!llamaResult.safe) {
+            finalDecision = 'REJECT';
           }
-          
+
           if (openAiFailed && llamaFailed && finalDecision !== 'REJECT') {
             finalDecision = 'PENDING_REVIEW';
           }

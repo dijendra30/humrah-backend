@@ -949,15 +949,9 @@ router.post('/:bookingId/respond', authenticate, async (req, res) => {
         }
       }
       // Update user’s live location with fresh coordinates from accept action
+      // Phase 4.2: the full coordinate contract (GeoJSON point included) — see coordinateUpdateSet.
       await User.findByIdAndUpdate(req.userId, {
-        $set: {
-          'liveLocation.lat':       numLat,
-          'liveLocation.lng':       numLng,
-          'liveLocation.updatedAt': new Date(),
-          last_known_lat:           numLat,
-          last_known_lng:           numLng,
-          last_location_updated_at: new Date(),
-        }
+        $set: require('../services/liveLocationService').coordinateUpdateSet(numLat, numLng)
       });
     }
     // ── end location check ────────────────────────────────────────────────────
@@ -1027,15 +1021,9 @@ router.post('/:bookingId/accept', authenticate, async (req, res) => {
     }
 
     // Update acceptor's liveLocation and legacy fields
+    // Phase 4.2: the full coordinate contract (GeoJSON point included) — see coordinateUpdateSet.
     await User.findByIdAndUpdate(req.userId, {
-      $set: {
-        last_known_lat:           Number(lat),
-        last_known_lng:           Number(lng),
-        last_location_updated_at: new Date(),
-        'liveLocation.lat':       Number(lat),
-        'liveLocation.lng':       Number(lng),
-        'liveLocation.updatedAt': new Date(),
-      }
+      $set: require('../services/liveLocationService').coordinateUpdateSet(lat, lng)
     });
 
     await BookingMatch.create({ bookingId: booking._id, initiatorId: booking.initiatorId._id, acceptorId: req.userId, matchedAt: new Date() });

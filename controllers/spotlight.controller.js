@@ -39,7 +39,7 @@ async function getExcludeIds(currentUserId) {
   const userLat = currentUser.liveLocation?.lat ?? currentUser.last_known_lat ?? null;
   const userLng = currentUser.liveLocation?.lng ?? currentUser.last_known_lng ?? null;
 
-  console.log(`[DB] getExcludeIds — userId=${currentUserId} | liveCity="${liveCity}" | profileCity="${profileCity}" | resolvedCity="${userCity}" | lat=${userLat} lng=${userLng}`);
+  console.log(`[DB] getExcludeIds — userId=${currentUserId} | liveCity="${liveCity}" | profileCity="${profileCity}" | resolvedCity="${userCity}" | hasCoords=${userLat != null && userLng != null}`);
 
   return { excludeIds, userInterests, userCity, userLat, userLng };
 }

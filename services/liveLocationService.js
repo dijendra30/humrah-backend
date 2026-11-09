@@ -156,7 +156,7 @@ async function updateUserLiveLocation(userId, lat, lng) {
     // Do NOT overwrite lat/lng, city, or state. Keep whatever was there before,
     // and tell the caller to retry.
     console.warn(
-      `[LiveLocation] Reverse geocode failed for user ${userId} @ (${lat}, ${lng}). Previous location preserved.`
+      `[LiveLocation] Reverse geocode failed for user ${userId}. Previous location preserved.`
     );
     const existing = await User.findById(userId).select('liveLocation').lean();
     return {
@@ -200,7 +200,8 @@ async function updateUserLiveLocation(userId, lat, lng) {
     return { success: false, retry: false, message: 'User not found.' };
   }
 
-  console.log('LOCATION UPDATED:', lat, lng, displayName);
+  // Phase 4.2: never log exact coordinates or the street-level display name.
+  console.log(`[LiveLocation] updated for user ${userId} (city: ${city || 'n/a'})`);
 
   return {
     success:      true,
@@ -209,8 +210,34 @@ async function updateUserLiveLocation(userId, lat, lng) {
   };
 }
 
+/**
+ * Phase 4.2 — the $set for a coordinates-only update (no reverse geocode), e.g. a booking accept
+ * that carries a fresh GPS fix. Same contract as updateUserLiveLocation's write: the GeoJSON point
+ * (`type` + `coordinates`, which the 2dsphere index and every $near/$geoWithin query read) moves
+ * together with lat/lng and the timestamp, and the legacy fields are mirrored. city/state/area
+ * are left untouched — only the geocoding path refreshes those.
+ *
+ * Two booking routes used to set liveLocation.lat/lng/updatedAt WITHOUT coordinates, so
+ * lat/lng pointed at the new place while geo queries still saw the old one.
+ */
+function coordinateUpdateSet(lat, lng, now = new Date()) {
+  lat = Number(lat);
+  lng = Number(lng);
+  return {
+    'liveLocation.type':        'Point',
+    'liveLocation.coordinates': [lng, lat],
+    'liveLocation.lat':         lat,
+    'liveLocation.lng':         lng,
+    'liveLocation.updatedAt':   now,
+    last_known_lat:             lat,
+    last_known_lng:             lng,
+    last_location_updated_at:   now,
+  };
+}
+
 module.exports = {
   updateUserLiveLocation,
+  coordinateUpdateSet,
   reverseGeocode,
   extractAddressFields,
 };

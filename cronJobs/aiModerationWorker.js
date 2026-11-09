@@ -231,32 +231,57 @@ async function processTask(task) {
   }
 }
 
+// Phase 4.2 — restart safety and claim safety.
+// A task is 'processing' only while a worker holds it. A restart (deploy, crash) mid-task used to
+// leave it 'processing' for ever — this loop only ever picked 'pending' — so that user's profile
+// stayed 'pending_review' permanently. A claim older than this is a dead worker's and is retried.
+const PROCESSING_STALE_MS = 10 * 60 * 1000;
+
+async function recoverStaleTasks(now = Date.now()) {
+  const r = await ModerationTask.updateMany(
+    { status: 'processing', updatedAt: { $lt: new Date(now - PROCESSING_STALE_MS) } },
+    { $set: { status: 'pending', nextAttemptAt: new Date(now), lastError: 'recovered after worker restart' } }
+  );
+  if (r.modifiedCount) console.warn(`[MODERATION] Recovered ${r.modifiedCount} task(s) left in 'processing' by a stopped worker`);
+  return r.modifiedCount;
+}
+
+/** One claim-and-start pass. Each task is claimed atomically (pending → processing), so no two
+ * passes or instances can ever process the same task twice. */
+async function tick() {
+  let started = 0;
+  while (_activeWorkerCount < MAX_CONCURRENT_MODERATIONS) {
+    const task = await ModerationTask.findOneAndUpdate(
+      { status: 'pending', nextAttemptAt: { $lte: new Date() } },
+      { $set: { status: 'processing' } },
+      { sort: { nextAttemptAt: 1 }, new: true }
+    );
+    if (!task) break;
+    _activeWorkerCount++;
+    started++;
+    processTask(task); // non-blocking execution to allow concurrency
+  }
+  return started;
+}
+
+let _stalePassAt = 0;
 async function runModerationWorker() {
   await ensureSystemUser().catch(err => console.error('[MODERATION] Failed to ensure system user', err));
+  await recoverStaleTasks().catch(err => console.error('[MODERATION] Stale task recovery failed:', err.message));
 
   setInterval(async () => {
     if (_activeWorkerCount >= MAX_CONCURRENT_MODERATIONS) return;
-
     try {
-      const limit = MAX_CONCURRENT_MODERATIONS - _activeWorkerCount;
-      const tasks = await ModerationTask.find({ 
-        status: 'pending', 
-        nextAttemptAt: { $lte: new Date() } 
-      }).limit(limit);
-      
-      if (tasks.length === 0) return;
-
-      const taskIds = tasks.map(t => t._id);
-      await ModerationTask.updateMany({ _id: { $in: taskIds } }, { $set: { status: 'processing' } });
-
-      for (const task of tasks) {
-        _activeWorkerCount++;
-        processTask(task); // non-blocking execution to allow concurrency
-      }
+      if (Date.now() - _stalePassAt > 60 * 1000) { _stalePassAt = Date.now(); await recoverStaleTasks(); }
+      await tick();
     } catch (error) {
       console.error('[MODERATION] Worker loop error:', error);
     }
   }, 3000); // Check every 3s
 }
+runModerationWorker._tick = tick;
+runModerationWorker._recoverStaleTasks = recoverStaleTasks;
+runModerationWorker._processTask = processTask;
+runModerationWorker._activeCount = () => _activeWorkerCount;
 
 module.exports = runModerationWorker;

@@ -12,20 +12,71 @@ const { notifyVerificationReview } = require('../services/telegramService');
 
 const os = require('os');
 const fs = require('fs');
+const path = require('path');
 const util = require('util');
 const unlinkAsync = util.promisify(fs.unlink);
 
 // =============================================
 // MULTER SETUP FOR VIDEO UPLOAD
 // =============================================
+// Disk storage (the video is never held in memory), equivalent to multer.diskStorage with the same
+// temp names — plus what multer 1.x lacks: it remembers the file it is writing, so a client that
+// disconnects mid-upload does not leave an open write stream and a partial file behind
+// (multer only cleans up files it finished writing). See discardTempUploads below.
+const TEMP_PREFIX = 'verification_';
+const tempVideoStorage = {
+  _handleFile(req, file, cb) {
+    const filename = `${TEMP_PREFIX}${Date.now()}_${Math.round(Math.random() * 1E9)}.mp4`;
+    const destination = os.tmpdir();
+    const filePath = path.join(destination, filename);
+    const outStream = fs.createWriteStream(filePath);
+    (req._verificationTempUploads || (req._verificationTempUploads = [])).push({ path: filePath, stream: outStream });
+    file.stream.pipe(outStream);
+    outStream.on('error', cb);
+    outStream.on('finish', () => cb(null, { destination, filename, path: filePath, size: outStream.bytesWritten }));
+  },
+  _removeFile(req, file, cb) {
+    fs.unlink(file.path, () => cb(null));
+  },
+};
+
+/** Close and delete every temp file this request started writing (idempotent). */
+function discardTempUploads(req) {
+  for (const t of req._verificationTempUploads || []) {
+    if (t.discarded) continue;
+    t.discarded = true;
+    const remove = () => fs.unlink(t.path, (err) => {
+      if (err && err.code !== 'ENOENT') console.error(`[Cleanup] temp video delete failed: ${err.code || err.name}`);
+    });
+    if (t.stream && !t.stream.closed) { t.stream.once('close', remove); t.stream.destroy(); } else remove();
+  }
+}
+
+// Crash safety net: a process killed mid-upload cannot run any cleanup, so temp videos older than
+// an hour (no upload lives that long: storage times out after 2 minutes) are swept periodically.
+const TEMP_MAX_AGE_MS = 60 * 60 * 1000;
+// Asynchronous on purpose: the server's temp folder can hold many files, and this must never
+// block the event loop that serves requests and sockets.
+async function sweepStaleTempUploads(now = Date.now()) {
+  let removed = 0;
+  let names = [];
+  try { names = await fs.promises.readdir(os.tmpdir()); } catch (_) { return 0; }
+  for (const name of names) {
+    if (!name.startsWith(TEMP_PREFIX) || !name.endsWith('.mp4')) continue;
+    const p = path.join(os.tmpdir(), name);
+    try {
+      if (now - (await fs.promises.stat(p)).mtimeMs > TEMP_MAX_AGE_MS) { await fs.promises.unlink(p); removed++; }
+    } catch (_) { /* vanished or locked: next sweep */ }
+  }
+  if (removed) console.log(`[Cleanup] removed ${removed} stale verification temp file(s)`);
+  return removed;
+}
+const runSweep = () => { sweepStaleTempUploads().catch(() => {}); };
+setTimeout(runSweep, 10 * 1000).unref();
+setInterval(runSweep, 30 * 60 * 1000).unref();
+
 const upload = multer({
-  storage: multer.diskStorage({
-    destination: os.tmpdir(),
-    filename: (req, file, cb) => {
-      const uniqueSuffix = Date.now() + '_' + Math.round(Math.random() * 1E9);
-      cb(null, `verification_${uniqueSuffix}.mp4`);
-    }
-  }),
+  storage: tempVideoStorage,
   limits: {
     fileSize: 50 * 1024 * 1024 // 50MB limit
   },
@@ -55,6 +106,71 @@ const shortId = (id) => (typeof id === 'string' && id.length >= 6 ? `${id.slice(
 /** Error reply with a stable code. Messages are written for people; internals are never sent. */
 const fail = (res, status, code, message, extra = {}) =>
   res.status(status).json({ success: false, code, message, ...extra });
+
+// =============================================
+// UPLOAD CONTENT CHECK + STORAGE CONCURRENCY (Phase 4.2)
+// =============================================
+// The multipart MIME type is only the client's claim. Every recording the app sends is re-encoded
+// to MP4 (Media3 Transformer) first, so a real upload starts with an ISO-BMFF box header
+// ("ftyp", or a QuickTime top-level box) or — for WebM/Matroska — the EBML magic number.
+const ISO_BMFF_BOXES = new Set(['ftyp', 'moov', 'mdat', 'free', 'wide', 'skip', 'pnot']);
+async function looksLikeVideoFile(filePath) {
+  let fh;
+  try {
+    fh = await fs.promises.open(filePath, 'r');
+    const head = Buffer.alloc(12);
+    const { bytesRead } = await fh.read(head, 0, 12, 0);
+    if (bytesRead < 12) return false;
+    if (head.readUInt32BE(0) === 0x1A45DFA3) return true;          // EBML (WebM / Matroska)
+    return ISO_BMFF_BOXES.has(head.toString('latin1', 4, 8));      // MP4 / MOV / 3GP
+  } catch (_) {
+    return false;
+  } finally {
+    if (fh) await fh.close().catch(() => {});
+  }
+}
+
+// Videos are already streamed disk -> Cloudinary (never held in memory), so memory stays flat;
+// this bounds how many 50 MB transfers compete for the server's uplink and disk at once. A
+// request that cannot get a slot in time gets a retryable 503 (the app's worker retries 5xx).
+const envInt = (name, def, min, max) => {
+  const n = parseInt(process.env[name], 10);
+  return Number.isFinite(n) && n >= min && n <= max ? n : def;
+};
+const UPLOAD_CONCURRENCY = envInt('VERIFICATION_UPLOAD_CONCURRENCY', 3, 1, 32);
+const UPLOAD_QUEUE_MAX = envInt('VERIFICATION_UPLOAD_QUEUE_MAX', 20, 0, 500);
+const UPLOAD_QUEUE_WAIT_MS = envInt('VERIFICATION_UPLOAD_QUEUE_WAIT_MS', 60000, 0, 10 * 60000);
+let activeUploads = 0;
+const uploadWaiters = [];
+/** Resolves to a one-shot release function, or null when no slot is free in time. */
+function acquireUploadSlot() {
+  const makeRelease = () => {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const next = uploadWaiters.shift();
+      if (next) next.grant(); else activeUploads--;   // a waiter inherits the slot
+    };
+  };
+  if (activeUploads < UPLOAD_CONCURRENCY) { activeUploads++; return Promise.resolve(makeRelease()); }
+  if (uploadWaiters.length >= UPLOAD_QUEUE_MAX) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const waiter = {
+      grant: () => { clearTimeout(waiter.timer); resolve(makeRelease()); },
+      timer: setTimeout(() => {
+        const i = uploadWaiters.indexOf(waiter);
+        if (i >= 0) uploadWaiters.splice(i, 1);
+        resolve(null);
+      }, UPLOAD_QUEUE_WAIT_MS),
+    };
+    uploadWaiters.push(waiter);
+  });
+}
+/** Test hook: current pool state. */
+router._uploadPoolState = () => ({ active: activeUploads, waiting: uploadWaiters.length, limit: UPLOAD_CONCURRENCY });
+/** Test hook: the crash-leftover sweep. */
+router._sweepStaleTempUploads = (now) => sweepStaleTempUploads(now);
 
 // =============================================
 // VERIFICATION INSTRUCTIONS POOL
@@ -175,6 +291,9 @@ router.post('/start', auth, async (req, res) => {
 // @desc    Upload verification video from Android
 // @access  Private
 router.post('/upload-video', auth, (req, res, next) => {
+  // The connection closed before we answered (app killed, network lost mid-upload): multer 1.x
+  // never finishes such a request, so close and delete the partial temp file here.
+  res.on('close', () => { if (!res.writableEnded) discardTempUploads(req); });
   upload.single('video')(req, res, (err) => {
     if (err) {
       if (req.file && req.file.path) {
@@ -211,6 +330,11 @@ router.post('/upload-video', auth, (req, res, next) => {
 
     if (!req.file) {
       return fail(res, 400, 'NO_VIDEO', 'No video file provided');
+    }
+    // The declared type is only the client's claim: check the file itself.
+    if (!(await looksLikeVideoFile(req.file.path))) {
+      console.error(`[Upload] content is not a video for user ${req.userId}`);
+      return fail(res, 415, 'INVALID_VIDEO', 'That file is not a video. Please record your verification video again.');
     }
     if (typeof sessionId !== 'string' || !sessionId) {
       return fail(res, 404, 'SESSION_NOT_FOUND', 'Session not found');
@@ -295,8 +419,23 @@ router.post('/upload-video', auth, (req, res, next) => {
       return fail(res, 503, 'VERIFICATION_UPLOAD_IN_PROGRESS', 'Your verification video is still being uploaded.');
     }
 
-    // Upload video file to Cloudinary (private: delivery type 'authenticated')
-    const cloudinaryResult = await uploadVerificationVideo(req.file.path, sessionId);
+    // Upload video file to Cloudinary (private: delivery type 'authenticated'), within the
+    // bounded storage pool. No slot in time: give the claim back and ask the app to retry.
+    const releaseSlot = await acquireUploadSlot();
+    if (!releaseSlot) {
+      await VerificationSession.updateOne({ _id: claimed._id, status: 'PROCESSING' }, { $set: { status: 'PENDING' } })
+        .catch(() => {});
+      claimed = null;
+      console.warn(`[Upload] storage pool busy; session ${shortId(sessionId)} asked to retry`);
+      res.set('Retry-After', '30');
+      return fail(res, 503, 'VERIFICATION_UPLOAD_BUSY', 'Verification uploads are busy right now. We will retry automatically.');
+    }
+    let cloudinaryResult;
+    try {
+      cloudinaryResult = await uploadVerificationVideo(req.file.path, sessionId);
+    } finally {
+      releaseSlot();
+    }
 
     // Hard Validation: Verify public_id and the stored reference exist
     if (!cloudinaryResult || !cloudinaryResult.publicId || !cloudinaryResult.url) {

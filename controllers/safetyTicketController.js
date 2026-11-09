@@ -480,7 +480,7 @@ exports.shareLocation = async (req, res) => {
             isFromTeam: true,
             isSystem:   true
         });
-        console.log(`[SAFETY_MESSAGE_CREATED] messageId=${locMsg._id} ticketId=${ticket.ticketId} type=location-shared lat=${lat} lng=${lng}`);
+        console.log(`[SAFETY_MESSAGE_CREATED] messageId=${locMsg._id} ticketId=${ticket.ticketId} type=location-shared`);
 
         notifyLocationShared({
             ticketId:     ticket.ticketId,

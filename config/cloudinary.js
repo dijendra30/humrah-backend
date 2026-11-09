@@ -29,20 +29,9 @@ const upload = multer({
   }
 });
 
-// Configure Multer Upload for Videos (Verification)
-const videoUpload = multer({
-  storage: multer.memoryStorage(),
-  limits: {
-    fileSize: 15 * 1024 * 1024 // 15MB limit for videos (increased from 10MB)
-  },
-  fileFilter: (req, file, cb) => {
-    if (file.mimetype.startsWith('video/')) {
-      cb(null, true);
-    } else {
-      cb(new Error('Only video files are allowed!'), false);
-    }
-  }
-});
+// (Phase 4.2) The former in-memory `videoUpload` multer instance was removed: it had no consumer,
+// and buffering videos in memory is exactly what verification uploads must never do. Video
+// uploads use disk storage + streaming (routes/verification.js -> uploadVerificationVideo).
 
 // Helper function to upload buffer to Cloudinary (Images)
 const uploadBuffer = async (buffer, folder = 'humrah') => {
@@ -234,7 +223,6 @@ const getAuthenticatedUrl = (publicId, resourceType = 'image') => {
 module.exports = {
   cloudinary,
   upload,
-  videoUpload,
   uploadBuffer,
   uploadVerificationVideo,
   deleteImage,
