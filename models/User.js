@@ -899,11 +899,10 @@ userSchema.methods.isFullyVerified = function() {
   return this.emailVerified && this.photoVerificationStatus === 'approved';
 };
 userSchema.methods.hasAcceptedCurrentLegal = async function() {
-  const LegalVersion = mongoose.model('LegalVersion');
-  const [termsDoc, privacyDoc] = await Promise.all([
-    LegalVersion.findOne({ documentType: 'TERMS' }),
-    LegalVersion.findOne({ documentType: 'PRIVACY' })
-  ]);
+  // Current versions come from a short process-local cache (services/legalVersionCache.js);
+  // the comparison below is unchanged.
+  const { getCurrentLegalVersions } = require('../services/legalVersionCache');
+  const { terms: termsDoc, privacy: privacyDoc } = await getCurrentLegalVersions();
   if (!termsDoc || !privacyDoc) throw new Error('Legal versions not configured');
   return (
     this.acceptedTermsVersion === termsDoc.currentVersion &&

@@ -2,11 +2,37 @@ const Redis = require('ioredis');
 
 let redisClient = null;
 
+// Failure bounds for every command on the shared client. ioredis' defaults (20 retries per
+// command with backoff up to 5 s) made each Redis-dependent request wait ~70 s during an outage —
+// including GET /api/app-config at app launch. Healthy-path behaviour is unchanged; reconnection
+// keeps running in the background. Both values can be overridden per environment.
+const envNum = (name, def) => {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return def;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : def;
+};
+const FAILURE_BOUNDS = {
+  maxRetriesPerRequest: envNum('REDIS_MAX_RETRIES_PER_REQUEST', 2),
+  commandTimeout: envNum('REDIS_COMMAND_TIMEOUT_MS', 2000) || undefined, // 0 = no timeout
+};
+
 try {
   if (process.env.REDIS_URL || process.env.REDIS_HOST) {
-    redisClient = new Redis(process.env.REDIS_URL || {
-      host: process.env.REDIS_HOST || '127.0.0.1',
-      port: process.env.REDIS_PORT || 6379,
+    redisClient = process.env.REDIS_URL
+      ? new Redis(process.env.REDIS_URL, FAILURE_BOUNDS)
+      : new Redis({
+        host: process.env.REDIS_HOST || '127.0.0.1',
+        port: process.env.REDIS_PORT || 6379,
+        ...FAILURE_BOUNDS,
+      });
+    // Without a listener ioredis prints "Unhandled error event" for every reconnect attempt.
+    // Log at most every 30 s, and only the error code — never the URL or credentials.
+    let lastErrorLogAt = 0;
+    redisClient.on('error', (err) => {
+      if (Date.now() - lastErrorLogAt < 30000) return;
+      lastErrorLogAt = Date.now();
+      console.warn(`[REDIS] connection error (${(err && (err.code || err.name)) || 'unknown'}) — retrying in the background`);
     });
     console.log('[REDIS] Connected to Redis for Humrah Rooms');
   } else {
@@ -141,3 +167,10 @@ exports.getMany = async (keys) => {
 };
 
 exports.getClient = () => redisClient;
+
+/**
+ * True when a cache read can be attempted right now: the in-memory fallback (no Redis
+ * configured) or a connected client. False while ioredis is (re)connecting, so optional cache
+ * reads can skip Redis instead of waiting on the command timeout during an outage.
+ */
+exports.isAvailable = () => !redisClient || redisClient.status === 'ready';

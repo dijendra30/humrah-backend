@@ -41,8 +41,15 @@ const isAccountDeletionRequest = (req) =>
 // Usage:
 //   app.use('/api/bookings', authenticate, enforceLegalAcceptance, bookingRoutes);
 // =============================================
+// Set once this request has passed the legal check for this exact req.user. Several /api mounts
+// stack this middleware (e.g. app.use('/api', authenticate, enforceLegalAcceptance, ...)), so a
+// single request used to repeat the same check 2–3 times.
+const LEGAL_PASSED = Symbol('humrah.legalPassedFor');
+
 const enforceLegalAcceptance = async (req, res, next) => {
   try {
+    if (req.user && req[LEGAL_PASSED] === req.user) return next();
+
     // Always allow: routes used to achieve compliance
     if (EXEMPT_PATHS.has(req.path) || EXEMPT_PATHS.has(req.originalUrl)) {
       return next();
@@ -97,6 +104,7 @@ const enforceLegalAcceptance = async (req, res, next) => {
       });
     }
 
+    req[LEGAL_PASSED] = req.user;
     next();
   } catch (error) {
     console.error('[enforceLegalAcceptance]', error);

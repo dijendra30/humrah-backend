@@ -3,13 +3,20 @@ const redisService = require('../services/redisService');
 
 const CACHE_KEY = 'humrah:app-config';
 const CACHE_TTL = parseInt(process.env.APP_CONFIG_CACHE_TTL || '900', 10);
+// The app calls this at launch; a slow or unreachable Redis must never delay it. A read that
+// takes longer than this falls through to MongoDB (same path as a Redis error).
+const CACHE_READ_TIMEOUT_MS = parseInt(process.env.APP_CONFIG_CACHE_READ_TIMEOUT_MS || '250', 10);
+
+// Stall-aware: times out a slow Redis, but not a reply delayed only by this process being busy.
+const { withTimeout } = require('../services/cacheService');
 
 const getAppConfig = async (req, res) => {
   const startTime = Date.now();
   try {
-    // 1. Attempt Cache Read
+    // 1. Attempt Cache Read (skipped while Redis is known to be disconnected)
     try {
-      const cachedData = await redisService.get(CACHE_KEY);
+      if (redisService.isAvailable && !redisService.isAvailable()) throw new Error('Redis not connected');
+      const cachedData = await withTimeout(redisService.get(CACHE_KEY), CACHE_READ_TIMEOUT_MS);
       if (cachedData) {
         console.log(`APP_CONFIG_CACHE_HIT (${Date.now() - startTime}ms)`);
         return res.status(200).json(cachedData);
@@ -55,13 +62,12 @@ const getAppConfig = async (req, res) => {
       };
     }
 
-    // 3. Attempt Cache Write
-    try {
-      await redisService.set(CACHE_KEY, responseData, CACHE_TTL);
-      console.log(`APP_CONFIG_CACHE_SET (${Date.now() - startTime}ms overall, MongoDB took ${mongoDuration}ms)`);
-    } catch (cacheSetError) {
-      console.warn('APP_CONFIG_REDIS_ERROR (SET):', cacheSetError.message);
-    }
+    // 3. Attempt Cache Write — not awaited, so a failing Redis cannot delay the response.
+    if (redisService.isAvailable && !redisService.isAvailable()) return res.status(200).json(responseData);
+    Promise.resolve()
+      .then(() => redisService.set(CACHE_KEY, responseData, CACHE_TTL))
+      .then(() => console.log(`APP_CONFIG_CACHE_SET (${Date.now() - startTime}ms overall, MongoDB took ${mongoDuration}ms)`))
+      .catch((cacheSetError) => console.warn('APP_CONFIG_REDIS_ERROR (SET):', cacheSetError.message));
 
     return res.status(200).json(responseData);
 

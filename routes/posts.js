@@ -150,10 +150,12 @@ router.get('/feed', auth, async (req, res) => {
       query.createdAt = { $lt: new Date(cursor) };
     }
 
-    // Fetch current user to get blocked/muted/hidden/notInterested lists
+    // Fetch current user to get blocked/muted/hidden/notInterested lists.
+    // lean(): only these four arrays are read below (each with a `|| []` fallback), so a plain
+    // object behaves identically and skips hydrating the 200-path User schema.
     const currentUser = await User.findById(req.userId).select(
       'blockedUsers mutedUsers hiddenPosts notInterestedUsers'
-    );
+    ).lean();
 
     const blockedIds    = (currentUser?.blockedUsers        || []).map(id => id.toString());
     const mutedIds      = (currentUser?.mutedUsers          || []).map(id => id.toString());
@@ -171,10 +173,19 @@ router.get('/feed', auth, async (req, res) => {
       query._id = { $nin: hiddenPostIds };
     }
 
+    // Authors are populated lean (a full User document per post was the main CPU cost of this
+    // endpoint). profilePhoto is normalised to null below, which is what the schema default
+    // produced before, so the response is unchanged. Posts stay hydrated: their defaults are
+    // part of the response.
     const posts = await Post.find(query)
-      .populate('userId', 'firstName lastName profilePhoto')
+      .populate({ path: 'userId', select: 'firstName lastName profilePhoto', options: { lean: true } })
       .sort({ createdAt: -1 })
       .limit(limit + 1); // fetch one extra to determine hasMore
+    for (const p of posts) {
+      if (p.userId && typeof p.userId === 'object' && p.userId._id && p.userId.profilePhoto === undefined) {
+        p.userId.profilePhoto = null;
+      }
+    }
 
     const hasMore  = posts.length > limit;
     const result   = hasMore ? posts.slice(0, limit) : posts;
@@ -204,7 +215,7 @@ router.get('/feed', auth, async (req, res) => {
     const userLikes = await PostLike.find({
       userId: userId,
       postId: { $in: postIds }
-    }).select('postId');
+    }).select('postId').lean();
     const likedSet = new Set(userLikes.map(l => l.postId.toString()));
 
     const enriched = visible.map(p => ({

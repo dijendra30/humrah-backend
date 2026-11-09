@@ -4,6 +4,34 @@ const User = require('../models/User');
 const AuditLog = require('../models/AuditLog');
 const { sessionRejection, SESSION_FIELDS } = require('../utils/sessionGuard');
 
+// Per-request marker: the token this request was already authenticated with. Several /api mounts
+// stack authenticate (e.g. app.use('/api', authenticate, ...) plus the route's own mount plus
+// router-level authenticate), so one request used to repeat the full check — two User reads and
+// a lastActive write — 2–4 times. The marker lives on this req object only (never shared between
+// requests) and is honoured only for the identical token, so every request is still fully
+// verified once against fresh database state.
+const AUTHENTICATED_WITH = Symbol('humrah.authenticatedWithToken');
+
+// lastActive is written at most once per this interval per user (default 60 s;
+// AUTH_LAST_ACTIVE_THROTTLE_MS=0 restores a write on every request). Its finest reader is the
+// admin analytics 15-minute "active now" count.
+function lastActiveThrottleMs() {
+  const raw = process.env.AUTH_LAST_ACTIVE_THROTTLE_MS;
+  if (raw === undefined || raw === '') return 60 * 1000;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 60 * 1000;
+}
+
+function lastActiveIsFresh(user) {
+  const throttle = lastActiveThrottleMs();
+  if (throttle === 0) return false;
+  // A schema default (field absent in the database) is "now" on every read — never trust it.
+  if (typeof user.$isDefault === 'function' && user.$isDefault('lastActive')) return false;
+  const last = user.lastActive ? new Date(user.lastActive).getTime() : 0;
+  const age = Date.now() - last;
+  return age >= 0 && age < throttle;
+}
+
 // =============================================
 // AUTHENTICATION MIDDLEWARE
 // =============================================
@@ -21,6 +49,9 @@ const authenticate = async (req, res, next) => {
     const token = authHeader?.startsWith('Bearer ')
       ? authHeader.replace('Bearer ', '')
       : null;
+
+    // Already authenticated earlier in THIS request with THIS token.
+    if (token && req.user && req[AUTHENTICATED_WITH] === token) return next();
 
     if (!token) {
       return res.status(401).json({
@@ -154,12 +185,16 @@ const authenticate = async (req, res, next) => {
       });
     }
 
-    // Update last active — use updateOne (not save) to avoid full document write on every request
-    await User.updateOne({ _id: user._id }, { lastActive: new Date() });
+    // Update last active — use updateOne (not save) to avoid full document write on every request.
+    // Throttled: skipped when the stored value is already recent (see lastActiveIsFresh).
+    if (!lastActiveIsFresh(user)) {
+      await User.updateOne({ _id: user._id }, { lastActive: new Date() });
+    }
 
     // Attach user to request
     req.user = user;
     req.userId = user._id;
+    req[AUTHENTICATED_WITH] = token;
 
     next();
   } catch (error) {

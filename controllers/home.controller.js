@@ -6,6 +6,7 @@ const MatchingTodayMood = require('../models/MatchingTodayMood');
 // Companions are "nearby" only by this one rule (eligible, fresh real locations on
 // both sides, real distance inside the radius). Members keep the rules below.
 const companionProximity = require('../services/companionProximityService');
+const cacheService = require('../services/cacheService');
 
 // =============================================================================
 // HELPERS
@@ -491,6 +492,15 @@ exports.getPeopleNearby = async (req, res) => {
 // =============================================================================
 const DISCOVERY_PAGE_MAX = 50;
 const DISCOVERY_BROAD_LIMIT = 400;
+// Ranking cache (see getPeopleDiscovery): the first 300 ranked people (15 pages of 20) per
+// viewer + seed. Pages beyond that are ranked fresh, as before.
+const DISCOVERY_CACHE_MAX_ITEMS = 300;
+function discoveryCacheTtlSeconds() {
+  const raw = process.env.PEOPLE_DISCOVERY_CACHE_TTL_SECONDS;
+  if (raw === undefined || raw === '') return 90;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 && n <= 3600 ? Math.floor(n) : 90;
+}
 
 function _norm(v) { return String(v || '').trim().toLowerCase(); }
 function _interestSet(u) {
@@ -583,115 +593,178 @@ async function getPeopleDiscovery(req, res) {
     const myMTM = await MatchingTodayMood.findOne({ userId: req.userId, visible: true, expiresAt: { $gt: now } }).lean();
     me._mtm = myMTM;
 
+    // Full card fields — read only for the people on the requested page (see "Page profiles").
     const select = 'firstName lastName profilePhoto verified photoVerificationStatus isPremium userType status hostActive ratingStats last_known_lat last_known_lng last_location_updated_at questionnaire liveLocation tagline bio interests hobbies vibeWords availableTimes languagePreference language price city state availability comfortZones profileCompletion';
+    // Ranking fields — everything the candidate scoring below and companionProximity.evaluate
+    // read, and nothing else. Every page used to read up to ~700 full profiles to rank them and
+    // then format 20; ranking on this slim projection gives the same order at a fraction of the
+    // read/deserialise cost.
+    const rankSelect = 'userType status hostActive profilePhoto liveLocation last_known_lat last_known_lng last_location_updated_at questionnaire.hangoutPreferences questionnaire.interests questionnaire.hobbies questionnaire.gender questionnaire.city interests hobbies city profileCompletion';
     const base = { _id: { $nin: blockedIds }, status: 'ACTIVE', profilePhoto: { $ne: null } };
 
-    // Local candidates: the same radius / city query as the endpoint above.
     const userLat = me.liveLocation?.lat ?? me.last_known_lat ?? null;
     const userLng = me.liveLocation?.lng ?? me.last_known_lng ?? null;
     const myCity = _cityOf(me) || null;
-    let local = [];
-    if (userLat !== null && userLng !== null) {
-      const dLat = MAX_KM / 111.0;
-      const dLng = MAX_KM / (111.0 * Math.cos(userLat * Math.PI / 180));
-      const or = [
-        { 'liveLocation.coordinates': { $geoWithin: { $centerSphere: [[userLng, userLat], MAX_KM / 6378.1] } } },
-        { last_known_lat: { $gte: userLat - dLat, $lte: userLat + dLat }, last_known_lng: { $gte: userLng - dLng, $lte: userLng + dLng } },
-      ];
-      if (myCity) {
-        const t = _titleCase(myCity);
-        or.push({ 'liveLocation.city': { $in: [myCity, t, myCity.toUpperCase()] } }, { 'questionnaire.city': { $in: [myCity, t, myCity.toUpperCase()] } });
-      }
-      local = await User.find({ ...base, $or: or }).select(select).limit(300).lean();
-    } else if (myCity) {
-      const t = _titleCase(myCity);
-      local = await User.find({ ...base, $or: [{ 'liveLocation.city': { $in: [myCity, t, myCity.toUpperCase()] } }, { 'questionnaire.city': { $in: [myCity, t, myCity.toUpperCase()] } }] })
-        .select(select).limit(300).lean();
-    }
-
-    // Broader India: bounded, on the { status, userType, _id } index, newest first.
-    const localIds = local.map(u => u._id);
-    const broad = await User.find({ ...base, _id: { $nin: [...blockedIds, ...localIds.map(String)] }, userType: { $in: ['MEMBER', 'COMPANION'] } })
-      .select(select).sort({ _id: -1 }).limit(DISCOVERY_BROAD_LIMIT).lean();
-
-    // Only when NEARBY_COMPANION_RADIUS_KM is set wider than the member radius: the
-    // Companions between the two, which the local query above can't reach. A
-    // Companion-only query, so the member candidate set is exactly as before.
-    let extraCompanions = [];
     const myFix = companionProximity.usableLocation(me, now);
-    if (myFix && COMPANION_KM > MAX_KM) {
-      const seenIds = [...blockedIds, ...localIds.map(String), ...broad.map(u => String(u._id))];
-      const dLat = COMPANION_KM / 111.0;
-      const dLng = COMPANION_KM / (111.0 * Math.cos(myFix.lat * Math.PI / 180));
-      extraCompanions = await User.find({ ...base, _id: { $nin: seenIds }, userType: 'COMPANION', $or: [
-        { 'liveLocation.coordinates': { $geoWithin: { $centerSphere: [[myFix.lng, myFix.lat], COMPANION_KM / 6378.1] } } },
-        { last_known_lat: { $gte: myFix.lat - dLat, $lte: myFix.lat + dLat }, last_known_lng: { $gte: myFix.lng - dLng, $lte: myFix.lng + dLng } },
-      ] }).select(select).limit(100).lean();
-    }
 
-    const all = [...local, ...broad, ...extraCompanions];
-    const moods = await MatchingTodayMood.find({ userId: { $in: all.map(u => u._id) }, visible: true, expiresAt: { $gt: now } }).lean();
-    const moodBy = new Map(moods.map(d => [d.userId.toString(), d]));
-
-    const mine = _interestSet(me);
-    const myGender = _binaryGender(me.questionnaire && me.questionnaire.gender);
-    const candidates = all.map(u => {
-      u._mtm = moodBy.get(u._id.toString()) || null;
-      let distKm, nearby;
-      if (u.userType === 'COMPANION') {
-        // The one Companion rule; a Companion that fails it is dropped below.
-        const near = companionProximity.evaluate(me, u, now);
-        nearby = near.ok;
-        distKm = near.ok ? near.distanceKm : null;
-      } else {
-        // Members: exactly as before.
-        const cLat = u.liveLocation?.lat ?? u.last_known_lat ?? null;
-        const cLng = u.liveLocation?.lng ?? u.last_known_lng ?? null;
-        distKm = (userLat !== null && userLng !== null && cLat !== null && cLng !== null) ? haversineKm(userLat, userLng, cLat, cLng) : null;
-        nearby = distKm !== null && distKm <= MAX_KM;
+    // ── Ranking ─────────────────────────────────────────────────────────────
+    // Returns { total, companionAvailability, items } where each item is a compact row
+    // [userId, distKm|null, nearby 0/1, pool, sharedCount, sameMood 0/1, locationLabel].
+    // Profiles are NOT part of it: they are read fresh for each page below.
+    const computeRanking = async () => {
+      // Local candidates: the same radius / city query as the endpoint above.
+      let local = [];
+      if (userLat !== null && userLng !== null) {
+        const dLat = MAX_KM / 111.0;
+        const dLng = MAX_KM / (111.0 * Math.cos(userLat * Math.PI / 180));
+        const or = [
+          { 'liveLocation.coordinates': { $geoWithin: { $centerSphere: [[userLng, userLat], MAX_KM / 6378.1] } } },
+          { last_known_lat: { $gte: userLat - dLat, $lte: userLat + dLat }, last_known_lng: { $gte: userLng - dLng, $lte: userLng + dLng } },
+        ];
+        if (myCity) {
+          const t = _titleCase(myCity);
+          or.push({ 'liveLocation.city': { $in: [myCity, t, myCity.toUpperCase()] } }, { 'questionnaire.city': { $in: [myCity, t, myCity.toUpperCase()] } });
+        }
+        local = await User.find({ ...base, $or: or }).select(rankSelect).limit(300).lean();
+      } else if (myCity) {
+        const t = _titleCase(myCity);
+        local = await User.find({ ...base, $or: [{ 'liveLocation.city': { $in: [myCity, t, myCity.toUpperCase()] } }, { 'questionnaire.city': { $in: [myCity, t, myCity.toUpperCase()] } }] })
+          .select(rankSelect).limit(300).lean();
       }
-      const theirs = _interestSet(u);
-      let shared = 0;
-      const sharedItems = [];
-      for (const i of theirs) if (mine.has(i)) { shared++; if (sharedItems.length < 3) sharedItems.push(i); }
-      const sameMood = !!(myMTM && myMTM.mood && u._mtm && u._mtm.mood && u._mtm.mood === myMTM.mood);
-      const theirGender = _binaryGender(u.questionnaire && u.questionnaire.gender);
-      const city = _cityOf(u);
-      const distBand = nearby ? (distKm <= 1 ? 0 : distKm <= 3 ? 1 : 2) : (myCity && city === myCity ? 2 : 3);
-      const pc = Number(u.profileCompletion) || 0;
-      const locationLabel = nearby ? (distKm < 1 ? '< 1 km away' : `${distKm.toFixed(1)} km away`)
-        : (myCity && city === myCity ? 'In your city' : city ? `In ${_titleCase(city)}` : 'Across India');
-      return {
-        user: u, distKm: nearby ? distKm : null, isCompanion: u.userType === 'COMPANION', nearby, distBand, shared, sharedItems, sameMood,
-        preferred: !!(myGender && theirGender && myGender !== theirGender),
-        completeness: pc >= 80 ? 2 : pc >= 50 ? 1 : 0, locationLabel,
-      };
-    });
 
-    // A Companion is listed only when nearby by the rule above (never "In Mumbai").
-    const listed = candidates.filter(c => !c.isCompanion || c.nearby);
-    const nearbyCompanionCount = listed.filter(c => c.isCompanion).length;
-    const companionAvailability = {
-      status: !myFix ? 'LOCATION_UNAVAILABLE' : nearbyCompanionCount > 0 ? 'AVAILABLE' : 'NONE_NEARBY',
-      radiusKm: COMPANION_KM,
+      // Broader India: bounded, on the { status, userType, _id } index, newest first.
+      const localIds = local.map(u => u._id);
+      const broad = await User.find({ ...base, _id: { $nin: [...blockedIds, ...localIds.map(String)] }, userType: { $in: ['MEMBER', 'COMPANION'] } })
+        .select(rankSelect).sort({ _id: -1 }).limit(DISCOVERY_BROAD_LIMIT).lean();
+
+      // Only when NEARBY_COMPANION_RADIUS_KM is set wider than the member radius: the
+      // Companions between the two, which the local query above can't reach. A
+      // Companion-only query, so the member candidate set is exactly as before.
+      let extraCompanions = [];
+      if (myFix && COMPANION_KM > MAX_KM) {
+        const seenIds = [...blockedIds, ...localIds.map(String), ...broad.map(u => String(u._id))];
+        const dLat = COMPANION_KM / 111.0;
+        const dLng = COMPANION_KM / (111.0 * Math.cos(myFix.lat * Math.PI / 180));
+        extraCompanions = await User.find({ ...base, _id: { $nin: seenIds }, userType: 'COMPANION', $or: [
+          { 'liveLocation.coordinates': { $geoWithin: { $centerSphere: [[myFix.lng, myFix.lat], COMPANION_KM / 6378.1] } } },
+          { last_known_lat: { $gte: myFix.lat - dLat, $lte: myFix.lat + dLat }, last_known_lng: { $gte: myFix.lng - dLng, $lte: myFix.lng + dLng } },
+        ] }).select(rankSelect).limit(100).lean();
+      }
+
+      const all = [...local, ...broad, ...extraCompanions];
+      const moods = await MatchingTodayMood.find({ userId: { $in: all.map(u => u._id) }, visible: true, expiresAt: { $gt: now } }).lean();
+      const moodBy = new Map(moods.map(d => [d.userId.toString(), d]));
+
+      const mine = _interestSet(me);
+      const myGender = _binaryGender(me.questionnaire && me.questionnaire.gender);
+      const candidates = all.map(u => {
+        u._mtm = moodBy.get(u._id.toString()) || null;
+        let distKm, nearby;
+        if (u.userType === 'COMPANION') {
+          // The one Companion rule; a Companion that fails it is dropped below.
+          const near = companionProximity.evaluate(me, u, now);
+          nearby = near.ok;
+          distKm = near.ok ? near.distanceKm : null;
+        } else {
+          // Members: exactly as before.
+          const cLat = u.liveLocation?.lat ?? u.last_known_lat ?? null;
+          const cLng = u.liveLocation?.lng ?? u.last_known_lng ?? null;
+          distKm = (userLat !== null && userLng !== null && cLat !== null && cLng !== null) ? haversineKm(userLat, userLng, cLat, cLng) : null;
+          nearby = distKm !== null && distKm <= MAX_KM;
+        }
+        const theirs = _interestSet(u);
+        let shared = 0;
+        for (const i of theirs) if (mine.has(i)) shared++;
+        const sameMood = !!(myMTM && myMTM.mood && u._mtm && u._mtm.mood && u._mtm.mood === myMTM.mood);
+        const theirGender = _binaryGender(u.questionnaire && u.questionnaire.gender);
+        const city = _cityOf(u);
+        const distBand = nearby ? (distKm <= 1 ? 0 : distKm <= 3 ? 1 : 2) : (myCity && city === myCity ? 2 : 3);
+        const pc = Number(u.profileCompletion) || 0;
+        const locationLabel = nearby ? (distKm < 1 ? '< 1 km away' : `${distKm.toFixed(1)} km away`)
+          : (myCity && city === myCity ? 'In your city' : city ? `In ${_titleCase(city)}` : 'Across India');
+        return {
+          user: u, distKm: nearby ? distKm : null, isCompanion: u.userType === 'COMPANION', nearby, distBand, shared, sameMood,
+          preferred: !!(myGender && theirGender && myGender !== theirGender),
+          completeness: pc >= 80 ? 2 : pc >= 50 ? 1 : 0, locationLabel,
+        };
+      });
+
+      // A Companion is listed only when nearby by the rule above (never "In Mumbai").
+      const listed = candidates.filter(c => !c.isCompanion || c.nearby);
+      const nearbyCompanionCount = listed.filter(c => c.isCompanion).length;
+      const companionAvailability = {
+        status: !myFix ? 'LOCATION_UNAVAILABLE' : nearbyCompanionCount > 0 ? 'AVAILABLE' : 'NONE_NEARBY',
+        radiusKm: COMPANION_KM,
+      };
+
+      const ranked = rankDiscovery(listed, (seed ^ _hash(req.userId)) >>> 0);
+      return {
+        total: ranked.length,
+        companionAvailability,
+        items: ranked.map(c => [String(c.user._id), c.distKm, c.nearby ? 1 : 0, c.pool, c.shared, c.sameMood ? 1 : 0, c.locationLabel]),
+      };
     };
 
-    const ranked = rankDiscovery(listed, (seed ^ _hash(req.userId)) >>> 0);
+    // ── Ranking cache ───────────────────────────────────────────────────────
+    // One browsing session keeps its seed (Home refreshes and See all pages reuse it), so the
+    // ranked order is cached per viewer + seed for PEOPLE_DISCOVERY_CACHE_TTL_SECONDS (0 = off).
+    // The key also carries a hash of everything about the VIEWER the ranking depends on —
+    // location, city, interests, gender, today's mood and both block lists — so any change
+    // there (a new block included) is a miss. No coordinates are put in the key. Only ids and
+    // ranking facts are cached; each page re-reads profiles with the eligibility and block
+    // filter applied, so a suspended, photo-less or blocked person never comes from the cache.
     const start = (page - 1) * limit;
-    const slice = ranked.slice(start, start + limit);
-    const users = slice.map(c => {
-      const f = formatUser(c.user, me, MAX_KM, c.nearby ? c.distKm : 9999);
+    const ttl = discoveryCacheTtlSeconds();
+    let ranking;
+    if (ttl > 0 && start + limit <= DISCOVERY_CACHE_MAX_ITEMS) {
+      const q = me.questionnaire || {};
+      const ll = me.liveLocation || {};
+      const viewerStamp = _hash(JSON.stringify([
+        MAX_KM, COMPANION_KM, !!myFix, ll.lat, ll.lng, ll.city, ll.updatedAt, me.last_known_lat, me.last_known_lng,
+        me.last_location_updated_at, me.city, q.city, q.gender, q.hangoutPreferences, q.interests, q.hobbies,
+        me.interests, me.hobbies, myMTM ? [String(myMTM._id), myMTM.mood, myMTM.expiresAt] : null,
+        [...blockedIds].sort(),
+      ]));
+      ranking = await cacheService.getOrLoad('people-discovery', [String(req.userId), seed, viewerStamp], ttl, async () => {
+        const r = await computeRanking();
+        return { ...r, items: r.items.slice(0, DISCOVERY_CACHE_MAX_ITEMS) };
+      });
+    } else {
+      ranking = await computeRanking();
+    }
+
+    // ── Page profiles ───────────────────────────────────────────────────────
+    // The full card fields and today's moods for just this page, with the same eligibility
+    // filter (ACTIVE, has a photo, not blocked either way). Someone who no longer qualifies
+    // is dropped from the page rather than shown.
+    const slice = ranking.items.slice(start, start + limit);
+    const pageIds = slice.map(r => r[0]);
+    const [pageDocs, pageMoods] = pageIds.length
+      ? await Promise.all([
+        User.find({ ...base, _id: { $in: pageIds, $nin: blockedIds } }).select(select).lean(),
+        MatchingTodayMood.find({ userId: { $in: pageIds }, visible: true, expiresAt: { $gt: now } }).lean(),
+      ])
+      : [[], []];
+    const fullById = new Map(pageDocs.map(u => [String(u._id), u]));
+    const pageMoodBy = new Map(pageMoods.map(d => [String(d.userId), d]));
+
+    const users = [];
+    for (const [id, distKm, nearby, pool, shared, sameMood, locationLabel] of slice) {
+      const u = fullById.get(id);
+      if (!u) continue;
+      u._mtm = pageMoodBy.get(id) || null;
+      const f = formatUser(u, me, MAX_KM, nearby ? distKm : 9999);
       // Distance only for people genuinely inside the radius; everyone else a coarse label.
-      f.distanceLabel = c.locationLabel;
-      f.conversationInterests = c.user.questionnaire?.conversationInterests || null;
-      f.discoveryPool = c.pool;
-      f.isNearby = c.nearby;
-      f.locationLabel = c.locationLabel;
-      f.sharedInterestCount = c.shared;          // distinct, verified on both profiles
-      f.sameMood = c.sameMood;
-      return f;
-    });
-    res.json({ success: true, users, page, limit, seed, total: ranked.length, hasMore: start + limit < ranked.length, companionAvailability });
+      f.distanceLabel = locationLabel;
+      f.conversationInterests = u.questionnaire?.conversationInterests || null;
+      f.discoveryPool = pool;
+      f.isNearby = !!nearby;
+      f.locationLabel = locationLabel;
+      f.sharedInterestCount = shared;          // distinct, verified on both profiles
+      f.sameMood = !!sameMood;
+      users.push(f);
+    }
+    res.json({ success: true, users, page, limit, seed, total: ranking.total, hasMore: start + limit < ranking.total, companionAvailability: ranking.companionAvailability });
   } catch (err) {
     console.error('[PeopleDiscovery]', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
