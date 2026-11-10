@@ -759,6 +759,9 @@ const liveLocationMatchmakingRoutes = require('./routes/liveLocationMatchmaking'
 // ✅ App Links routes (must be before /api)
 const appLinksRoutes = require('./routes/appLinksRoutes');
 app.use('/', appLinksRoutes);
+// Group invitations: the public https://humrah.in/join/{token} page and its share image
+// (humrah.in rewrites /join/* here, like /post/*).
+app.use('/', require('./routes/joinPageRoutes'));
 
 // ✅ Public App Configuration (must be before authenticated routes)
 app.use('/api/app-config', require('./routes/appConfig.route'));
@@ -766,6 +769,9 @@ app.use('/api/app-config', require('./routes/appConfig.route'));
 // read inside the route). Must stay ABOVE the app.use('/api', authenticate, …) catch-alls below,
 // or a signed-out app — or one with an expired session — would get a 401 instead of its answer.
 app.use('/api/app-updates', require('./routes/appUpdates'));
+// Group invitations (Rooms, Sports Plans, Movie Hangouts). Above the /api catch-alls: the
+// preview is public; every other route authenticates itself (routes/inviteRoutes.js).
+app.use('/api/invites', require('./routes/inviteRoutes'));
 
 // Health check must stay public and before broad authenticated /api routes.
 // ── Public routes ──────────────────────────────────────────────────────────────

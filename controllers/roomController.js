@@ -12,6 +12,7 @@ const { parseDiscoveryParams, buildSearchFilter, matchesSearch, paginate } = req
 const { CREATION_SOURCE_CURATED, CURATED_ROOMS } = require('../utils/curatedRoomConfig');
 const { validateRoomCreateInput } = require('../utils/roomCreateValidation');
 const { emitMembershipChanged, leaveSocketChannel } = require('../services/roomMembershipService');
+const { joinRoomAsUser } = require('../services/roomJoinService');
 const { evaluateRoom } = require('../services/roomEngagementService');
 
 // Safe, non-blocking analytics hook
@@ -515,125 +516,14 @@ exports.joinRoom = async (req, res) => {
     return res.status(503).json({ success: false, message: 'Humrah Rooms are currently undergoing maintenance.' });
   }
 
-  const { roomId } = req.params;
-  const userId = req.userId;
-  const lockKey = `lock:room_join:${roomId}`;
-  let lockAcquired = false;
-
+  // Group invitations: the join itself lives in services/roomJoinService.js (moved there
+  // unchanged) so an invitation link reuses exactly these rules. Same status and body.
   try {
-    const user = await User.findById(userId).select('status blockedUsers');
-    if (!user || user.status !== 'ACTIVE') {
-      return res.status(403).json({ success: false, message: 'Account not eligible to join' });
-    }
-
-    lockAcquired = await redisService.acquireLock(lockKey, 10);
-    if (!lockAcquired) {
-      return res.status(429).json({ success: false, message: 'Room is currently busy, please try again.' });
-    }
-
-    const room = await HumrahRoom.findById(roomId);
-    if (!room) {
-      return res.status(404).json({ success: false, message: 'Room not found' });
-    }
-
-    if (['FULL', 'INACTIVE', 'CLOSED'].includes(room.status)) {
-      return res.status(400).json({ success: false, message: `Cannot join room. Status is ${room.status}` });
-    }
-
-    const existingMember = await RoomMember.findOne({ roomId, userId });
-    if (existingMember && existingMember.status === 'JOINED') {
-      return res.status(400).json({ success: false, message: 'Already a member of this room' });
-    }
-    // Phase 2.3: a removed member cannot re-add themselves (KICKED used to flip back to
-    // JOINED below). Same generic reply as a block, so nothing is revealed.
-    if (existingMember && existingMember.status === 'KICKED') {
-      return res.status(403).json({ success: false, message: "You can't join this Room right now." });
-    }
-    // Phase 2.3: a PRIVATE Room is joinable only by someone invited to it. Answered as
-    // "not found" so a guessed id does not confirm that the Room exists.
-    if (room.discoveryMode === 'PRIVATE' && !(existingMember && existingMember.status === 'INVITED')) {
-      return res.status(404).json({ success: false, message: 'Room not found' });
-    }
-
-    // Current JOINED members (one query — also gives us the authoritative count).
-    const joinedMembers = await RoomMember.find({ roomId, status: 'JOINED' }).select('userId');
-    const currentMemberCount = joinedMembers.length;
-
-    // ── Block-pair check ──────────────────────────────────────────────────────
-    // Reject if the joining user has blocked, OR is blocked by, the room creator
-    // or any current JOINED member. Response is deliberately generic — it never
-    // reveals which user, or that a block exists.
-    // A SYSTEM-generated Room has no creator (HumrahRoom.createdBy is only required
-    // when creationSource === 'USER'). String(null) === "null" would be cast as an
-    // ObjectId below and throw, so a creator only joins the set when one exists.
-    const counterpartIds = new Set(room.createdBy ? [String(room.createdBy)] : []);
-    joinedMembers.forEach(m => counterpartIds.add(String(m.userId)));
-    counterpartIds.delete(String(userId));
-    if (counterpartIds.size > 0) {
-      const ids = Array.from(counterpartIds);
-      const iBlockedThem = (user.blockedUsers || []).some(b => counterpartIds.has(String(b)));
-      let theyBlockedMe = false;
-      if (!iBlockedThem) {
-        theyBlockedMe = !!(await User.exists({ _id: { $in: ids }, blockedUsers: userId }));
-      }
-      if (iBlockedThem || theyBlockedMe) {
-        return res.status(403).json({ success: false, message: "You can't join this Room right now." });
-      }
-    }
-
-    if (currentMemberCount >= room.capacity) {
-      room.status = 'FULL';
-      room.memberCount = currentMemberCount;
-      await room.save();
-      logRoomEvent('ROOM_BECAME_FULL', { roomId });
-      return res.status(400).json({ success: false, message: 'Room is at full capacity' });
-    }
-
-    if (existingMember) {
-      existingMember.status = 'JOINED';
-      existingMember.joinedAt = new Date();
-      await existingMember.save();
-    } else {
-      await RoomMember.create({
-        roomId,
-        userId,
-        role: 'PARTICIPANT',
-        status: 'JOINED'
-      });
-    }
-
-    const newMemberCount = currentMemberCount + 1;
-    room.memberCount = newMemberCount; // maintained under the room lock
-    if (newMemberCount >= room.capacity) {
-      room.status = 'FULL';
-      logRoomEvent('ROOM_BECAME_FULL', { roomId });
-    } else if (room.status === 'SUGGESTED' && newMemberCount >= 2) {
-      room.status = 'ACTIVE';
-      logRoomEvent('ROOM_BECAME_ACTIVE', { roomId });
-    }
-    await room.save();
-
-    logRoomEvent('ROOM_JOINED', { roomId, userId });
-    emitMembershipChanged(req.app.get('io'), room, 'JOINED');
-
-    return res.status(200).json({
-      success: true,
-      message: 'Successfully joined room',
-      room: {
-        roomId: room._id,
-        topic: room.topic,
-        status: room.status,
-        memberCount: newMemberCount
-      }
-    });
-
+    const { status, body } = await joinRoomAsUser({ userId: req.userId, roomId: req.params.roomId, io: req.app.get('io') });
+    return res.status(status).json(body);
   } catch (error) {
     console.error('[joinRoom error]', error);
     return res.status(500).json({ success: false, message: 'Server error joining room' });
-  } finally {
-    if (lockAcquired) {
-      await redisService.releaseLock(lockKey);
-    }
   }
 };
 
