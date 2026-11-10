@@ -13,7 +13,7 @@ const invites = require('../services/invitations/invitationService');
 const { isWellFormed } = require('../services/invitations/inviteToken');
 const { renderLandingPage } = require('../services/invitations/inviteLandingPage');
 const { renderInviteCard, cachedCard } = require('../services/invitations/inviteImage');
-const { summaryLine } = require('../services/invitations/inviteLandingPage');
+const { summaryLine, shouldAutoOpen, joinHref } = require('../services/invitations/inviteLandingPage');
 const { DEFAULT_IMAGE_URL } = require('../utils/roomTopicConfig');
 
 const router = express.Router();
@@ -51,6 +51,17 @@ router.get('/join/:token', pageLimiter, async (req, res) => {
     preview = { success: false, state: 'ERROR', message: 'Something went wrong. Please try again.' };
     status = 503;
   }
+  // A person tapping the link in an Android browser goes straight to the app (or to the
+  // Play Store when it is not installed): a redirect inside the navigation they started,
+  // which Chrome allows for intent:// URLs. Preview bots, WebViews and other platforms get
+  // the page. Only for links that still lead somewhere; dead links show their explanation.
+  if (preview && preview.success && shouldAutoOpen(req.headers['user-agent'])) {
+    return res.status(302)
+      .set('Location', joinHref(token, true))
+      .set('Cache-Control', 'no-store')
+      .set('Vary', 'User-Agent')
+      .end();
+  }
   const html = renderLandingPage({
     preview,
     token,
@@ -60,7 +71,9 @@ router.get('/join/:token', pageLimiter, async (req, res) => {
     isAndroid: isAndroidUa(req),
   });
   res.status(status)
-    .set('Cache-Control', 'public, max-age=60, s-maxage=60')
+    // The answer depends on the User-Agent (redirect vs page), and a shared cache such as the
+    // website's edge may ignore Vary, so nothing between here and the client may store it.
+    .set('Cache-Control', 'no-store')
     .set('Vary', 'User-Agent')
     .type('html')
     .send(html);

@@ -13,6 +13,25 @@
 
 const PACKAGE = 'in.humrah.app';
 const PLAY_URL = `https://play.google.com/store/apps/details?id=${PACKAGE}`;
+// Where an Android browser goes when Humrah is not installed (the referrer is for Play install stats).
+const PLAY_INSTALL_URL = `${PLAY_URL}&referrer=${encodeURIComponent('utm_source=humrah_invite&utm_medium=invite_link')}`;
+
+// Link-preview fetchers and scripted clients. They must always get the HTML with the Open
+// Graph tags, never the app redirect.
+const PREVIEW_BOT = /bot|crawl|spider|preview|externalhit|facebookcatalog|whatsapp|telegram|slack|discord|twitter|linkedin|pinterest|skype|embedly|vkshare|snapchat|viber|headless|lighthouse|curl|wget|python|okhttp|axios|node-fetch|go-http|java\//i;
+// In-app browsers / WebViews (Instagram, Facebook, LINE, Android WebView): intent:// is unreliable
+// there, so they get the page and its buttons instead.
+const IN_APP_BROWSER = /; wv\)|FBAN|FBAV|Instagram|Line\//i;
+
+/** A person in an Android browser: send them straight to the app (or the Play Store). */
+function shouldAutoOpen(userAgent) {
+  const ua = String(userAgent || '');
+  return /android/i.test(ua) && !PREVIEW_BOT.test(ua) && !IN_APP_BROWSER.test(ua);
+}
+
+function isPreviewBot(userAgent) {
+  return PREVIEW_BOT.test(String(userAgent || ''));
+}
 
 function esc(s) {
   return String(s == null ? '' : s)
@@ -54,9 +73,13 @@ function metaFor(preview, { token, linkUrl, imageUrl }) {
   return { title, description, linkUrl, imageUrl, token };
 }
 
+/**
+ * Android: an intent:// URL. Chrome-family browsers open the app's invitation screen when
+ * Humrah is installed (it still asks before joining) and go to the Play Store when it is not.
+ */
 function joinHref(token, isAndroid) {
   if (!isAndroid) return PLAY_URL;
-  const fallback = encodeURIComponent(PLAY_URL);
+  const fallback = encodeURIComponent(PLAY_INSTALL_URL);
   return `intent://join/${token}#Intent;scheme=humrah;package=${PACKAGE};S.browser_fallback_url=${fallback};end`;
 }
 
@@ -65,7 +88,7 @@ const STYLE = `
 background:#0b0f19;color:#f3f4f6;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
 .card{width:100%;max-width:440px;background:#111827;border:1px solid #1f2937;border-radius:20px;padding:20px;box-shadow:0 12px 32px rgba(0,0,0,.45)}
 .brand{font-weight:800;font-size:22px;color:#c4b5fd;letter-spacing:.5px;margin:0 0 14px}
-.hero{display:block;width:100%;aspect-ratio:1200/630;object-fit:cover;border-radius:14px;background:#1f2937}
+.hero{display:block;width:100%;height:auto;aspect-ratio:1200/630;object-fit:cover;border-radius:14px;background:#1f2937}
 .inviter{margin:16px 0 4px;color:#d8b4fe;font-size:15px}
 h1{margin:0 0 8px;font-size:22px;line-height:1.3}
 .meta{margin:0 0 10px;color:#9ca3af;font-size:14px;line-height:1.5}
@@ -141,4 +164,4 @@ ${usable ? `<a class="btn primary" href="${esc(joinHref(token, isAndroid))}">Joi
 </html>`;
 }
 
-module.exports = { renderLandingPage, metaFor, joinHref, esc, PLAY_URL, formatWhen, summaryLine };
+module.exports = { renderLandingPage, metaFor, joinHref, shouldAutoOpen, isPreviewBot, esc, PLAY_URL, PLAY_INSTALL_URL, formatWhen, summaryLine };
