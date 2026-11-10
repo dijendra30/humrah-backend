@@ -108,6 +108,10 @@ router.put('/me', authenticate, async (req, res) => {
     Object.keys(updates).forEach(key => {
       if (allowedUpdates.includes(key)) filteredUpdates[key] = updates[key];
     });
+    // Phase 4.3: identity/consent/completion bookkeeping is not editable here (see utils/protectedProfileFields.js).
+    if (filteredUpdates.questionnaire && typeof filteredUpdates.questionnaire === 'object') {
+      filteredUpdates.questionnaire = require('../utils/protectedProfileFields').withoutProtectedKeys(filteredUpdates.questionnaire).clean;
+    }
 
     // Profile photo through this route: only images in Humrah's own storage, and a photo
     // that actually changes loses the previous photo-verification approval - the same rule

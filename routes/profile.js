@@ -393,7 +393,8 @@ router.put('/me', auth, async (req, res) => {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
 
-    const updates = req.body.questionnaire || {};
+    // Phase 4.3: identity/consent/completion bookkeeping is not editable here (see utils/protectedProfileFields.js).
+    const updates = require('../utils/protectedProfileFields').withoutProtectedKeys(req.body.questionnaire || {}).clean || {};
 
     // ── STEP A: Run moderation pipeline on text fields ─────────
     // Isolate only the text fields that need moderation from the update payload

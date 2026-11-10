@@ -11,6 +11,11 @@ const BookingMatch      = require('../models/BookingMatch');
 const RandomBookingChat = require('../models/RandomBookingChat');
 const Message           = require('../models/Message');
 const User              = require('../models/User');
+// Phase 4.3: other people's profiles are populated with the PUBLIC questionnaire only (no
+// date of birth, income, lifestyle answers…), and other people's bookings never carry the exact
+// GPS point they were created from. See utils/publicProfile.js.
+const { publicQuestionnaireSelect, withoutExactLocation } = require('../utils/publicProfile');
+const PUBLIC_PERSON = `firstName lastName profilePhoto verified photoVerificationStatus ${publicQuestionnaireSelect()}`;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function toRad(v) { return v * Math.PI / 180; }
@@ -427,9 +432,9 @@ router.get('/eligible', authenticate, async (req, res) => {
       { $limit: 20 }
     ]);
 
-    await RandomBooking.populate(eligible, { path: 'initiatorId', select: 'firstName lastName profilePhoto questionnaire verified photoVerificationStatus' });
+    await RandomBooking.populate(eligible, { path: 'initiatorId', select: PUBLIC_PERSON });
 
-    return res.json({ success: true, bookings: eligible });
+    return res.json({ success: true, bookings: eligible.map(withoutExactLocation) });
   } catch (err) {
     return res.status(500).json({ success: false, message: 'Failed to load bookings.' });
   }
@@ -473,7 +478,7 @@ router.get('/nearby', authenticate, async (req, res) => {
       initiatorId:    { $ne: userObjId },
       expiresAt:      { $gt: now },
       'candidateQueue.userId': userObjId,
-    }).populate('initiatorId', 'firstName lastName profilePhoto verified questionnaire photoVerificationStatus').lean();
+    }).populate('initiatorId', PUBLIC_PERSON).lean();
 
     const myReserved = reserved.filter(b => {
       const cur = b.candidateQueue?.[b.currentCandidateIndex];
@@ -498,7 +503,7 @@ router.get('/nearby', authenticate, async (req, res) => {
       },
       { $limit: 50 }
     ]);
-    await RandomBooking.populate(general, { path: 'initiatorId', select: 'firstName lastName profilePhoto verified questionnaire photoVerificationStatus' });
+    await RandomBooking.populate(general, { path: 'initiatorId', select: PUBLIC_PERSON });
 
     // Merge, deduplicate
     const seen = new Set();
@@ -582,7 +587,7 @@ router.get('/chats', authenticate, async (req, res) => {
       isDeleted: false,
       expiresAt: { $gt: new Date() },
     })
-      .populate({ path: 'participants.userId', select: 'firstName lastName profilePhoto verified questionnaire' })
+      .populate({ path: 'participants.userId', select: PUBLIC_PERSON })
       .populate({ path: 'bookingId', select: 'city activityType activityCategory meetupEnergy locationCategory startTime endTime status blurProfileUntilAccepted' })
       .sort({ lastMessageAt: -1 });
     return res.json({ success: true, chats });
@@ -596,7 +601,7 @@ router.get('/chats/:chatId/messages', authenticate, async (req, res) => {
   try {
     const chat = await RandomBookingChat.findById(req.params.chatId)
       .populate('bookingId')
-      .populate({ path: 'participants.userId', select: 'firstName lastName profilePhoto verified questionnaire' });
+      .populate({ path: 'participants.userId', select: PUBLIC_PERSON });
     if (!chat) return res.status(404).json({ success: false, message: 'Chat not found.' });
 
     const uid = req.userId.toString();
@@ -628,7 +633,14 @@ router.get('/chats/:chatId/messages', authenticate, async (req, res) => {
       callLogData: msg.callLogData ? { event: msg.callLogData.event, durationSeconds: msg.callLogData.durationSeconds, callId: msg.callLogData.callId } : null,
     }));
 
-    return res.json({ success: true, chat, messages: transformed, expiresAt: chat.expiresAt, isExpired: chat.isExpired() });
+    // Phase 4.3: the populated booking carries the creator's exact GPS point; only the creator
+    // gets it back. Everything else in the chat payload is unchanged.
+    const chatOut = chat.toObject();
+    const booking = chatOut.bookingId;
+    if (booking && typeof booking === 'object' && String(booking.initiatorId) !== uid) {
+      chatOut.bookingId = withoutExactLocation(booking);
+    }
+    return res.json({ success: true, chat: chatOut, messages: transformed, expiresAt: chat.expiresAt, isExpired: chat.isExpired() });
   } catch (err) {
     return res.status(500).json({ success: false, message: 'Failed to load messages.' });
   }
@@ -867,7 +879,7 @@ router.get('/usage', authenticate, async (req, res) => {
 router.get('/:bookingId', authenticate, async (req, res) => {
   try {
     const booking = await RandomBooking.findById(req.params.bookingId)
-      .populate('initiatorId', 'firstName lastName profilePhoto verified questionnaire').lean();
+      .populate('initiatorId', PUBLIC_PERSON).lean();
     if (!booking) return res.status(404).json({ success: false, message: 'Booking not found.' });
 
     const callerId    = req.userId.toString();

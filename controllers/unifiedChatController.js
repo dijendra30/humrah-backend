@@ -4,6 +4,9 @@ const Chat = require('../models/Chat');
 const RandomBookingChat = require('../models/RandomBookingChat');
 const MoodChat = require('../models/MoodChat');
 const Message = require('../models/Message');
+// Phase 4.3: chat partners are populated with the PUBLIC questionnaire only (utils/publicProfile.js).
+const { publicQuestionnaireSelect } = require('../utils/publicProfile');
+const PARTNER_SELECT = `firstName lastName profilePhoto verified ${publicQuestionnaireSelect()}`;
 
 const getUnifiedChats = async (req, res) => {
   try {
@@ -64,7 +67,7 @@ async function fetchStandardChats(userId) {
   const chats = await Chat.find({ 'participants.userId': userId })
     .populate({
       path: 'participants.userId',
-      select: 'firstName lastName profilePhoto verified questionnaire'
+      select: PARTNER_SELECT
     })
     .lean();
 
@@ -146,7 +149,7 @@ async function fetchRandomBookingChats(userId) {
   const chats = await RandomBookingChat.find({ 'participants.userId': userId, isDeleted: false })
     .populate({
       path: 'participants.userId',
-      select: 'firstName lastName profilePhoto verified questionnaire'
+      select: PARTNER_SELECT
     })
     .populate('bookingId')
     .lean();
@@ -203,7 +206,7 @@ async function fetchMoodChats(userId) {
   })
     .populate({
       path: 'users',
-      select: 'firstName lastName profilePhoto verified questionnaire'
+      select: PARTNER_SELECT
     })
     .lean();
 

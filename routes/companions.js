@@ -7,6 +7,9 @@ const { auth, authenticate } = require('../middleware/auth');
 const User             = require('../models/User');
 const MatchingTodayMood = require('../models/MatchingTodayMood');
 const admin            = require('firebase-admin');
+// Phase 4.3: Companion lists return the PUBLIC questionnaire only (utils/publicProfile.js).
+const { publicQuestionnaireSelect } = require('../utils/publicProfile');
+const COMPANION_LIST_SELECT = `firstName lastName profilePhoto ${publicQuestionnaireSelect()} liveLocation.city liveLocation.state ratingStats verified isPremium userType`;
 
 // =============================================================================
 // HELPERS
@@ -315,7 +318,7 @@ router.get('/recommended', auth, async (req, res) => {
       sortObj = null; // $near implicitly sorts by distance
     }
     let query = User.find(f)
-      .select('firstName lastName profilePhoto questionnaire liveLocation.city liveLocation.state ratingStats verified isPremium userType') // Phase 4.2: other people's exact coordinates never leave the server
+      .select(COMPANION_LIST_SELECT) // Phase 4.2/4.3: no exact coordinates, no private questionnaire answers
       .limit(10);
       
     if (sortObj) query = query.sort(sortObj);
@@ -350,7 +353,7 @@ router.get('/', auth, async (req, res) => {
     }
 
     let query = User.find(f)
-      .select('firstName lastName profilePhoto questionnaire liveLocation.city liveLocation.state ratingStats verified isPremium userType') // Phase 4.2: other people's exact coordinates never leave the server
+      .select(COMPANION_LIST_SELECT) // Phase 4.2/4.3: no exact coordinates, no private questionnaire answers
       .limit(parseInt(limit));
       
     if (sortObj) query = query.sort(sortObj);

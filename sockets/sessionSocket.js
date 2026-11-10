@@ -35,7 +35,18 @@ function initSessionSocket(io) {
     const { city } = socket.data.user;
     socket.join(`city:${city}`);
 
-    socket.on("join_session_room",  ({ session_id }) => { if (session_id) socket.join(`session:${session_id}`); });
+    // Phase 4.3 security: the session room carries the session's chat (new_message), so only the
+    // host or a joined player may listen — the same rule as GET /api/gaming/sessions/:id/chat.
+    socket.on("join_session_room", async ({ session_id } = {}) => {
+      try {
+        if (!session_id || !require("mongoose").isValidObjectId(session_id)) return;
+        const uid = String(socket.data.user._id || "");
+        const GamingSession = require("../models/GamingSession");
+        const member = await GamingSession.exists({ _id: session_id, $or: [{ creatorId: uid }, { playersJoined: uid }] });
+        if (!member) return console.warn(`[GAMING_SOCKET] join_session_room DENIED userId=${uid} session=${session_id}`);
+        socket.join(`session:${session_id}`);
+      } catch (e) { console.error("[GAMING_SOCKET] join_session_room error:", e.message); }
+    });
     socket.on("leave_session_room", ({ session_id }) => { if (session_id) socket.leave(`session:${session_id}`); });
 
     socket.on("ping_session", async ({ session_id }, cb) => {

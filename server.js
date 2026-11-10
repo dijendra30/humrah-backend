@@ -238,6 +238,31 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Phase 4.3 security: relayed chat events (typing, call signalling, receipts) only reach a
+  // chat this socket is a member of. Before, a client could name ANY room — another chat, a
+  // 'user:<id>' room or 'founder-admins' — and push events into it. Membership is the same rule
+  // join-chat applies; a successful check is remembered for this socket only.
+  const memberChats = new Set();
+  async function isChatMember(chatId) {
+    if (typeof chatId !== 'string' || !mongoose.isValidObjectId(chatId)) return false;
+    if (memberChats.has(chatId)) return true;
+    const isAdmin = socket.userRole === 'ADMIN' || socket.userRole === 'SUPER_ADMIN';
+    const { Chat, RandomBookingChat, MoodChat } = mongoose.models;
+    let ok = false;
+    const chat = Chat ? await Chat.findById(chatId).select('participants assignedAdminId').lean() : null;
+    if (chat) {
+      ok = isAdmin || (chat.participants || []).some(p => p.userId && p.userId.toString() === userId) ||
+        !!(chat.assignedAdminId && chat.assignedAdminId.toString() === userId);
+    } else {
+      if (RandomBookingChat) ok = !!(await RandomBookingChat.exists({ _id: chatId, 'participants.userId': userId }));
+      if (!ok && MoodChat) ok = !!(await MoodChat.exists({ _id: chatId, users: userId }));
+    }
+    if (ok) memberChats.add(chatId);
+    return ok;
+  }
+  // Relays need the socket to be IN the chat room (join-chat admits members only).
+  const inJoinedChat = (chatId) => typeof chatId === 'string' && mongoose.isValidObjectId(chatId) && socket.rooms.has(chatId);
+
   socket.on('join-chat', async (data) => {
     try {
       const { chatId } = data;
@@ -326,6 +351,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('leave-chat', (chatId) => {
+    if (!inJoinedChat(chatId)) return; // only a chat this socket joined (never 'user:<id>' etc.)
     socket.leave(chatId);
     if (chatUsers.has(chatId)) {
       chatUsers.get(chatId).delete(socket.id);
@@ -336,9 +362,14 @@ io.on('connection', (socket) => {
 
   socket.on('message-delivered', async (data) => {
     try {
-      const { messageId, chatId } = data;
+      const { messageId } = data || {};
+      if (!mongoose.isValidObjectId(messageId)) return;
       const Message = mongoose.model('Message');
       const message = await Message.findById(messageId);
+      // Only the RECIPIENT — a member of the message's own chat, not its sender — may mark it,
+      // and the receipt goes to that chat (never a room the client names).
+      const chatId = message && message.chatId ? message.chatId.toString() : null;
+      if (!chatId || String(message.senderId) === userId || !(await isChatMember(chatId))) return;
       if (message && message.deliveryStatus === 'SENT') {
         message.deliveryStatus = 'DELIVERED';
         message.deliveredAt    = new Date();
@@ -350,9 +381,12 @@ io.on('connection', (socket) => {
 
   socket.on('message-read', async (data) => {
     try {
-      const { messageId, chatId } = data;
+      const { messageId } = data || {};
+      if (!mongoose.isValidObjectId(messageId)) return;
       const Message = mongoose.model('Message');
       const message = await Message.findById(messageId);
+      const chatId = message && message.chatId ? message.chatId.toString() : null;
+      if (!chatId || String(message.senderId) === userId || !(await isChatMember(chatId))) return;
       if (message && message.deliveryStatus !== 'READ') {
         message.deliveryStatus = 'READ';
         message.readAt         = new Date();
@@ -364,8 +398,8 @@ io.on('connection', (socket) => {
 
   const typingTimeouts = new Map();
 
-  socket.on('typing-start', ({ chatId }) => {
-    if (!chatId) return;
+  socket.on('typing-start', ({ chatId } = {}) => {
+    if (!inJoinedChat(chatId)) return;
     socket.to(chatId).emit('user-typing', { userId, userName, isTyping: true });
     const key = `${socket.id}:${chatId}`;
     if (typingTimeouts.has(key)) clearTimeout(typingTimeouts.get(key));
@@ -375,8 +409,8 @@ io.on('connection', (socket) => {
     }, 6000));
   });
 
-  socket.on('typing-stop', ({ chatId }) => {
-    if (!chatId) return;
+  socket.on('typing-stop', ({ chatId } = {}) => {
+    if (!inJoinedChat(chatId)) return;
     socket.to(chatId).emit('user-typing', { userId, userName, isTyping: false });
     const key = `${socket.id}:${chatId}`;
     if (typingTimeouts.has(key)) { clearTimeout(typingTimeouts.get(key)); typingTimeouts.delete(key); }
@@ -384,13 +418,18 @@ io.on('connection', (socket) => {
 
   socket.on('initiate-call', async (data) => {
     try {
-      const { chatId, callerId, calleeId, isAudioOnly } = data;
+      const { chatId, isAudioOnly } = data || {};
+      if (!inJoinedChat(chatId)) return;
+      // The caller is always this socket's own user — never an id the client names.
+      const callerId = userId;
       const callerInfo = userInfo.get(callerId) || { name: userName, photo: socket.userPhoto };
       socket.to(chatId).emit('incoming-call', { chatId, callerId, callerName: callerInfo.name, callerPhoto: callerInfo.photo, isAudioOnly, timestamp: new Date().toISOString() });
     } catch (error) { console.error('Call initiation error:', error); }
   });
 
-  socket.on('accept-call', ({ chatId, calleeId }) => {
+  socket.on('accept-call', ({ chatId } = {}) => {
+    if (!inJoinedChat(chatId)) return;
+    const calleeId = userId;
     const calleeInfo = userInfo.get(calleeId) || { name: userName, photo: socket.userPhoto };
     socket.to(chatId).emit('call-accepted', { calleeId, calleeName: calleeInfo.name, calleePhoto: calleeInfo.photo, timestamp: new Date().toISOString() });
   });
@@ -408,17 +447,20 @@ io.on('connection', (socket) => {
     // voice-call-accepted to the caller via io.to('user:callerId').
   });
 
-  socket.on('reject-call', ({ chatId, calleeId }) => {
+  socket.on('reject-call', ({ chatId } = {}) => {
+    if (!inJoinedChat(chatId)) return;
+    const calleeId = userId;
     socket.to(chatId).emit('call-rejected', { calleeId, timestamp: new Date().toISOString() });
   });
 
-  socket.on('end-call', ({ chatId }) => {
+  socket.on('end-call', ({ chatId } = {}) => {
+    if (!inJoinedChat(chatId)) return;
     socket.to(chatId).emit('call-ended', { endedBy: userId, timestamp: new Date().toISOString() });
   });
 
-  socket.on('webrtc-offer',         ({ chatId, offer })     => socket.to(chatId).emit('webrtc-offer',         { from: userId, offer }));
-  socket.on('webrtc-answer',        ({ chatId, answer })    => socket.to(chatId).emit('webrtc-answer',        { from: userId, answer }));
-  socket.on('webrtc-ice-candidate', ({ chatId, candidate }) => socket.to(chatId).emit('webrtc-ice-candidate', { from: userId, candidate }));
+  socket.on('webrtc-offer',         ({ chatId, offer } = {})     => { if (inJoinedChat(chatId)) socket.to(chatId).emit('webrtc-offer',         { from: userId, offer }); });
+  socket.on('webrtc-answer',        ({ chatId, answer } = {})    => { if (inJoinedChat(chatId)) socket.to(chatId).emit('webrtc-answer',        { from: userId, answer }); });
+  socket.on('webrtc-ice-candidate', ({ chatId, candidate } = {}) => { if (inJoinedChat(chatId)) socket.to(chatId).emit('webrtc-ice-candidate', { from: userId, candidate }); });
 
   // ── Movie Session Chat rooms (Movie Hangout v1) ────────────────────────────────
   // Room format: movie:{sessionId}
@@ -455,21 +497,22 @@ io.on('connection', (socket) => {
     });
   });
 
-  socket.on('leaveMovieRoom', ({ sessionId }) => {
-    if (!sessionId) return;
+  socket.on('leaveMovieRoom', ({ sessionId } = {}) => {
+    if (!sessionId || !socket.rooms.has(`movie:${sessionId}`)) return;
     const room = `movie:${sessionId}`;
     socket.leave(room);
     if (socket.movieSessionId === sessionId) socket.movieSessionId = null;
     socket.to(room).emit('participantLeft', { userId, userName, timestamp: new Date().toISOString() });
   });
 
-  socket.on('typing', ({ sessionId }) => {
-    if (!sessionId) return;
+  // Movie typing only from a socket admitted to that room by joinMovieRoom (members only).
+  socket.on('typing', ({ sessionId } = {}) => {
+    if (!sessionId || !socket.rooms.has(`movie:${sessionId}`)) return;
     socket.to(`movie:${sessionId}`).emit('typing', { userId, userName });
   });
 
-  socket.on('stopTyping', ({ sessionId }) => {
-    if (!sessionId) return;
+  socket.on('stopTyping', ({ sessionId } = {}) => {
+    if (!sessionId || !socket.rooms.has(`movie:${sessionId}`)) return;
     socket.to(`movie:${sessionId}`).emit('stopTyping', { userId, userName });
   });
 
